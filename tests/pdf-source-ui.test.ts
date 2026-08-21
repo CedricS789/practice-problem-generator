@@ -14,7 +14,7 @@ test("PDF generation is explicit through commands, active-source UI, or file men
   assert.match(main, /id: "generate-from-current-pdf"/u);
   assert.match(main, /name: "Generate from current PDF"/u);
   assert.match(main, /workspace\.on\("file-menu"/u);
-  assert.match(main, /Grounded Problems: Generate from PDF/u);
+  assert.match(main, /Practice Problem Generator: Generate from PDF/u);
   assert.match(view, /Use active PDF/u);
   assert.doesNotMatch(main, /resolveLinks|linked PDFs|scan.*PDF/iu);
 });
@@ -57,5 +57,5 @@ test("PDF extraction stays desktop-only while saved banks remain mobile-capable"
   assert.match(main, /PDF source extraction is available in Obsidian desktop only/u);
   assert.match(main, /Platform\.isMobileApp/u);
   assert.match(view, /PDF pages/u);
-  assert.match(main, /Saved Grounded Problems bank/u);
+  assert.match(main, /Saved Practice Problem Generator bank/u);
 });

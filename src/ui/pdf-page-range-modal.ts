@@ -54,7 +54,7 @@ class PdfPageRangeModal extends Modal {
     });
     this.contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Text extraction runs locally from a temporary copy. Grounded Problems never modifies the PDF. You will inspect the exact provider payload before generation.",
+      text: "Text extraction runs locally from a temporary copy. Practice Problem Generator never modifies the PDF. You will inspect the exact provider payload before generation.",
     });
 
     new Setting(this.contentEl)

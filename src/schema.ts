@@ -636,7 +636,7 @@ function schemaIssues(errors: ErrorObject[] | null | undefined): ValidationIssue
   return (errors ?? []).map((error) => ({
     code: "schema",
     path: error.instancePath || "/",
-    message: error.message ?? "does not match the Grounded Problems schema",
+    message: error.message ?? "does not match the Practice Problem Generator schema",
   }));
 }
 
@@ -1124,6 +1124,7 @@ function validateVisual(
     });
   }
   const durableSnapshotRoots = [
+    "_Vault/Attachments/Practice Problem Generator/",
     "_Vault/Attachments/Grounded Problems/",
     "_Vault/Attachments/Practice Lab/",
   ];
@@ -1135,7 +1136,7 @@ function validateVisual(
       code: "visual",
       path: `${path}/vaultPath`,
       message:
-        "durable snapshots must use the Grounded Problems attachment folder (legacy Practice Lab paths remain supported)",
+        "durable snapshots must use the Practice Problem Generator attachment folder (legacy Grounded Problems and Practice Lab paths remain supported)",
     });
   }
   if (

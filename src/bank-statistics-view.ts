@@ -562,7 +562,7 @@ export function renderBankStatistics(
             review.request.context.sourceSegments,
           );
         } else if (review.state.status === "pending") {
-          item.createEl("p", { text: "Waiting for Grounded Problems on desktop to finish this review." });
+          item.createEl("p", { text: "Waiting for Practice Problem Generator on desktop to finish this review." });
           if (options.pauseAnswerReview !== undefined) {
             const actions = item.createDiv({ cls: "practice-lab-ai-review-actions" });
             const pause = actions.createEl("button", {
@@ -595,7 +595,7 @@ export function renderBankStatistics(
           const status = actions.createSpan({
             cls: `practice-lab-answer-review-note${options.retryAnswerReview === undefined ? " is-warning" : ""}`,
             text: options.retryAnswerReview === undefined
-              ? "Retry is available in Grounded Problems on desktop."
+              ? "Retry is available in Practice Problem Generator on desktop."
               : `Uses the original ${originalProvider} provider, ${displayReasoningEffort(review.request.reasoningEffort)} reasoning, answer, and locked context.`,
             attr: { role: "status", "aria-live": "polite" },
           });

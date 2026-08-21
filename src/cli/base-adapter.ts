@@ -214,7 +214,7 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
           // eslint-disable-next-line no-unsafe-finally -- A leaked job can contain submitted material, so cleanup failure must win.
           throw new CliProviderError(
             "workspace-error",
-            "Grounded Problems could not remove its isolated temporary job.",
+            "Practice Problem Generator could not remove its isolated temporary job.",
             {
               provider: this.id,
               ...(primaryError === undefined

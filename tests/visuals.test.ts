@@ -138,7 +138,7 @@ test("changing a GIF frame always reuses the original animation", () => {
     mimeType: "image/gif",
   } satisfies DetectedVisual;
   const defaultFrame = applySelectedVisualFrame(original, {
-    snapshotPath: "_Vault/Attachments/Grounded Problems/middle.png",
+    snapshotPath: "_Vault/Attachments/Practice Problem Generator/middle.png",
     previewUrl: "app://middle",
     timeSeconds: 0.6,
     position: "middle",
@@ -146,11 +146,11 @@ test("changing a GIF frame always reuses the original animation", () => {
     usingDefault: true,
   });
   assert.equal(defaultFrame.frameSourcePath, original.resolvedPath);
-  assert.equal(defaultFrame.resolvedPath, "_Vault/Attachments/Grounded Problems/middle.png");
+  assert.equal(defaultFrame.resolvedPath, "_Vault/Attachments/Practice Problem Generator/middle.png");
   assert.equal(defaultFrame.reason, "Using default Middle · 0.6 s");
 
   const override = applySelectedVisualFrame(defaultFrame, {
-    snapshotPath: "_Vault/Attachments/Grounded Problems/last.png",
+    snapshotPath: "_Vault/Attachments/Practice Problem Generator/last.png",
     previewUrl: "app://last",
     timeSeconds: 1.2,
     position: "last",
@@ -159,7 +159,7 @@ test("changing a GIF frame always reuses the original animation", () => {
   });
   assert.equal(override.frameSourcePath, original.resolvedPath);
   assert.equal(override.framePosition, "last");
-  assert.equal(override.resolvedPath, "_Vault/Attachments/Grounded Problems/last.png");
+  assert.equal(override.resolvedPath, "_Vault/Attachments/Practice Problem Generator/last.png");
   assert.equal(override.reason, "Selected Last · 1.2 s");
 });
 

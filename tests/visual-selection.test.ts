@@ -51,7 +51,7 @@ test("select all chooses ready images and resolves GIFs with the configured defa
         ...candidate,
         state: "ready",
         selected: true,
-        resolvedPath: "_Vault/Attachments/Grounded Problems/frame.png",
+        resolvedPath: "_Vault/Attachments/Practice Problem Generator/frame.png",
         ...(candidate.resolvedPath === undefined
           ? {}
           : { frameSourcePath: candidate.resolvedPath }),

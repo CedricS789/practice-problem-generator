@@ -1,18 +1,18 @@
 {
   "name": "practice-lab-ai",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Generate source-grounded practice problems, image occlusions, and analytics from notes and selected PDF pages.",
   "license": "MIT",
   "author": "Cédric Sipakam",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CedricS789/grounded-problems.git"
+    "url": "git+https://github.com/CedricS789/practice-problem-generator.git"
   },
   "bugs": {
-    "url": "https://github.com/CedricS789/grounded-problems/issues"
+    "url": "https://github.com/CedricS789/practice-problem-generator/issues"
   },
-  "homepage": "https://github.com/CedricS789/grounded-problems#readme",
+  "homepage": "https://github.com/CedricS789/practice-problem-generator#readme",
   "engines": {
     "node": ">=22"
   },

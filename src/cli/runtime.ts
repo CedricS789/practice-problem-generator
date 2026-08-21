@@ -46,7 +46,7 @@ function loadDesktopCommonJsModule<T>(specifier: DesktopNodeModuleId): T {
 
   throw new CliProviderError(
     "process-failed",
-    "Grounded Problems could not access the desktop Node runtime.",
+    "Practice Problem Generator could not access the desktop Node runtime.",
   );
 }
 
@@ -173,7 +173,7 @@ export class DesktopProcessRunner implements CliProcessRunner {
           stopAndReject(
             new CliProviderError(
               "process-failed",
-              "The CLI produced more output than Grounded Problems permits.",
+              "The CLI produced more output than Practice Problem Generator permits.",
             ),
           );
           return;
@@ -366,7 +366,7 @@ export class DesktopJobFileSystem implements CliJobFileSystem {
     } catch (error) {
       throw new CliProviderError(
         "workspace-error",
-        "Grounded Problems could not create its isolated temporary job.",
+        "Practice Problem Generator could not create its isolated temporary job.",
         { cause: error },
       );
     }

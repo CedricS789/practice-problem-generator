@@ -73,7 +73,7 @@ export class PracticeBankRepository {
         file: null,
         parsed: {
           status: "missing",
-          recoveryMessage: "No saved Grounded Problems bank exists for this source note."
+          recoveryMessage: "No saved Practice Problem Generator bank exists for this source note."
         }
       };
     }
@@ -161,7 +161,7 @@ export class PracticeBankRepository {
     expectedRevision: number
   ): Promise<PracticeBankV2> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
-    if (!isVaultFile(file)) throw new Error("The Grounded Problems bank no longer exists.");
+    if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
     let saved: PracticeBankV2 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
@@ -183,7 +183,7 @@ export class PracticeBankRepository {
             sourceImport,
           );
     });
-    if (saved === undefined) throw new Error("Grounded Problems could not confirm the saved session.");
+    if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the saved session.");
     return saved;
   }
 
@@ -226,7 +226,7 @@ export class PracticeBankRepository {
     expectedRevision?: number,
   ): Promise<PracticeBankV2> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
-    if (!isVaultFile(file)) throw new Error("The Grounded Problems bank no longer exists.");
+    if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
     let saved: PracticeBankV2 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
@@ -250,7 +250,7 @@ export class PracticeBankRepository {
             sourceImport,
           );
     });
-    if (saved === undefined) throw new Error("Grounded Problems could not confirm the AI review update.");
+    if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the AI review update.");
     return saved;
   }
 
@@ -291,7 +291,7 @@ export class PracticeBankRepository {
         recordedSourceImport,
       );
     });
-    if (saved === undefined) throw new Error("Grounded Problems could not confirm the saved bank.");
+    if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the saved bank.");
     return { path: file.path, bank: saved };
   }
 
@@ -302,7 +302,7 @@ export class PracticeBankRepository {
     unchangedMessage: string,
   ): Promise<{ bank: PracticeBankV2; removedSessions: number }> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
-    if (!isVaultFile(file)) throw new Error("The Grounded Problems bank no longer exists.");
+    if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
     let saved: PracticeBankV2 | undefined;
     let removedSessions = 0;
     await this.app.vault.process(file, (markdown) => {
@@ -323,7 +323,7 @@ export class PracticeBankRepository {
       );
     });
     if (saved === undefined) {
-      throw new Error("Grounded Problems could not confirm the history update.");
+      throw new Error("Practice Problem Generator could not confirm the history update.");
     }
     return { bank: saved, removedSessions };
   }

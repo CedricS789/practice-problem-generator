@@ -99,7 +99,7 @@ export async function extractPdfPages(
   const text = pageMarkdown(pageTexts, range.firstPage);
   if (text.replace(/^# PDF page \d+$/gmu, "").trim().length < 20) {
     throw new Error(
-      "The selected PDF pages contain no usable text. This may be a scanned PDF; OCR is not enabled in Grounded Problems.",
+      "The selected PDF pages contain no usable text. This may be a scanned PDF; OCR is not enabled in Practice Problem Generator.",
     );
   }
   if (text.length > options.maxCharacters) {
@@ -251,7 +251,7 @@ async function removePdfJob(
   }
   throw lastError instanceof Error
     ? lastError
-    : new Error("Grounded Problems could not remove the temporary PDF job.");
+    : new Error("Practice Problem Generator could not remove the temporary PDF job.");
 }
 
 async function runPdfProcess(
@@ -282,7 +282,7 @@ async function runPdfProcess(
       const next = current + chunk;
       if (next.length > PROCESS_OUTPUT_LIMIT) {
         child.kill();
-        finish(new Error("The PDF utility exceeded Grounded Problems's output limit."));
+        finish(new Error("The PDF utility exceeded Practice Problem Generator's output limit."));
       }
       return next.slice(0, PROCESS_OUTPUT_LIMIT + 1);
     };

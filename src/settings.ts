@@ -252,7 +252,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       .setHeading();
     this.containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Choose the defaults for new work and decide how much information each Grounded Problems surface shows. Safety, consent, validation, and repair controls always remain visible.",
+      text: "Choose the defaults for new work and decide how much information each Practice Problem Generator surface shows. Safety, consent, validation, and repair controls always remain visible.",
     });
 
     this.addHeading(
@@ -261,7 +261,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     );
     new Setting(this.containerEl)
       .setName("Default AI provider")
-      .setDesc("Grounded Problems never switches providers automatically.")
+      .setDesc("Practice Problem Generator never switches providers automatically.")
       .addDropdown((dropdown) => dropdown
         .addOption("codex", "Codex")
         .addOption("claude", "Claude")
@@ -305,7 +305,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addModelDefault(
       "agy model",
       "agyModel",
-      "Exact agy model. The installed Grounded Problems default is preserved unless you change it.",
+      "Exact agy model. The installed Practice Problem Generator default is preserved unless you change it.",
     );
 
     new Setting(this.containerEl)
@@ -424,7 +424,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       });
     new Setting(this.containerEl)
       .setName("Maximum extracted PDF characters")
-      .setDesc("Twenty thousand to two hundred fifty thousand characters. Grounded Problems fails closed instead of truncating source evidence silently.")
+      .setDesc("Twenty thousand to two hundred fifty thousand characters. Practice Problem Generator fails closed instead of truncating source evidence silently.")
       .addText((text) => {
         text.inputEl.type = "number";
         text.inputEl.min = "20000";
@@ -481,7 +481,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
 
     new Setting(this.containerEl)
       .setName("Answer-review provider")
-      .setDesc("Used only when AI review is selected. Grounded Problems never switches providers automatically.")
+      .setDesc("Used only when AI review is selected. Practice Problem Generator never switches providers automatically.")
       .addDropdown((dropdown) => dropdown
         .addOption("codex", "Codex")
         .addOption("claude", "Claude")
@@ -752,7 +752,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
 
   private addPracticeViewSettings(): void {
     const group = this.addSettingsGroup(
-      "Grounded Problems view",
+      "Practice Problem Generator view",
       "Choose information density for source, review, study, and completion. Grounded answers and required AI-review notices cannot be hidden.",
     );
     new Setting(group)
@@ -766,7 +766,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           this.owner.settings.display.practice.density = value === "compact" ? "compact" : "comfortable";
           await this.owner.saveSettings();
         }));
-    this.addDisplayToggle("Show view introduction", "Show the short description below the Grounded Problems title.", "practice", "showHeaderDescription", group);
+    this.addDisplayToggle("Show view introduction", "Show the short description below the Practice Problem Generator title.", "practice", "showHeaderDescription", group);
     this.addDisplayToggle("Show generation stepper", "Show Source, Configure, and Review navigation steps.", "practice", "showGenerationStepper", group);
     this.addDisplayToggle("Show source path", "Show the vault-relative source path.", "practice", "showSourcePath", group);
     this.addDisplayToggle("Show source excerpt", "Show the source preview in the Source stage.", "practice", "showSourceExcerpt", group);
@@ -878,7 +878,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
   private addDataManagementSettings(): void {
     const group = this.addSettingsGroup(
       "Data management",
-      "Destructive controls stay collapsed here. Every action shows its exact scope and requires a typed confirmation; Grounded Problems never clears data automatically.",
+      "Destructive controls stay collapsed here. Every action shows its exact scope and requires a typed confirmation; Practice Problem Generator never clears data automatically.",
     );
     new Setting(group)
       .setName("Reset all settings")
@@ -902,7 +902,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         )));
     new Setting(group)
       .setName("Delete all practice banks")
-      .setDesc("Move every valid Grounded Problems bank to the configured Obsidian trash. Source notes, PDFs, and original attachments are preserved. Settings are preserved.")
+      .setDesc("Move every valid Practice Problem Generator bank to the configured Obsidian trash. Source notes, PDFs, and original attachments are preserved. Settings are preserved.")
       .addButton((button) => button
         .setButtonText("Review bank deletion…")
         .setDestructive()

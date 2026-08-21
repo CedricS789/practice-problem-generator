@@ -14,7 +14,7 @@ import {
   resolveVault
 } from "../scripts/deploy.mjs";
 
-test("community plugin merge appends only Grounded Problems", () => {
+test("community plugin merge appends only Practice Problem Generator", () => {
   assert.deepEqual(mergeCommunityPlugins(["pdf-plus"]), ["pdf-plus", PLUGIN_ID]);
   assert.deepEqual(mergeCommunityPlugins([PLUGIN_ID, "pdf-plus"]), [PLUGIN_ID, "pdf-plus"]);
   assert.throws(() => mergeCommunityPlugins({}), /array/);

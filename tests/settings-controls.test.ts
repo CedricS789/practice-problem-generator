@@ -16,7 +16,7 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "Generation defaults",
     "Study defaults",
     "Interface presets",
-    "Grounded Problems view",
+    "Practice Problem Generator view",
     "Practice bank statistics",
     "Dashboard",
     "Advanced runtime",

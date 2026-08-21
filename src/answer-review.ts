@@ -200,7 +200,7 @@ export function buildAnswerReviewPrompt(input: AnswerReviewInput): string {
   };
 
   return [
-    "Grounded Problems answer-review contract: v1",
+    "Practice Problem Generator answer-review contract: v1",
     "",
     "ROLE",
     "You are a grading engine for one submitted university-practice answer. Use the bounded exercise title and source-heading labels to understand what the task is about, then compare the submitted answer with the grounded answer, rubric criteria, and cited source segments. Return only the JSON object required by the supplied schema.",
@@ -308,7 +308,7 @@ export function asAnswerReviewOutput(
   const validation = validateAnswerReviewOutput(value, input);
   if (!validation.valid) {
     throw new Error(
-      `Invalid Grounded Problems answer review: ${validation.errors?.join("; ") ?? "unknown validation error"}`,
+      `Invalid Practice Problem Generator answer review: ${validation.errors?.join("; ") ?? "unknown validation error"}`,
     );
   }
   return value as AnswerReviewOutputV1;

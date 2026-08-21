@@ -327,7 +327,7 @@ export class PracticeDashboardView extends ItemView {
     heading.createEl("h2", { text: "Practice dashboard" });
     if (this.displayPreferences.dashboard.showIntroduction) {
       heading.createEl("p", {
-        text: "See every Grounded Problems bank together, then narrow the statistics to any source-folder level, one note, or an optional source tag.",
+        text: "See every Practice Problem Generator bank together, then narrow the statistics to any source-folder level, one note, or an optional source tag.",
       });
     }
     const headerActions = header.createDiv({
@@ -393,7 +393,7 @@ export class PracticeDashboardView extends ItemView {
     this.renderDiagnostics(snapshot, summary);
     if (snapshot.records.length === 0) {
       this.renderStatus(
-        "No Grounded Problems banks were found. Generate and save a practice set first.",
+        "No Practice Problem Generator banks were found. Generate and save a practice set first.",
         "library-big",
       );
       return;
@@ -430,7 +430,7 @@ export class PracticeDashboardView extends ItemView {
     ) {
       this.contentEl.createEl("p", {
         cls: "practice-lab-muted",
-        text: "All optional dashboard sections are hidden in Grounded Problems settings.",
+        text: "All optional dashboard sections are hidden in Practice Problem Generator settings.",
       });
     }
   }
@@ -805,7 +805,7 @@ export class PracticeDashboardView extends ItemView {
     }
     section.createEl("p", {
       cls: "practice-lab-dashboard-note",
-      text: "A single day can be noisy. Use the longer trend and source scope to interpret changes; Grounded Problems never turns this history into a due queue.",
+      text: "A single day can be noisy. Use the longer trend and source scope to interpret changes; Practice Problem Generator never turns this history into a due queue.",
     });
   }
 

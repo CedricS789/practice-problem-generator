@@ -89,7 +89,7 @@ export function practiceBankBackupPath(
     || relative.length === 0
     || relative.split("/").some((part) => part === "." || part === "..")
   ) {
-    throw new Error("Could not create a safe Grounded Problems backup path.");
+    throw new Error("Could not create a safe Practice Problem Generator backup path.");
   }
   return `${root}/${relative}.bak`;
 }

@@ -303,7 +303,7 @@ export class PracticeLabView extends ItemView {
   }
 
   public getDisplayText(): string {
-    return "Grounded Problems";
+    return "Practice Problem Generator";
   }
 
   public getIcon(): string {
@@ -566,7 +566,7 @@ export class PracticeLabView extends ItemView {
 
     const header = this.contentEl.createDiv({ cls: "practice-lab-header" });
     const heading = header.createDiv();
-    heading.createEl("h2", { text: "Grounded Problems" });
+    heading.createEl("h2", { text: "Practice Problem Generator" });
     if (this.displayPreferences.practice.showHeaderDescription) {
       heading.createEl("p", {
         text: "Turn one note into grounded practice, then study it without leaving your vault.",
@@ -637,7 +637,7 @@ export class PracticeLabView extends ItemView {
     const top = container.createDiv({ cls: "practice-lab-section-heading" });
     top.createEl("h3", { text: "Choose the source" });
     top.createEl("p", {
-      text: "Grounded Problems reads an active selection, note, or explicit PDF page range. Source material is never rewritten.",
+      text: "Practice Problem Generator reads an active selection, note, or explicit PDF page range. Source material is never rewritten.",
     });
 
     if (this.options.callbacks.requestSource !== undefined) {
@@ -926,7 +926,7 @@ export class PracticeLabView extends ItemView {
     const heading = container.createDiv({ cls: "practice-lab-section-heading" });
     heading.createEl("h3", { text: "Configure the set" });
     heading.createEl("p", {
-      text: "Choose the exact exercise mix. Grounded Problems keeps the allocation balanced and converts it into deterministic item counts before any provider is contacted.",
+      text: "Choose the exact exercise mix. Practice Problem Generator keeps the allocation balanced and converts it into deterministic item counts before any provider is contacted.",
     });
     if (this.regenerationContext !== null) {
       const context = container.createDiv({
@@ -951,7 +951,7 @@ export class PracticeLabView extends ItemView {
     const form = container.createDiv({ cls: "practice-lab-config-grid" });
     const providerSetting = new Setting(form)
       .setName("AI provider")
-      .setDesc("Grounded Problems never switches providers silently.");
+      .setDesc("Practice Problem Generator never switches providers silently.");
     const providerSelect = providerSetting.controlEl.createEl("select", {
       attr: { "aria-label": "AI provider" },
     });
@@ -990,7 +990,7 @@ export class PracticeLabView extends ItemView {
     );
     new Setting(form)
       .setName("Model")
-      .setDesc("Optional exact CLI model. Leave blank for the provider default; Grounded Problems records that the model was not pinned.")
+      .setDesc("Optional exact CLI model. Leave blank for the provider default; Practice Problem Generator records that the model was not pinned.")
       .addText((component) => {
         component.inputEl.maxLength = MAX_MODEL_ID_LENGTH;
         component.inputEl.spellcheck = false;
@@ -1111,7 +1111,7 @@ export class PracticeLabView extends ItemView {
     });
     new ButtonComponent(typeActions)
       .setButtonText("Recommended")
-      .setTooltip("Restore the constructed-response-heavy Grounded Problems mix.")
+      .setTooltip("Restore the constructed-response-heavy Practice Problem Generator mix.")
       .onClick(() => {
         applyMix(copyExerciseTypePercentages(
           RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
@@ -2212,10 +2212,10 @@ export class PracticeLabView extends ItemView {
     }
     const provider = this.selectedAnswerReviewProvider();
     if (provider === undefined || !provider.available) {
-      return `${provider?.label ?? this.answerReviewProvider} is unavailable. Choose an available provider or self-assess; Grounded Problems will not switch providers automatically.`;
+      return `${provider?.label ?? this.answerReviewProvider} is unavailable. Choose an available provider or self-assess; Practice Problem Generator will not switch providers automatically.`;
     }
     if (!provider.reasoningEfforts.includes(this.answerReviewReasoningEffort)) {
-      return `${displayReasoningEffort(this.answerReviewReasoningEffort)} reasoning is unavailable for ${provider.label}. Choose a supported level; Grounded Problems will not substitute one.`;
+      return `${displayReasoningEffort(this.answerReviewReasoningEffort)} reasoning is unavailable for ${provider.label}. Choose a supported level; Practice Problem Generator will not substitute one.`;
     }
     return null;
   }
@@ -2313,7 +2313,7 @@ export class PracticeLabView extends ItemView {
       if (pause === undefined) {
         actions.createSpan({
           cls: "practice-lab-answer-review-note",
-          text: "This pending review can be paused from Grounded Problems on desktop.",
+          text: "This pending review can be paused from Practice Problem Generator on desktop.",
         });
         return;
       }
@@ -2360,16 +2360,16 @@ export class PracticeLabView extends ItemView {
 
   private answerReviewRetryProblem(request: AnswerReviewRequest): string | null {
     if (this.options.callbacks.retryAnswerReview === undefined) {
-      return "Retry is unavailable on this device. Open Grounded Problems on desktop.";
+      return "Retry is unavailable on this device. Open Practice Problem Generator on desktop.";
     }
     const provider = this.providers.find(
       (candidate) => candidate.id === request.provider,
     );
     if (provider === undefined || !provider.available) {
-      return `${this.answerReviewProviderLabel(request.provider)} is unavailable. Restore that provider before retrying; Grounded Problems will not switch providers.`;
+      return `${this.answerReviewProviderLabel(request.provider)} is unavailable. Restore that provider before retrying; Practice Problem Generator will not switch providers.`;
     }
     if (!provider.reasoningEfforts.includes(request.reasoningEffort)) {
-      return `${displayReasoningEffort(request.reasoningEffort)} reasoning is no longer available for ${provider.label}. Restore that capability before retrying; Grounded Problems will not substitute one.`;
+      return `${displayReasoningEffort(request.reasoningEffort)} reasoning is no longer available for ${provider.label}. Restore that capability before retrying; Practice Problem Generator will not substitute one.`;
     }
     return null;
   }

@@ -7,7 +7,7 @@ export {
   type SampledFrame
 } from "./media-tools";
 
-const SNAPSHOT_ROOT = "_Vault/Attachments/Grounded Problems";
+const SNAPSHOT_ROOT = "_Vault/Attachments/Practice Problem Generator";
 
 export interface ImportedSnapshot {
   path: string;
@@ -43,7 +43,7 @@ export async function readNotabilityPreview(app: App, regionId: string): Promise
   }
   const manifest = JSON.parse(await app.vault.adapter.read(manifestPath)) as { version?: unknown };
   if (typeof manifest.version !== "string" || !manifest.version.startsWith("1.1.")) {
-    throw new Error("Grounded Problems supports Notability Live Region 1.1.x previews.");
+    throw new Error("Practice Problem Generator supports Notability Live Region 1.1.x previews.");
   }
   const cachePath = normalizePath(`${pluginRoot}/cache/${regionId}.png`);
   if (!await app.vault.adapter.exists(cachePath)) {

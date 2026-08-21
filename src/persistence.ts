@@ -31,7 +31,7 @@ import {
 } from "./source-import";
 
 const READ_ONLY_RECOVERY =
-  "Grounded Problems will keep this block read-only. Back up the Markdown file, update Grounded Problems, then use its recovery or migration command; do not hand-edit the stored JSON unless you are restoring from a known-good backup.";
+  "Practice Problem Generator will keep this block read-only. Back up the Markdown file, update Practice Problem Generator, then use its recovery or migration command; do not hand-edit the stored JSON unless you are restoring from a known-good backup.";
 
 function normalizeVaultPath(path: string): string {
   const normalized = path.replace(/\\/gu, "/").replace(/^\.\//u, "");
@@ -52,12 +52,12 @@ export function derivePracticePath(sourceVaultPath: string): string {
   const parts = normalized.split("/");
   const filename = parts.at(-1);
   if (filename === undefined) {
-    throw new Error("Could not derive the Grounded Problems output path.");
+    throw new Error("Could not derive the Practice Problem Generator output path.");
   }
   const isPdf = /\.pdf$/iu.test(filename);
   const isMarkdown = /\.md$/iu.test(filename);
   if (!isPdf && !isMarkdown) {
-    throw new Error("Grounded Problems sources must be Markdown notes or PDF files.");
+    throw new Error("Practice Problem Generator sources must be Markdown notes or PDF files.");
   }
   const notesIndex = parts.findIndex((part) => part.toLowerCase() === "notes");
   const pdfPathKey = isPdf
@@ -69,16 +69,16 @@ export function derivePracticePath(sourceVaultPath: string): string {
       return `Notes/Practice Sources/Practice/${title} - ${pdfPathKey} - Practice.md`;
     }
     throw new Error(
-      "Grounded Problems source notes must be under Notes/<term>/<course>/.",
+      "Practice Problem Generator source notes must be under Notes/<term>/<course>/.",
     );
   }
   const term = parts[1];
   const course = parts[2];
   if (term === undefined || course === undefined || filename === undefined) {
-    throw new Error("Could not derive the Grounded Problems output path.");
+    throw new Error("Could not derive the Practice Problem Generator output path.");
   }
   if (parts[3]?.toLowerCase() === "practice") {
-    throw new Error("A Grounded Problems bank cannot be used as its own source note.");
+    throw new Error("A Practice Problem Generator bank cannot be used as its own source note.");
   }
   const title = safeFilename(filename.replace(/\.(?:md|pdf)$/iu, ""));
   if (title.length === 0) throw new Error("The source note must have a filename.");
@@ -116,7 +116,7 @@ export function serializePracticeBank(
 ): string {
   const errors = formatValidationErrors(bank);
   if (errors.length > 0) {
-    throw new Error(`Cannot serialize an invalid Grounded Problems bank: ${errors}`);
+    throw new Error(`Cannot serialize an invalid Practice Problem Generator bank: ${errors}`);
   }
   const title = bank.source.title.replace(/[\r\n]+/gu, " ").trim();
   const pdfSource = /\.pdf$/iu.test(bank.source.vaultPath);
@@ -160,8 +160,8 @@ export function serializePracticeBank(
     "",
     `# ${title} - Practice`,
     "",
-    "> [!info] Grounded Problems bank",
-    "> Open this note in Reading view to study. The JSON block below is the portable source of truth; edits made through Grounded Problems are preserved across desktop and mobile.",
+    "> [!info] Practice Problem Generator bank",
+    "> Open this note in Reading view to study. The JSON block below is the portable source of truth; edits made through Practice Problem Generator are preserved across desktop and mobile.",
     "",
     `\`\`\`${PRACTICE_BLOCK_LANGUAGE}`,
     json,

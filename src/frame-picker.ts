@@ -24,8 +24,8 @@ export class FramePickerModal extends Modal {
     this.modalEl.addClass("practice-lab-frame-modal");
     this.contentEl.createEl("p", {
       text: gifPositions
-        ? "Choose First, Middle, or Last. Grounded Problems saves that frame as a new PNG and leaves the original GIF unchanged."
-        : "Grounded Problems will save only the selected frame as a new PNG. The original animation or video stays unchanged."
+        ? "Choose First, Middle, or Last. Practice Problem Generator saves that frame as a new PNG and leaves the original GIF unchanged."
+        : "Practice Problem Generator will save only the selected frame as a new PNG. The original animation or video stays unchanged."
     });
     const grid = this.contentEl.createDiv({ cls: "practice-lab-frame-grid" });
     for (const frame of this.frames) {

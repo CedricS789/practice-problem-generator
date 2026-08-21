@@ -61,7 +61,7 @@ test("generation prompt treats note content as untrusted and exposes exact segme
   assert.match(prompt, /Do not create image-occlusion/);
   assert.match(prompt, /Source material title: "Topic"/);
   assert.match(prompt, /complete active note as submitted/);
-  assert.match(prompt, /assessment-design engine inside Grounded Problems/);
+  assert.match(prompt, /assessment-design engine inside Practice Problem Generator/);
   assert.match(prompt, /not a flashcard deck/);
   assert.match(prompt, /FINAL QUALITY CHECK/);
   assert.match(prompt, /Coverage: important concepts/);

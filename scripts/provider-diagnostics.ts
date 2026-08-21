@@ -24,13 +24,13 @@ const { stdout: png } = await execFileAsync("ffmpeg", [
 ], { encoding: "buffer", maxBuffer: 2_000_000 });
 
 const prompt = [
-  "This is a synthetic Grounded Problems diagnostic; it contains no authored vault content.",
+  "This is a synthetic Practice Problem Generator diagnostic; it contains no authored vault content.",
   "Segment seg-synthetic states that two plus two equals four.",
   "Inspect the attached synthetic solid-color PNG.",
   "Return segmentId seg-synthetic, derivedValue 4, and observedColor red."
 ].join("\n");
 const practicePrompt = [
-  "This is a synthetic Grounded Problems schema diagnostic; it contains no authored vault content.",
+  "This is a synthetic Practice Problem Generator schema diagnostic; it contains no authored vault content.",
   "Create exactly one short-answer exercise from segment seg-synthetic.",
   "Segment seg-synthetic states: In this synthetic relation, alpha causes beta.",
   "Ask for the effect, ground the answer as beta, and populate every required short-answer field.",

@@ -355,7 +355,7 @@ test("persists extended reasoning effort and explicit GIF frame position", () =>
   bank.visuals[0] = {
     ...(bank.visuals[0] as NonNullable<(typeof bank.visuals)[number]>),
     kind: "gif-frame",
-    vaultPath: "_Vault/Attachments/Grounded Problems/frame.png",
+    vaultPath: "_Vault/Attachments/Practice Problem Generator/frame.png",
     storage: "practice-snapshot",
     frameTimeSeconds: 0.6,
     framePosition: "middle",
@@ -380,6 +380,19 @@ test("keeps legacy Practice Lab snapshot paths readable after the public rename"
     ...(bank.visuals[0] as NonNullable<(typeof bank.visuals)[number]>),
     kind: "gif-frame",
     vaultPath: "_Vault/Attachments/Practice Lab/frame.png",
+    storage: "practice-snapshot",
+    frameTimeSeconds: 0.6,
+    framePosition: "middle",
+  };
+  assert.equal(validatePracticeBank(bank).ok, true);
+});
+
+test("keeps legacy Grounded Problems snapshot paths readable after the final rename", () => {
+  const bank = validBank();
+  bank.visuals[0] = {
+    ...(bank.visuals[0] as NonNullable<(typeof bank.visuals)[number]>),
+    kind: "gif-frame",
+    vaultPath: "_Vault/Attachments/Grounded Problems/frame.png",
     storage: "practice-snapshot",
     frameTimeSeconds: 0.6,
     framePosition: "middle",

@@ -65,7 +65,7 @@ export class CliJobCoordinator {
     if (this.active !== undefined) {
       throw new CliProviderError(
         "busy",
-        `Grounded Problems is already running a ${this.active.identity.provider} ${this.active.identity.kind} job.`,
+        `Practice Problem Generator is already running a ${this.active.identity.provider} ${this.active.identity.kind} job.`,
         {
           provider: this.active.identity.provider,
           detail: `Active job ID: ${this.active.identity.id}`,
@@ -140,7 +140,7 @@ export class CliJobCoordinator {
     if (jobId !== undefined && this.active.identity.id !== jobId) return false;
     this.active.controller.abort(
       new DOMException(
-        `Grounded Problems ${this.active.identity.kind} job cancelled`,
+        `Practice Problem Generator ${this.active.identity.kind} job cancelled`,
         "AbortError",
       ),
     );

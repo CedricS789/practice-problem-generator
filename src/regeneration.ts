@@ -232,7 +232,7 @@ export function inferExerciseTypePercentages(
       (target) => target.count !== (counts.get(target.type) ?? 0),
     );
     if (mismatch) {
-      throw new Error("Grounded Problems could not reconstruct the previous exercise mix safely.");
+      throw new Error("Practice Problem Generator could not reconstruct the previous exercise mix safely.");
     }
   }
   return percentages;

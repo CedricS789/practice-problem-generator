@@ -314,7 +314,7 @@ test("review controls expose explicit choices without provider fallback", () => 
   assert.match(viewSource, /"Answer-review reasoning effort"/u);
   assert.match(viewSource, /"Assess myself instead"/u);
   assert.match(viewSource, /Send to \$\{provider\?\.label/u);
-  assert.match(viewSource, /Grounded Problems will not switch providers automatically/u);
+  assert.match(viewSource, /Practice Problem Generator will not switch providers automatically/u);
   assert.match(viewSource, /enqueueAnswerReview === undefined/u);
   assert.match(viewSource, /AI answer review is unavailable on this device/u);
   assert.match(viewSource, /Provisional result:/u);

@@ -12,7 +12,7 @@ const INSTALLED_ATTRIBUTE = "data-practice-lab-hover-descriptions";
 
 /**
  * Adds concise native hover descriptions to every current and future control
- * in a Grounded Problems surface. Explicit tooltips always win.
+ * in a Practice Problem Generator surface. Explicit tooltips always win.
  */
 export function installHoverDescriptions(root: HTMLElement): void {
   if (root.hasAttribute(INSTALLED_ATTRIBUTE)) {

@@ -27,7 +27,7 @@ export default defineConfig([
       "obsidianmd/ui/sentence-case": [
         "warn",
         {
-          brands: ["Grounded Problems", "Obsidian", "Markdown", "Border", "Codex", "Claude", "agy"],
+          brands: ["Practice Problem Generator", "Obsidian", "Markdown", "Border", "Codex", "Claude", "agy"],
           acronyms: ["AI", "CLI", "JSON", "PNG", "GIF", "MP4", "PDF", "URL", "UI", "MCQ", "SHA"]
         }
       ]

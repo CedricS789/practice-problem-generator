@@ -30,7 +30,7 @@ export async function collectSource(
 ): Promise<CollectedSource> {
   const file = app.workspace.getActiveFile();
   if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") {
-    throw new Error("Open a Markdown source note before using Grounded Problems.");
+    throw new Error("Open a Markdown source note before using Practice Problem Generator.");
   }
   return collectSourceFromFile(app, file, mode, selection);
 }
@@ -42,7 +42,7 @@ export async function collectSourceFromFile(
   selection?: string,
 ): Promise<CollectedSource> {
   if (/(?:^|\/)Practice(?:\/|$)/iu.test(file.path)) {
-    throw new Error("A Grounded Problems bank cannot be used as its own source note.");
+    throw new Error("A Practice Problem Generator bank cannot be used as its own source note.");
   }
   const submittedText = mode === "selection" ? selection ?? "" : await app.vault.cachedRead(file);
   if (mode === "selection" && submittedText.trim().length === 0) {
@@ -59,7 +59,7 @@ export async function collectSourceFromFile(
   });
   const prepared = prepareSource(submittedText);
   if (prepared.segments.length === 0) {
-    throw new Error("Grounded Problems could not find any headings or paragraphs in this source.");
+    throw new Error("Practice Problem Generator could not find any headings or paragraphs in this source.");
   }
 
   return {
@@ -84,7 +84,7 @@ export function collectPdfSource(
   }
   const prepared = prepareSource(extraction.text);
   if (prepared.segments.length === 0) {
-    throw new Error("Grounded Problems could not segment the extracted PDF text.");
+    throw new Error("Practice Problem Generator could not segment the extracted PDF text.");
   }
   const sourceImport = createPdfSourceImport({
     sourceHash: prepared.hash,

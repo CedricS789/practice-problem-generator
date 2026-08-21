@@ -128,7 +128,7 @@ test("backup paths stay isolated and confirmation phrases are explicit", () => {
   );
   assert.throws(
     () => practiceBankBackupPath(".tmp/run", "../Evidence.md"),
-    /safe Grounded Problems backup path/u,
+    /safe Practice Problem Generator backup path/u,
   );
   assert.deepEqual([
     RESET_SETTINGS_CONFIRMATION,

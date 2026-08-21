@@ -14,7 +14,7 @@ const [manifest, packageJson, packageLock, versions] = await Promise.all([
 
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.equal(manifest.id, "practice-lab-ai");
-assert.equal(manifest.name, "Grounded Problems");
+assert.equal(manifest.name, "Practice Problem Generator");
 assert.equal(manifest.isDesktopOnly, false, "saved banks and review must remain mobile-capable");
 assert.equal(packageJson.private, true);
 assert.equal(packageJson.version, manifest.version);

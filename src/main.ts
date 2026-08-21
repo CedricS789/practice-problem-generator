@@ -268,8 +268,8 @@ export default class PracticeLabPlugin extends Plugin {
 
   public async requestResetAllSettings(): Promise<void> {
     const confirmed = await confirmDestructiveAction(this.app, {
-      title: "Reset all Grounded Problems settings?",
-      warning: "Every Grounded Problems preference will return to its installed default.",
+      title: "Reset all Practice Problem Generator settings?",
+      warning: "Every Practice Problem Generator preference will return to its installed default.",
       consequences: [
         "Provider, model, reasoning, exercise mix, focus, PDF, study, interface, timeout, and executable settings will be reset.",
         "Generated practice banks, session history, answers, and statistics will not be changed.",
@@ -281,7 +281,7 @@ export default class PracticeLabPlugin extends Plugin {
     if (!confirmed) return;
     this.settings = normalizeSettings(DEFAULT_SETTINGS);
     await this.saveSettings({ refreshProviders: true });
-    new Notice("Grounded Problems settings were reset. Saved banks and history were preserved.", 8_000);
+    new Notice("Practice Problem Generator settings were reset. Saved banks and history were preserved.", 8_000);
   }
 
   public async requestClearAllPracticeHistory(): Promise<void> {
@@ -289,7 +289,7 @@ export default class PracticeLabPlugin extends Plugin {
     const invalid = snapshot.issues.filter((issue) => issue.severity === "error");
     if (invalid.length > 0) {
       throw new Error(
-        `Grounded Problems found ${invalid.length} unreadable practice ${invalid.length === 1 ? "bank" : "banks"}. Repair them before clearing all history so the operation cannot silently skip data.`,
+        `Practice Problem Generator found ${invalid.length} unreadable practice ${invalid.length === 1 ? "bank" : "banks"}. Repair them before clearing all history so the operation cannot silently skip data.`,
       );
     }
     const affected = snapshot.records.filter((record) => record.bank.sessions.length > 0);
@@ -298,16 +298,16 @@ export default class PracticeLabPlugin extends Plugin {
       0,
     );
     if (sessionCount === 0) {
-      new Notice("There is no saved Grounded Problems session history to clear.");
+      new Notice("There is no saved Practice Problem Generator session history to clear.");
       return;
     }
     const confirmed = await confirmDestructiveAction(this.app, {
-      title: "Clear all Grounded Problems session history?",
+      title: "Clear all Practice Problem Generator session history?",
       warning: `This will remove ${sessionCount} ${sessionCount === 1 ? "session" : "sessions"} from ${affected.length} practice ${affected.length === 1 ? "bank" : "banks"}.`,
       consequences: [
         "Scores, ratings, submitted answers, AI-review requests, feedback, and session statistics will be removed.",
         "Generated exercises, source links, generation history, PDF page provenance, and settings will be preserved.",
-        "Grounded Problems will create a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder before changing any bank.",
+        "Practice Problem Generator will create a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder before changing any bank.",
       ],
       confirmationPhrase: CLEAR_HISTORY_CONFIRMATION,
       confirmLabel: "Clear all history",
@@ -333,7 +333,7 @@ export default class PracticeLabPlugin extends Plugin {
     }
     this.scheduleDashboardRefresh();
     new Notice(
-      `Cleared ${cleared} Grounded Problems ${cleared === 1 ? "session" : "sessions"}. Backup: ${backupRoot}`,
+      `Cleared ${cleared} Practice Problem Generator ${cleared === 1 ? "session" : "sessions"}. Backup: ${backupRoot}`,
       12_000,
     );
   }
@@ -343,11 +343,11 @@ export default class PracticeLabPlugin extends Plugin {
     const invalid = snapshot.issues.filter((issue) => issue.severity === "error");
     if (invalid.length > 0) {
       throw new Error(
-        `Grounded Problems found ${invalid.length} unreadable practice ${invalid.length === 1 ? "bank" : "banks"}. Repair them before deleting all banks so the operation cannot silently leave hidden data behind.`,
+        `Practice Problem Generator found ${invalid.length} unreadable practice ${invalid.length === 1 ? "bank" : "banks"}. Repair them before deleting all banks so the operation cannot silently leave hidden data behind.`,
       );
     }
     if (snapshot.records.length === 0) {
-      new Notice("There are no valid Grounded Problems banks to delete.");
+      new Notice("There are no valid Practice Problem Generator banks to delete.");
       return;
     }
     const sessionCount = snapshot.records.reduce(
@@ -355,11 +355,11 @@ export default class PracticeLabPlugin extends Plugin {
       0,
     );
     const confirmed = await confirmDestructiveAction(this.app, {
-      title: "Delete all Grounded Problems banks?",
+      title: "Delete all Practice Problem Generator banks?",
       warning: `This will send ${snapshot.records.length} practice ${snapshot.records.length === 1 ? "bank" : "banks"} and ${sessionCount} saved ${sessionCount === 1 ? "session" : "sessions"} through Obsidian's configured deletion method.`,
       consequences: [
         "All generated exercises, masks, generation records, answers, AI feedback, and statistics stored in those bank notes will be removed.",
-        "Source notes, source PDFs, original attachments, and Grounded Problems settings will be preserved.",
+        "Source notes, source PDFs, original attachments, and Practice Problem Generator settings will be preserved.",
         "Recoverability depends on your Obsidian trash configuration and operating-system trash retention.",
       ],
       confirmationPhrase: DELETE_BANK_CONFIRMATION,
@@ -379,7 +379,7 @@ export default class PracticeLabPlugin extends Plugin {
       if (this.activeBank?.path === record.bankPath) delete this.activeBank;
     }
     this.scheduleDashboardRefresh();
-    new Notice(`Moved ${deleted} Grounded Problems ${deleted === 1 ? "bank" : "banks"} through Obsidian's configured trash method.`, 10_000);
+    new Notice(`Moved ${deleted} Practice Problem Generator ${deleted === 1 ? "bank" : "banks"} through Obsidian's configured trash method.`, 10_000);
   }
 
   async testAgyVisionCapability(): Promise<string> {
@@ -465,12 +465,12 @@ export default class PracticeLabPlugin extends Plugin {
     const selection = editor.getSelection();
     if (selection.trim()) {
       menu.addItem((item) => item
-        .setTitle("Grounded Problems: Generate from selection")
+        .setTitle("Practice Problem Generator: Generate from selection")
         .setIcon("text-select")
         .onClick(() => { void this.generateFrom("selection", selection); }));
     }
     menu.addItem((item) => item
-      .setTitle("Grounded Problems: Generate from current note")
+      .setTitle("Practice Problem Generator: Generate from current note")
       .setIcon("flask-conical")
       .onClick(() => { void this.generateFrom("note"); }));
   }
@@ -482,7 +482,7 @@ export default class PracticeLabPlugin extends Plugin {
       || file.extension.toLowerCase() !== "pdf"
     ) return;
     menu.addItem((item) => item
-      .setTitle("Grounded Problems: Generate from PDF")
+      .setTitle("Practice Problem Generator: Generate from PDF")
       .setIcon("file-scan")
       .onClick(() => { void this.generateFromPdf(file); }));
   }
@@ -513,11 +513,11 @@ export default class PracticeLabPlugin extends Plugin {
       throw new Error("PDF source extraction is available in Obsidian desktop only.");
     }
     if (file === null || file.extension.toLowerCase() !== "pdf") {
-      throw new Error("Open or right-click a vault PDF before using Grounded Problems.");
+      throw new Error("Open or right-click a vault PDF before using Practice Problem Generator.");
     }
     const bytes = await this.app.vault.readBinary(file);
     const inspecting = new Notice(
-      `Grounded Problems: inspecting ${file.basename} locally…`,
+      `Practice Problem Generator: inspecting ${file.basename} locally…`,
       0,
     );
     let info: PdfDocumentInfo;
@@ -666,7 +666,7 @@ export default class PracticeLabPlugin extends Plugin {
           );
           const storedSession = this.activeBank.bank.sessions.find((candidate) => candidate.id === summary.id);
           if (storedSession === undefined) {
-            throw new Error("Grounded Problems saved the session but could not locate it for background review.");
+            throw new Error("Practice Problem Generator saved the session but could not locate it for background review.");
           }
           for (const result of storedSession.results) {
             if (result.grading !== "ai-review") continue;
@@ -741,7 +741,7 @@ export default class PracticeLabPlugin extends Plugin {
       consequences: [
         "This session's score, rating, submitted answers, and AI-review feedback will no longer contribute to bank or dashboard statistics.",
         "Other sessions, generated exercises, generation history, and the source remain unchanged.",
-        "Grounded Problems will save a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder first.",
+        "Practice Problem Generator will save a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder first.",
       ],
       confirmationPhrase: DELETE_SESSION_CONFIRMATION,
       confirmLabel: "Remove history entry",
@@ -773,7 +773,7 @@ export default class PracticeLabPlugin extends Plugin {
       consequences: [
         "Scores, ratings, submitted answers, AI reviews, feedback, and this bank's session statistics will be removed.",
         "Generated exercises, generation history, source links, and settings will be preserved.",
-        "Grounded Problems will save a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder first.",
+        "Practice Problem Generator will save a Markdown backup under the vault's .tmp/practice-lab-ai/data-management folder first.",
       ],
       confirmationPhrase: CLEAR_HISTORY_CONFIRMATION,
       confirmLabel: "Clear bank history",
@@ -822,7 +822,7 @@ export default class PracticeLabPlugin extends Plugin {
   ): Promise<{ file: TFile; bank: PracticeBankV2 }> {
     const abstract = this.app.vault.getAbstractFileByPath(normalizePath(bankPath));
     if (!(abstract instanceof TFile)) {
-      throw new Error("The Grounded Problems bank no longer exists.");
+      throw new Error("The Practice Problem Generator bank no longer exists.");
     }
     const parsed = parsePracticeBankMarkdown(await this.app.vault.cachedRead(abstract));
     if (parsed.status !== "ok") throw parseFailure(parsed);
@@ -1034,7 +1034,7 @@ export default class PracticeLabPlugin extends Plugin {
   private async startPracticeForCurrentNote(): Promise<void> {
     const current = this.activeMarkdownFile();
     if (current === null) {
-      this.showError(new Error("Open a source note or Grounded Problems bank first."));
+      this.showError(new Error("Open a source note or Practice Problem Generator bank first."));
       return;
     }
     await this.startPracticeForSourceFile(current);
@@ -1221,7 +1221,7 @@ export default class PracticeLabPlugin extends Plugin {
       await leaf.setViewState({ type: PRACTICE_LAB_VIEW_TYPE, active: true });
     }
     await this.app.workspace.revealLeaf(leaf);
-    if (!(leaf.view instanceof PracticeLabView)) throw new Error("Grounded Problems view could not be opened.");
+    if (!(leaf.view instanceof PracticeLabView)) throw new Error("Practice Problem Generator view could not be opened.");
     leaf.view.setProviders(this.providers);
     leaf.view.setDisplayPreferences(this.settings.display);
     leaf.view.setConfigurationDefaults({
@@ -1642,7 +1642,7 @@ export default class PracticeLabPlugin extends Plugin {
   private async loadPracticeBank(bankPath: string): Promise<PracticeBankV2> {
     const file = this.app.vault.getAbstractFileByPath(bankPath);
     if (!(file instanceof TFile)) {
-      throw new Error("The Grounded Problems bank no longer exists.");
+      throw new Error("The Practice Problem Generator bank no longer exists.");
     }
     const parsed = parsePracticeBankMarkdown(await this.app.vault.cachedRead(file));
     if (parsed.status !== "ok") throw parseFailure(parsed);
@@ -1693,7 +1693,7 @@ export default class PracticeLabPlugin extends Plugin {
           if (!this.warnedAnswerReviewPersistence.has(requestId)) {
             this.warnedAnswerReviewPersistence.add(requestId);
             new Notice(
-              "Grounded Problems: the AI review finished, but its bank update is delayed. The result is retained and will be retried automatically.",
+              "Practice Problem Generator: the AI review finished, but its bank update is delayed. The result is retained and will be retried automatically.",
               10_000,
             );
           }
@@ -1846,7 +1846,7 @@ export default class PracticeLabPlugin extends Plugin {
     }
     if (collidingRequestIds.size > 0) {
       new Notice(
-        `Grounded Problems left ${collidingRequestIds.size} colliding AI review ${collidingRequestIds.size === 1 ? "ID" : "IDs"} pending. Repair the duplicated request IDs before resuming them.`,
+        `Practice Problem Generator left ${collidingRequestIds.size} colliding AI review ${collidingRequestIds.size === 1 ? "ID" : "IDs"} pending. Repair the duplicated request IDs before resuming them.`,
         10_000,
       );
     }
@@ -1940,7 +1940,7 @@ export default class PracticeLabPlugin extends Plugin {
     if (parsed.storedSchemaVersion === 1) {
       element.createEl("p", {
         cls: "practice-lab-bank-migration-note",
-        text: "Legacy bank loaded safely. It will migrate to the current format on the next Grounded Problems save.",
+        text: "Legacy bank loaded safely. It will migrate to the current format on the next Practice Problem Generator save.",
       });
     }
     let generationHistory: GenerationHistoryV1 | undefined;
@@ -1980,8 +1980,8 @@ export default class PracticeLabPlugin extends Plugin {
         }
       } catch (error) {
         generationHistoryWarning = error instanceof Error
-          ? `Grounded Problems could not read the generation ledger: ${error.message}`
-          : "Grounded Problems could not read the generation ledger.";
+          ? `Practice Problem Generator could not read the generation ledger: ${error.message}`
+          : "Practice Problem Generator could not read the generation ledger.";
       }
     }
     if (pdfSourceDetail !== undefined) {
@@ -2095,7 +2095,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private renderReadOnlyBlock(element: HTMLElement, message: string, source: string): void {
     element.addClass("is-read-only");
-    element.createEl("strong", { text: "Grounded Problems bank is read-only" });
+    element.createEl("strong", { text: "Practice Problem Generator bank is read-only" });
     element.createEl("p", { text: message });
     const details = element.createEl("details");
     details.createEl("summary", { text: "Recovery JSON" });
@@ -2114,7 +2114,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private showError(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    new Notice(`Grounded Problems: ${message}`, 10_000);
+    new Notice(`Practice Problem Generator: ${message}`, 10_000);
   }
 }
 
@@ -2176,7 +2176,7 @@ function sourcePresentationFromBank(bank: PracticeBankV2): SourcePresentation {
     title: bank.source.title,
     path: bank.source.vaultPath,
     characterCount: bank.segments.reduce((total, segment) => total + segment.text.length, 0),
-    excerpt: "Saved Grounded Problems bank",
+    excerpt: "Saved Practice Problem Generator bank",
     ...(pdfSource ? { detail: "Saved PDF page-range source" } : {}),
     visuals: []
   };
@@ -2264,10 +2264,10 @@ function findStoredAnswerReview(
 }
 
 function parseFailure(parsed: ReturnType<typeof parsePracticeBankMarkdown>): Error {
-  if (parsed.status === "ok") return new Error("Unexpected Grounded Problems parsing state.");
+  if (parsed.status === "ok") return new Error("Unexpected Practice Problem Generator parsing state.");
   if (parsed.status === "invalid") return new Error(`${parsed.errors.join("; ")} ${parsed.recoveryMessage}`);
   if (parsed.status === "unsupported-version") {
-    return new Error(`Unsupported Grounded Problems schema version ${String(parsed.schemaVersion)}. ${parsed.recoveryMessage}`);
+    return new Error(`Unsupported Practice Problem Generator schema version ${String(parsed.schemaVersion)}. ${parsed.recoveryMessage}`);
   }
   return new Error(parsed.recoveryMessage);
 }
