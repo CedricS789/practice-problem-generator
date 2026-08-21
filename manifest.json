@@ -1,0 +1,10 @@
+{
+  "id": "practice-lab-ai",
+  "name": "Grounded Problems",
+  "version": "1.0.0",
+  "minAppVersion": "1.13.0",
+  "description": "Generate source-grounded practice problems, image occlusions, and analytics from notes and selected PDF pages.",
+  "author": "Cédric Sipakam",
+  "authorUrl": "https://github.com/CedricS789",
+  "isDesktopOnly": false
+}

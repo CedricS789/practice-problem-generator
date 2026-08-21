@@ -1,0 +1,46 @@
+{
+  "name": "practice-lab-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generate source-grounded practice problems, image occlusions, and analytics from notes and selected PDF pages.",
+  "license": "MIT",
+  "author": "Cédric Sipakam",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CedricS789/grounded-problems.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CedricS789/grounded-problems/issues"
+  },
+  "homepage": "https://github.com/CedricS789/grounded-problems#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "tsx --test tests/*.test.ts",
+    "test:deploy": "node --test tests/deploy.test.mjs",
+    "test:bundle": "node --test tests/bundle.test.mjs",
+    "diagnose:providers": "tsx scripts/provider-diagnostics.ts",
+    "verify:release": "node scripts/verify-release.mjs",
+    "check": "npm run typecheck && npm run lint && npm test && npm run test:deploy && npm run build && npm run verify:release && npm run test:bundle",
+    "deploy": "npm run check && node scripts/deploy.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@typescript-eslint/parser": "8.67.0",
+    "esbuild": "^0.25.9",
+    "eslint": "10.8.1",
+    "eslint-plugin-obsidianmd": "0.4.1",
+    "obsidian": "1.13.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

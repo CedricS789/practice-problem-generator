@@ -1,0 +1,16 @@
+node_modules/
+main.js
+*.js.map
+.tmp/*
+!.tmp/.gitkeep
+data.json
+.env
+.env.*
+!.env.example
+coverage/
+dist/
+build/
+*.log
+*.tgz
+.DS_Store
+Thumbs.db

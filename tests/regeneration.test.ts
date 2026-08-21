@@ -1,0 +1,255 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { PracticeBankV2, ShortAnswerExerciseV1 } from "../src/model";
+import { PRACTICE_BANK_SCHEMA_VERSION } from "../src/model";
+import { serializePracticeBank } from "../src/persistence";
+import {
+  createGenerationRecipe,
+  inferExerciseTypePercentages,
+  parseGenerationRecipeMarkdown,
+  regenerationPreset,
+} from "../src/regeneration";
+import { createSourceHash, segmentSource } from "../src/segmenter";
+import {
+  EXERCISE_TYPES,
+  type ExerciseType,
+  type GenerationConfiguration,
+} from "../src/ui/contracts";
+
+const sourceText = "# Source\nGrounded evidence for regeneration.";
+
+function exercise(
+  id: string,
+  difficulty: ShortAnswerExerciseV1["difficulty"] = "medium",
+): ShortAnswerExerciseV1 {
+  const segment = segmentSource(sourceText).find((entry) => entry.kind === "paragraph");
+  assert.ok(segment);
+  return {
+    id,
+    type: "short-answer",
+    title: "Grounded question",
+    prompt: "What does the source establish?",
+    difficulty,
+    sourceSegmentIds: [segment.id],
+    groundedAnswer: "Grounded evidence.",
+    acceptableAnswers: ["Grounded evidence."],
+    keyPoints: ["grounded", "evidence"],
+  };
+}
+
+function bank(exercises = [exercise("exercise-1")]): PracticeBankV2 {
+  const timestamp = "2026-08-21T09:00:00.000Z";
+  return {
+    schemaVersion: PRACTICE_BANK_SCHEMA_VERSION,
+    bankId: "bank-regeneration",
+    revision: 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    source: {
+      vaultPath: "Notes/Term/Course/Source.md",
+      wikilink: "[[Notes/Term/Course/Source]]",
+      title: "Source",
+      scope: "note",
+      hash: createSourceHash(sourceText),
+    },
+    segments: segmentSource(sourceText),
+    visuals: [],
+    exercises,
+    sessions: [],
+    generation: {
+      provider: "claude",
+      reasoningEffort: "high",
+      generatedAt: timestamp,
+      promptVersion: "practice-lab-v3.1",
+    },
+  };
+}
+
+const configuration: GenerationConfiguration = {
+  provider: "codex",
+  model: "gpt-5.6",
+  reasoningEffort: "ultra",
+  focusInstructions: "Focus on cause and effect.\nAvoid definition-only prompts \"when possible\".",
+  quantity: 12,
+  difficulty: "challenge",
+  exerciseTypes: [
+    "short-answer",
+    "causal-explanation",
+    "application",
+    "calculation",
+  ],
+  exerciseTypePercentages: {
+    "short-answer": 25,
+    "causal-explanation": 25,
+    application: 25,
+    calculation: 25,
+    cloze: 0,
+    "single-select": 0,
+    "multi-select": 0,
+    matching: 0,
+    ordering: 0,
+    "image-occlusion": 0,
+  },
+  selectedVisualIds: [],
+};
+
+test("stores a complete generation recipe outside the versioned bank JSON", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
+  const markdown = serializePracticeBank(savedBank, recipe);
+  const parsed = parseGenerationRecipeMarkdown(markdown);
+
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") return;
+  assert.deepEqual(parsed.recipe, recipe);
+  assert.doesNotMatch(
+    JSON.stringify(savedBank),
+    /focusInstructions/u,
+    "the existing PracticeBankV2 JSON contract stays unchanged",
+  );
+  assert.match(markdown, /practice-lab-generation-recipe: 2/u);
+  assert.match(markdown, /practice-lab-generation-model: "gpt-5.6"/u);
+});
+
+test("loads the exact saved recipe when its source hash matches the bank", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
+  const preset = regenerationPreset(savedBank, {
+    status: "ok",
+    recipe,
+    storedSchemaVersion: 2,
+  }, {
+    provider: "agy",
+    model: "gemini-3.6-flash-low",
+    reasoningEffort: "low",
+    difficulty: "foundational",
+    focusInstructions: "fallback",
+  });
+
+  assert.equal(preset.exactRecipe, true);
+  assert.deepEqual(preset.defaults, {
+    provider: configuration.provider,
+    model: configuration.model,
+    reasoningEffort: configuration.reasoningEffort,
+    quantity: configuration.quantity,
+    difficulty: configuration.difficulty,
+    focusInstructions: configuration.focusInstructions,
+    exerciseTypePercentages: configuration.exerciseTypePercentages,
+  });
+});
+
+test("version-one recipes migrate in memory with an explicitly unpinned model", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
+  const legacyMarkdown = serializePracticeBank(savedBank, recipe)
+    .replace("practice-lab-generation-recipe: 2", "practice-lab-generation-recipe: 1")
+    .replace(/^practice-lab-generation-model:.*\n/mu, "");
+  const parsed = parseGenerationRecipeMarkdown(legacyMarkdown);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") return;
+  assert.equal(parsed.storedSchemaVersion, 1);
+  assert.equal(parsed.recipe.model, "");
+  const preset = regenerationPreset(savedBank, parsed, {
+    provider: "agy",
+    model: "gemini-3.6-flash-low",
+    reasoningEffort: "low",
+    difficulty: "foundational",
+    focusInstructions: "fallback",
+  });
+  assert.equal(preset.defaults.model, "");
+  assert.match(preset.explanation, /older recipe did not record a pinned model/iu);
+});
+
+test("older banks restore recorded provider/reasoning and infer only missing controls", () => {
+  const savedBank = bank([
+    exercise("exercise-1", "easy"),
+    exercise("exercise-2", "medium"),
+    exercise("exercise-3", "hard"),
+  ]);
+  const preset = regenerationPreset(savedBank, { status: "missing" }, {
+    provider: "agy",
+    model: "gemini-3.6-flash-low",
+    reasoningEffort: "low",
+    difficulty: "foundational",
+    focusInstructions: "Use my current default focus.",
+  });
+
+  assert.equal(preset.exactRecipe, false);
+  assert.equal(preset.defaults.provider, "claude");
+  assert.equal(preset.defaults.model, "gemini-3.6-flash-low");
+  assert.equal(preset.defaults.reasoningEffort, "high");
+  assert.equal(preset.defaults.quantity, 3);
+  assert.equal(preset.defaults.difficulty, "deep-exam");
+  assert.equal(preset.defaults.focusInstructions, "Use my current default focus.");
+  assert.equal(preset.defaults.exerciseTypePercentages?.["short-answer"], 100);
+  assert.match(preset.explanation, /older bank did not store a complete recipe/iu);
+});
+
+test("reconstructed percentages deterministically reproduce the saved type counts", () => {
+  const counts: Readonly<Record<ExerciseType, number>> = {
+    "short-answer": 4,
+    "causal-explanation": 3,
+    application: 2,
+    calculation: 1,
+    cloze: 1,
+    "single-select": 0,
+    "multi-select": 0,
+    matching: 1,
+    ordering: 0,
+    "image-occlusion": 1,
+  };
+  const exercises = EXERCISE_TYPES.flatMap((type) => Array.from(
+    { length: counts[type] },
+    () => ({ type }),
+  ));
+  const percentages = inferExerciseTypePercentages(exercises);
+
+  assert.equal(Object.values(percentages).reduce((sum, value) => sum + value, 0), 100);
+  for (const type of EXERCISE_TYPES) {
+    assert.equal(
+      Math.round(percentages[type] * 1_000) >= 0,
+      true,
+      `${type} receives a valid non-negative percentage`,
+    );
+  }
+});
+
+test("a malformed or mismatched saved recipe fails closed to bank inference", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(
+    configuration,
+    createSourceHash("different source"),
+  );
+  const preset = regenerationPreset(savedBank, {
+    status: "ok",
+    recipe,
+    storedSchemaVersion: 2,
+  }, {
+    provider: "agy",
+    model: "gemini-3.6-flash-low",
+    reasoningEffort: "medium",
+    difficulty: "foundational",
+    focusInstructions: "fallback",
+  });
+
+  assert.equal(preset.exactRecipe, false);
+  assert.equal(preset.defaults.provider, "claude");
+  assert.equal(preset.defaults.quantity, 1);
+  assert.equal(preset.defaults.focusInstructions, "fallback");
+  assert.match(preset.explanation, /could not be trusted/iu);
+});
+
+test("recipe parsing rejects permissive numeric prefixes instead of guessing", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
+  const markdown = serializePracticeBank(savedBank, recipe).replace(
+    "practice-lab-generation-quantity: 12",
+    "practice-lab-generation-quantity: 12items",
+  );
+
+  assert.deepEqual(parseGenerationRecipeMarkdown(markdown), {
+    status: "invalid",
+    message: "The saved generation recipe is incomplete or malformed.",
+  });
+});

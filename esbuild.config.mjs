@@ -1,0 +1,26 @@
+import * as esbuild from "esbuild";
+import { builtinModules } from "node:module";
+
+const production = process.argv[2] === "production";
+
+await esbuild.build({
+  entryPoints: ["src/main.ts"],
+  bundle: true,
+  external: [
+    "obsidian",
+    "electron",
+    "@electron/remote",
+    "@codemirror/*",
+    "@lezer/*",
+    ...builtinModules,
+    ...builtinModules.map((moduleName) => `node:${moduleName}`)
+  ],
+  format: "cjs",
+  platform: "node",
+  target: "es2022",
+  logLevel: "info",
+  sourcemap: production ? false : "inline",
+  minify: production,
+  treeShaking: true,
+  outfile: "main.js"
+});
