@@ -7,11 +7,13 @@ import {
   CliJobCoordinator,
   CliProviderError,
   CodexCliProviderAdapter,
+  DEFAULT_GENERATION_TIMEOUT_MS,
   DEFAULT_PROVIDER_ID,
   DesktopJobFileSystem,
   DesktopProcessRunner,
   appendNeutralMediaManifest,
   createCliProviderLayer,
+  parseProviderOutput,
   type CliJobFileSystem,
   type CliJobWorkspace,
   type CliProcessRunner,
@@ -266,7 +268,7 @@ test("Codex uses fixed safe arguments, stdin, neutral media, and cleanup", async
   const request = runner.requests[0];
   assert.ok(request);
   assert.equal(request.executable, "codex");
-  assert.deepEqual(request.args.slice(0, 15), [
+  assert.deepEqual(request.args.slice(0, 16), [
     "exec",
     "--ephemeral",
     "--ignore-user-config",
@@ -278,12 +280,13 @@ test("Codex uses fixed safe arguments, stdin, neutral media, and cleanup", async
     "--skip-git-repo-check",
     "--color",
     "never",
+    "--json",
     "--cd",
     "/neutral/job-1",
     "--output-schema",
     "/neutral/job-1/schema.json",
   ]);
-  assert.deepEqual(request.args.slice(15), [
+  assert.deepEqual(request.args.slice(16), [
     "--model",
     "gpt-5.6",
     "--image",
@@ -321,6 +324,12 @@ test("Claude uses print, no-persistence, safe mode, schema, and scoped Read", as
   assert.ok(request);
   assert.equal(request.executable, "claude");
   assert.ok(request.args.includes("--print"));
+  assert.equal(
+    request.args[request.args.indexOf("--output-format") + 1],
+    "stream-json",
+  );
+  assert.ok(request.args.includes("--include-partial-messages"));
+  assert.ok(request.args.includes("--verbose"));
   assert.ok(request.args.includes("--no-session-persistence"));
   assert.equal(
     request.args[request.args.indexOf("--effort") + 1],
@@ -390,6 +399,10 @@ test("agy blocks authored media until its explicit synthetic probe passes", asyn
     runner.requests[0]?.args[(runner.requests[0]?.args.indexOf("--effort") ?? -1) + 1],
     "low",
   );
+  assert.equal(
+    runner.requests[0]?.args[(runner.requests[0]?.args.indexOf("--print-timeout") ?? -1) + 1],
+    "80s",
+  );
 
   const result = await adapter.generate<{ ok: boolean }>({
     prompt: "visual",
@@ -407,6 +420,14 @@ test("agy blocks authored media until its explicit synthetic probe passes", asyn
   assert.equal(
     runner.requests[1]?.args[(runner.requests[1]?.args.indexOf("--model") ?? -1) + 1],
     "gemini-3.7-flash-high",
+  );
+  assert.equal(
+    runner.requests[1]?.args[(runner.requests[1]?.args.indexOf("--output-format") ?? -1) + 1],
+    "stream-json",
+  );
+  assert.equal(
+    runner.requests[1]?.args[(runner.requests[1]?.args.indexOf("--print-timeout") ?? -1) + 1],
+    "10790s",
   );
   assert.equal(jobs.jobs[0]?.cleanupCalls, 1);
   assert.equal(jobs.jobs[1]?.cleanupCalls, 1);
@@ -444,6 +465,41 @@ test("a failed agy probe leaves vision explicitly unsupported", async () => {
   const probe = await adapter.probeVision();
   assert.equal(probe.passed, false);
   assert.equal(adapter.capabilities().vision, "unsupported");
+});
+
+test("agy aligns an unpinned default to reasoning and rejects conflicting pinned variants", async () => {
+  const runner = new QueueRunner([
+    { stdout: '{"result":{"structured_output":{"ok":true}}}', stderr: "", exitCode: 0 },
+  ]);
+  const jobs = new FakeJobFileSystem();
+  const adapter = new AgyCliProviderAdapter(runner, jobs);
+  const result = await adapter.generate<{ ok: boolean }>({
+    prompt: "Synthetic text only.",
+    schema: SCHEMA,
+    validate: validateOk,
+    reasoningEffort: "medium",
+  });
+  assert.equal(result.value.ok, true);
+  assert.equal(
+    runner.requests[0]?.args[(runner.requests[0]?.args.indexOf("--model") ?? -1) + 1],
+    "gemini-3.6-flash-medium",
+  );
+
+  await assert.rejects(
+    adapter.generate({
+      prompt: "Synthetic text only.",
+      schema: SCHEMA,
+      validate: validateOk,
+      model: "gemini-3.6-flash-low",
+      reasoningEffort: "high",
+    }),
+    (error: unknown) =>
+      error instanceof CliProviderError
+      && error.code === "unsupported-capability"
+      && /pins low reasoning/u.test(error.message),
+  );
+  assert.equal(runner.requests.length, 1);
+  assert.equal(jobs.jobs[1]?.cleanupCalls, 1);
 });
 
 test("malformed JSON receives exactly one schema-repair retry", async () => {
@@ -485,6 +541,67 @@ test("agy-style diagnostic lines before the final JSON envelope are tolerated", 
   });
   assert.equal(result.value.ok, true);
   assert.equal(result.attempts, 1);
+});
+
+test("Codex and stream-json result records unwrap their final structured value", () => {
+  const codex = parseProviderOutput<{ ok: boolean }>([
+    '{"type":"thread.started","thread_id":"synthetic"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"ok\\":true}"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":12}}',
+  ].join("\n"), validateOk);
+  assert.deepEqual(codex.value, { ok: true });
+
+  const streamJson = parseProviderOutput<{ ok: boolean }>([
+    '{"type":"system","subtype":"init","model":"synthetic"}',
+    '{"type":"stream_event","event":{"type":"message_stop"}}',
+    '{"type":"result","structured_output":{"ok":true}}',
+  ].join("\n"), validateOk);
+  assert.deepEqual(streamJson.value, { ok: true });
+
+  const agyStream = parseProviderOutput<{ ok: boolean }>([
+    '{"event":"init","init":{"model":"gemini-3.6-flash-medium"}}',
+    '{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","text_delta":"{\\"ok\\":true}"}}',
+    '{"event":"result","result":{"status":"SUCCESS","response":"{\\"ok\\":true}","structured_output":{"ok":true}}}',
+  ].join("\n"), validateOk);
+  assert.deepEqual(agyStream.value, { ok: true });
+});
+
+test("the adapter defaults to three hours and streams safe activity observers", async () => {
+  const output = [
+    '{"type":"thread.started","thread_id":"private-thread-id"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"type":"reasoning","text":"private reasoning"}}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"ok\\":true}"}}',
+    '{"type":"turn.completed"}',
+  ].join("\n");
+  const runner = new QueueRunner([
+    async (request) => {
+      request.onOutput?.({ stream: "stdout", text: output });
+      return { stdout: output, stderr: "", exitCode: 0 };
+    },
+  ]);
+  const messages: string[] = [];
+  const phases: string[] = [];
+  const adapter = new CodexCliProviderAdapter(runner, new FakeJobFileSystem());
+  const result = await adapter.generate<{ ok: boolean }>({
+    prompt: "Synthetic source",
+    schema: SCHEMA,
+    validate: validateOk,
+    onActivity: (event) => {
+      messages.push(event.message);
+      phases.push(event.phase);
+    },
+  });
+  assert.equal(result.value.ok, true);
+  const processRequest = runner.requests[0];
+  assert.ok(processRequest);
+  assert.ok(processRequest.timeoutMs <= DEFAULT_GENERATION_TIMEOUT_MS);
+  assert.ok(processRequest.timeoutMs > DEFAULT_GENERATION_TIMEOUT_MS - 1_000);
+  for (const phase of ["preparing", "running", "reasoning", "receiving", "validating", "completed"]) {
+    assert.ok(phases.includes(phase), `Missing activity phase: ${phase}`);
+  }
+  assert.doesNotMatch(messages.join("\n"), /private-thread-id|private reasoning/u);
 });
 
 test("the timeout budget covers the initial call and repair together", async () => {
@@ -828,6 +945,27 @@ test("DesktopProcessRunner normalizes timeout, cancellation, and ENOENT", async 
     (error: unknown) =>
       error instanceof CliProviderError && error.code === "missing-executable",
   );
+});
+
+test("DesktopProcessRunner reports stdout and stderr incrementally", async () => {
+  const runner = new DesktopProcessRunner();
+  const output: Array<{ stream: string; text: string }> = [];
+  const result = await runner.run({
+    executable: process.execPath,
+    args: [
+      "-e",
+      "process.stdout.write('first\\n');process.stderr.write('second\\n');",
+    ],
+    cwd: process.cwd(),
+    stdin: "",
+    timeoutMs: 5_000,
+    onOutput: (event) => output.push(event),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /first/u);
+  assert.match(result.stderr, /second/u);
+  assert.ok(output.some((event) => event.stream === "stdout" && event.text.includes("first")));
+  assert.ok(output.some((event) => event.stream === "stderr" && event.text.includes("second")));
 });
 
 test("DesktopJobFileSystem uses an OS job directory and removes it", async () => {

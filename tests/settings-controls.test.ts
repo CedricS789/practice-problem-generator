@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [settingsSource, mainSource, viewSource, dashboardSource, bankSource, hoverSource] = await Promise.all([
+const [settingsSource, settingsValuesSource, mainSource, viewSource, dashboardSource, bankSource, hoverSource] = await Promise.all([
   readFile(new URL("../src/settings.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/settings-values.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/practice-lab-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/practice-dashboard-view.ts", import.meta.url), "utf8"),
@@ -40,6 +41,8 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "dashboardActivityMetric",
     "dashboardWeekStart",
     "display",
+    "settingsSchemaVersion",
+    "DEFAULT_AI_TIMEOUT_MS",
   ]) {
     assert.match(settingsSource, new RegExp(setting, "u"));
   }
@@ -116,4 +119,18 @@ test("optional presentation never hides consent or repair controls", () => {
       `Missing analytics setting: ${analyticsControl}`,
     );
   }
+});
+
+test("three-hour AI defaults migrate durably and live activity stays optional", () => {
+  assert.match(settingsValuesSource, /DEFAULT_AI_TIMEOUT_MS = 3 \* 60 \* 60 \* 1_000/u);
+  assert.match(settingsSource, /setPlaceholder\("180"\)/u);
+  assert.match(settingsSource, /Live agent activity/u);
+  assert.match(settingsSource, /LEGACY_DEFAULT_AGY_MODEL/u);
+  assert.match(settingsSource, /agyModelForReasoning/u);
+  assert.match(settingsSource, /Private chain-of-thought is never exposed or saved/u);
+  assert.match(mainSource, /JSON\.stringify\(storedSettings\) !== JSON\.stringify\(this\.settings\)/u);
+  assert.match(mainSource, /await this\.saveData\(this\.settings\)/u);
+  assert.match(viewSource, /onActivity: \(event\) => this\.publishGenerationActivity\(event\)/u);
+  assert.match(viewSource, /publishAnswerReviewActivity/u);
+  assert.match(viewSource, /this activity log is capped and is not saved to your vault/u);
 });

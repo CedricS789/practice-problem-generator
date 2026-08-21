@@ -14,11 +14,14 @@ import {
   validateAnswerReviewInput,
 } from "../answer-review";
 import type { DetectedVisual, OcclusionMaskCandidate } from "../visuals";
+import type { CliActivityEvent, CliActivityPhase } from "../cli/contracts";
 import {
   displayReasoningEffort,
   reasoningEffortDescription,
 } from "../reasoning";
 import {
+  agyModelForReasoning,
+  agyModelReasoningProblem,
   MAX_MODEL_ID_LENGTH,
   modelIdProblem,
 } from "../model-selection";
@@ -81,6 +84,7 @@ import {
 import {
   EXERCISE_TYPES,
   type AnswerReviewCriterionResult,
+  type AnswerReviewActivityPresentation,
   type AnswerReviewMode,
   type AnswerReviewRequest,
   type AnswerReviewStatus,
@@ -127,6 +131,27 @@ const VISUAL_LABELS: Readonly<Record<DetectedVisual["kind"], string>> = {
   "remote-image": "Remote image",
   "notability-region": "Notability region",
 };
+
+const MAX_GENERATION_ACTIVITY_EVENTS = 120;
+const MAX_ANSWER_REVIEW_ACTIVITY_EVENTS = 40;
+const MAX_ANSWER_REVIEW_ACTIVITY_JOBS = 8;
+const VISIBLE_ACTIVITY_EVENTS_PER_JOB = 12;
+const TERMINAL_ACTIVITY_PHASES = new Set<CliActivityPhase>([
+  "completed",
+  "cancelled",
+  "failed",
+]);
+
+interface AnswerReviewActivityLog {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly exerciseId: string;
+  readonly exerciseTitle: string;
+  readonly provider: ProviderId;
+  readonly startedAt: number;
+  finishedAt?: number;
+  events: CliActivityEvent[];
+}
 
 function selectedVisualIds(source: SourcePresentation | null): readonly string[] {
   return source?.visuals.filter((visual) => visual.selected).map((visual) => visual.id) ?? [];
@@ -234,6 +259,19 @@ export class PracticeLabView extends ItemView {
   private previewKey: string | null = null;
   private payloadAccepted = false;
   private job: JobPresentation = { state: "idle" };
+  private generationActivityEvents: CliActivityEvent[] = [];
+  private generationActivityStartedAt: number | null = null;
+  private generationActivityFinishedAt: number | null = null;
+  private readonly answerReviewActivityLogs = new Map<string, AnswerReviewActivityLog>();
+  private agentActivityHostEl: HTMLElement | null = null;
+  private agentActivitySummaryEl: HTMLElement | null = null;
+  private activityElapsedEls: Array<{
+    readonly element: HTMLElement;
+    readonly startedAt: number;
+    readonly finishedAt?: number;
+  }> = [];
+  private agentActivityOpen = true;
+  private activityClock: number | undefined;
   private drafts: EditableDraftExercise[] = [];
   private studyExercises: EditableDraftExercise[] = [];
   private studyIndex = 0;
@@ -317,6 +355,7 @@ export class PracticeLabView extends ItemView {
 
   public override async onClose(): Promise<void> {
     this.clearOcclusionEditors();
+    this.clearActivityClock();
   }
 
   public setSource(
@@ -327,6 +366,11 @@ export class PracticeLabView extends ItemView {
     this.sourceRequestEpoch += 1;
     this.sourceRequestMode = null;
     this.regenerationContext = null;
+    this.generationActivityEvents = [];
+    this.generationActivityStartedAt = null;
+    this.generationActivityFinishedAt = null;
+    this.answerReviewActivityLogs.clear();
+    this.clearActivityClock();
     this.focusInstructions = this.defaultFocusInstructions;
     this.drafts = [];
     this.studyExercises = [];
@@ -414,7 +458,10 @@ export class PracticeLabView extends ItemView {
     if (expansionChanged) {
       this.payloadPreviewOpen = normalized.practice.expandPayloadPreview;
     }
-    if (this.stage === "study") return;
+    if (this.stage === "study") {
+      this.updateAgentActivityDom();
+      return;
+    }
     this.renderPreservingScroll();
   }
 
@@ -424,6 +471,44 @@ export class PracticeLabView extends ItemView {
     this.updateAnswerReviewStatusDom();
     this.updatePracticeRunDom();
     this.updateStudyCompletionDom();
+  }
+
+  /** Publish safe provider progress without rebuilding or disturbing the question. */
+  public publishAnswerReviewActivity(
+    activity: AnswerReviewActivityPresentation,
+  ): void {
+    if (activity.sessionId !== this.studySessionId) return;
+    const existing = this.answerReviewActivityLogs.get(activity.requestId);
+    const occurredAt = Date.parse(activity.occurredAt);
+    const log: AnswerReviewActivityLog = existing ?? {
+      requestId: activity.requestId,
+      sessionId: activity.sessionId,
+      exerciseId: activity.exerciseId,
+      exerciseTitle: activity.exerciseTitle,
+      provider: activity.provider,
+      startedAt: Number.isFinite(occurredAt) ? occurredAt : Date.now(),
+      events: [],
+    };
+    log.events = appendActivityEvent(
+      log.events,
+      activity,
+      MAX_ANSWER_REVIEW_ACTIVITY_EVENTS,
+    );
+    if (TERMINAL_ACTIVITY_PHASES.has(activity.phase)) {
+      log.finishedAt = Date.now();
+    } else if (log.finishedAt !== undefined) {
+      delete log.finishedAt;
+    }
+    this.answerReviewActivityLogs.delete(activity.requestId);
+    this.answerReviewActivityLogs.set(activity.requestId, log);
+    while (this.answerReviewActivityLogs.size > MAX_ANSWER_REVIEW_ACTIVITY_JOBS) {
+      const oldest = this.answerReviewActivityLogs.keys().next().value;
+      if (oldest === undefined) break;
+      this.answerReviewActivityLogs.delete(oldest);
+    }
+    this.agentActivityOpen = true;
+    this.updateActivityClock();
+    this.updateAgentActivityDom();
   }
 
   public setConfigurationDefaults(
@@ -528,6 +613,7 @@ export class PracticeLabView extends ItemView {
     this.studyFinishing = false;
     this.studyFinishError = null;
     this.pausedAnswerReviewIds.clear();
+    this.answerReviewActivityLogs.clear();
     this.answerReviewMode =
       this.options.callbacks.enqueueAnswerReview === undefined
         ? "self"
@@ -550,6 +636,9 @@ export class PracticeLabView extends ItemView {
     this.answerReviewControlsEl = null;
     this.answerReviewStatusEl = null;
     this.answerReviewActionsEl = null;
+    this.agentActivityHostEl = null;
+    this.agentActivitySummaryEl = null;
+    this.activityElapsedEls = [];
     this.studyFeedbackActionsEl = null;
     this.studyCompletionProvisionalEl = null;
     this.studyCompletionOutcomeEl = null;
@@ -574,6 +663,11 @@ export class PracticeLabView extends ItemView {
     }
     const icon = header.createDiv({ cls: "practice-lab-header-icon" });
     setIcon(icon, "flask-conical");
+
+    this.agentActivityHostEl = this.contentEl.createDiv({
+      cls: "practice-lab-agent-activity-host",
+    });
+    this.updateAgentActivityDom();
 
     if (
       this.stage !== "study"
@@ -988,10 +1082,12 @@ export class PracticeLabView extends ItemView {
           ].filter((part) => part !== undefined).join(" · ")
         : selectedProvider?.detail ?? "Provider availability has not been confirmed.",
     );
+    let modelInput: HTMLInputElement | null = null;
     new Setting(form)
       .setName("Model")
       .setDesc("Optional exact CLI model. Leave blank for the provider default; Practice Problem Generator records that the model was not pinned.")
       .addText((component) => {
+        modelInput = component.inputEl;
         component.inputEl.maxLength = MAX_MODEL_ID_LENGTH;
         component.inputEl.spellcheck = false;
         component
@@ -1011,6 +1107,10 @@ export class PracticeLabView extends ItemView {
         }
         component.setValue(this.reasoningEffort).onChange((value) => {
           this.reasoningEffort = value as ReasoningEffort;
+          if (this.provider === "agy") {
+            this.model = agyModelForReasoning(this.model, this.reasoningEffort);
+            if (modelInput !== null) modelInput.value = this.model;
+          }
           configurationChanged();
         });
       });
@@ -1483,6 +1583,179 @@ export class PracticeLabView extends ItemView {
       .setDestructive();
     cancel.setDisabled(this.job.state === "cancelling");
     cancel.onClick(() => void this.cancelGeneration());
+  }
+
+  private publishGenerationActivity(event: CliActivityEvent): void {
+    this.generationActivityEvents = appendActivityEvent(
+      this.generationActivityEvents,
+      event,
+      MAX_GENERATION_ACTIVITY_EVENTS,
+    );
+    if (TERMINAL_ACTIVITY_PHASES.has(event.phase)) {
+      this.generationActivityFinishedAt = Date.now();
+    }
+    this.agentActivityOpen = true;
+    this.updateActivityClock();
+    this.updateAgentActivityDom();
+  }
+
+  private updateAgentActivityDom(): void {
+    const host = this.agentActivityHostEl;
+    if (host === null) return;
+    host.empty();
+    this.agentActivitySummaryEl = null;
+    this.activityElapsedEls = [];
+    const reviewLogs = [...this.answerReviewActivityLogs.values()]
+      .filter((log) => log.sessionId === this.studySessionId);
+    const generationVisible = this.generationActivityEvents.length > 0
+      || this.job.state === "running"
+      || this.job.state === "cancelling";
+    const visible = this.displayPreferences.practice.showAgentActivity
+      && (generationVisible || reviewLogs.length > 0);
+    host.hidden = !visible;
+    if (!visible) return;
+
+    const activeCount = (this.job.state === "running" || this.job.state === "cancelling" ? 1 : 0)
+      + reviewLogs.filter((log) => log.finishedAt === undefined).length;
+    const details = host.createEl("details", {
+      cls: "practice-lab-agent-activity",
+    });
+    details.open = this.agentActivityOpen || activeCount > 0;
+    details.addEventListener("toggle", () => {
+      this.agentActivityOpen = details.open;
+    });
+    const summary = details.createEl("summary", {
+      attr: {
+        title: "Show or hide live provider progress. Raw output and private reasoning content are never displayed.",
+      },
+    });
+    const summaryIcon = summary.createSpan({ cls: "practice-lab-agent-activity-icon" });
+    setIcon(summaryIcon, activeCount > 0 ? "activity" : "check-circle-2");
+    summary.createEl("strong", { text: "Agent activity" });
+    this.agentActivitySummaryEl = summary.createSpan({
+      cls: "practice-lab-agent-activity-summary",
+      text: activeCount > 0
+        ? `${activeCount} running · ${this.currentActivityElapsedText(reviewLogs)}`
+        : "Latest run complete",
+    });
+    const body = details.createDiv({ cls: "practice-lab-agent-activity-body" });
+    body.createEl("p", {
+      cls: "practice-lab-agent-activity-disclosure",
+      text: "Live provider events, elapsed time, and emitted reasoning status. Private chain-of-thought and raw provider output are not exposed; this activity log is capped and is not saved to your vault.",
+    });
+    if (generationVisible) {
+      this.renderActivityLog(
+        body,
+        "Exercise generation",
+        this.generationActivityStartedAt ?? Date.now(),
+        this.generationActivityFinishedAt ?? undefined,
+        this.generationActivityEvents,
+      );
+    }
+    for (const log of reviewLogs.slice(-3).reverse()) {
+      this.renderActivityLog(
+        body,
+        `Answer review · ${log.exerciseTitle}`,
+        log.startedAt,
+        log.finishedAt,
+        log.events,
+      );
+    }
+  }
+
+  private renderActivityLog(
+    container: HTMLElement,
+    title: string,
+    startedAt: number,
+    finishedAt: number | undefined,
+    events: readonly CliActivityEvent[],
+  ): void {
+    const section = container.createEl("section", {
+      cls: "practice-lab-agent-activity-job",
+    });
+    const heading = section.createDiv({ cls: "practice-lab-agent-activity-job-heading" });
+    heading.createEl("strong", { text: title });
+    const elapsed = heading.createSpan({
+      text: formatElapsed((finishedAt ?? Date.now()) - startedAt),
+      attr: { title: "Elapsed provider time" },
+    });
+    this.activityElapsedEls.push({
+      element: elapsed,
+      startedAt,
+      ...(finishedAt === undefined ? {} : { finishedAt }),
+    });
+    const list = section.createEl("ol", {
+      cls: "practice-lab-agent-activity-log",
+      attr: { "aria-live": "polite", "aria-relevant": "additions text" },
+    });
+    if (events.length === 0) {
+      list.createEl("li", { text: "Preparing the provider process…" });
+      return;
+    }
+    for (const event of events.slice(-VISIBLE_ACTIVITY_EVENTS_PER_JOB)) {
+      const item = list.createEl("li", {
+        cls: `is-${event.phase}`,
+      });
+      const eventTime = Date.parse(event.occurredAt);
+      item.createEl("time", {
+        text: Number.isFinite(eventTime)
+          ? `+${formatElapsed(Math.max(0, eventTime - startedAt))}`
+          : "now",
+      });
+      item.createSpan({ text: event.message });
+    }
+  }
+
+  private currentActivityElapsedText(
+    reviewLogs: readonly AnswerReviewActivityLog[],
+  ): string {
+    const starts: number[] = [];
+    if (
+      (this.job.state === "running" || this.job.state === "cancelling")
+      && this.generationActivityStartedAt !== null
+    ) {
+      starts.push(this.generationActivityStartedAt);
+    }
+    starts.push(...reviewLogs
+      .filter((log) => log.finishedAt === undefined)
+      .map((log) => log.startedAt));
+    return formatElapsed(Date.now() - Math.min(...starts, Date.now()));
+  }
+
+  private updateActivityClock(): void {
+    const generationActive = this.job.state === "running" || this.job.state === "cancelling";
+    const reviewActive = [...this.answerReviewActivityLogs.values()]
+      .some((log) => log.finishedAt === undefined);
+    if ((generationActive || reviewActive) && this.activityClock === undefined) {
+      this.activityClock = window.setInterval(() => {
+        this.refreshActivityElapsedDom();
+      }, 1_000);
+    } else if (!generationActive && !reviewActive) {
+      this.clearActivityClock();
+    }
+  }
+
+  private refreshActivityElapsedDom(): void {
+    for (const elapsed of this.activityElapsedEls) {
+      elapsed.element.setText(formatElapsed(
+        (elapsed.finishedAt ?? Date.now()) - elapsed.startedAt,
+      ));
+    }
+    const reviewLogs = [...this.answerReviewActivityLogs.values()]
+      .filter((log) => log.sessionId === this.studySessionId);
+    const activeCount = (this.job.state === "running" || this.job.state === "cancelling" ? 1 : 0)
+      + reviewLogs.filter((log) => log.finishedAt === undefined).length;
+    if (this.agentActivitySummaryEl !== null && activeCount > 0) {
+      this.agentActivitySummaryEl.setText(
+        `${activeCount} running · ${this.currentActivityElapsedText(reviewLogs)}`,
+      );
+    }
+  }
+
+  private clearActivityClock(): void {
+    if (this.activityClock === undefined) return;
+    window.clearInterval(this.activityClock);
+    this.activityClock = undefined;
   }
 
   private renderReview(container: HTMLElement): void {
@@ -3027,6 +3300,13 @@ export class PracticeLabView extends ItemView {
   private configurationProblem(): string | null {
     const modelProblem = modelIdProblem(this.model);
     if (modelProblem !== null) return modelProblem;
+    if (this.provider === "agy") {
+      const reasoningProblem = agyModelReasoningProblem(
+        this.model,
+        this.reasoningEffort,
+      );
+      if (reasoningProblem !== null) return reasoningProblem;
+    }
     const focusProblem = focusInstructionsProblem(this.focusInstructions);
     if (focusProblem !== null) return focusProblem;
     const distributionProblem = exerciseTypeDistributionProblem(
@@ -3126,22 +3406,32 @@ export class PracticeLabView extends ItemView {
       this.render();
       return;
     }
+    this.generationActivityEvents = [];
+    this.generationActivityStartedAt = Date.now();
+    this.generationActivityFinishedAt = null;
+    this.agentActivityOpen = true;
     this.job = { state: "running", message: "Generating grounded exercises…" };
+    this.updateActivityClock();
     this.render();
     try {
       const drafts = await this.options.callbacks.generate({
         source,
         configuration,
         payloadAccepted: true,
+        onActivity: (event) => this.publishGenerationActivity(event),
       });
+      this.generationActivityFinishedAt ??= Date.now();
       this.job = { state: "idle" };
+      this.updateActivityClock();
       this.setDrafts(drafts);
     } catch (error) {
+      this.generationActivityFinishedAt ??= Date.now();
       this.job = {
         state: "failed",
         message: this.errorMessage(error, "Generation failed."),
       };
       new Notice(this.job.message ?? "Generation failed.");
+      this.updateActivityClock();
       this.render();
     }
   }
@@ -3153,7 +3443,9 @@ export class PracticeLabView extends ItemView {
     try {
       await this.options.callbacks.cancelGeneration();
     } finally {
+      this.generationActivityFinishedAt ??= Date.now();
       this.job = { state: "idle" };
+      this.updateActivityClock();
       this.render();
     }
   }
@@ -3625,4 +3917,38 @@ export class PracticeLabView extends ItemView {
       ? error.message
       : fallback;
   }
+}
+
+function appendActivityEvent(
+  events: readonly CliActivityEvent[],
+  event: CliActivityEvent,
+  maximum: number,
+): CliActivityEvent[] {
+  const next = [...events];
+  const latest = next.at(-1);
+  if (
+    latest !== undefined
+    && latest.phase === event.phase
+    && (
+      event.phase === "receiving"
+      || event.phase === "reasoning"
+      || latest.message === event.message
+    )
+  ) {
+    next[next.length - 1] = event;
+  } else {
+    next.push(event);
+  }
+  return next.slice(-maximum);
+}
+
+function formatElapsed(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }

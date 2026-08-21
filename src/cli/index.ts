@@ -14,7 +14,11 @@ import type {
 import { DesktopJobFileSystem, DesktopProcessRunner } from "./runtime";
 
 export * from "./agy";
-export { appendNeutralMediaManifest } from "./base-adapter";
+export * from "./activity";
+export {
+  appendNeutralMediaManifest,
+  DEFAULT_GENERATION_TIMEOUT_MS,
+} from "./base-adapter";
 export * from "./claude";
 export * from "./codex";
 export * from "./contracts";

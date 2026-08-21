@@ -71,7 +71,9 @@ export function reasoningEffortDescription(provider: ReasoningProviderId): strin
     .join(", ");
   const modelNote = provider === "codex"
     ? " An exact Codex model may support only a subset and will fail clearly rather than being silently changed."
-    : "";
+    : provider === "agy"
+      ? " agy model variants ending in low, medium, or high must match; the visible model field is updated when that reasoning choice changes."
+      : "";
   return `Every reasoning level exposed by the ${providerLabel} CLI is available: ${levels}. Higher effort usually takes longer.${modelNote}`;
 }
 

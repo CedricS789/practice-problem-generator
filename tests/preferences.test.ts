@@ -55,6 +55,9 @@ test("visibility presets are coherent independent copies", () => {
   assert.equal(minimal.practice.enableStudyKeyboardShortcuts, true);
   assert.equal(minimal.practice.autoFocusStudyInput, true);
   assert.equal(minimal.practice.showStudyShortcutHint, false);
+  assert.equal(detailed.practice.showAgentActivity, true);
+  assert.equal(focused.practice.showAgentActivity, true);
+  assert.equal(minimal.practice.showAgentActivity, false);
   detailed.practice.showSourcePath = false;
   assert.equal(displayPreset("detailed").practice.showSourcePath, true);
 });

@@ -6,6 +6,7 @@ export interface PracticeViewPreferences {
   density: InterfaceDensity;
   showHeaderDescription: boolean;
   showGenerationStepper: boolean;
+  showAgentActivity: boolean;
   showSourcePath: boolean;
   showSourceExcerpt: boolean;
   expandPayloadPreview: boolean;
@@ -77,6 +78,7 @@ export const DEFAULT_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     density: "comfortable",
     showHeaderDescription: true,
     showGenerationStepper: true,
+    showAgentActivity: true,
     showSourcePath: true,
     showSourceExcerpt: true,
     expandPayloadPreview: false,
@@ -139,6 +141,7 @@ const FOCUSED_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     ...DEFAULT_DISPLAY_PREFERENCES.practice,
     showSourcePath: false,
     showHeaderDescription: false,
+    showAgentActivity: true,
     showDraftGrounding: false,
     showRunRank: false,
   },
@@ -161,6 +164,7 @@ const MINIMAL_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     density: "compact",
     showHeaderDescription: false,
     showGenerationStepper: false,
+    showAgentActivity: false,
     showSourcePath: false,
     showSourceExcerpt: false,
     expandPayloadPreview: false,
@@ -257,6 +261,7 @@ export function normalizeDisplayPreferences(
       density: practice.density === "compact" ? "compact" : "comfortable",
       showHeaderDescription: booleanValue(practice.showHeaderDescription, defaults.practice.showHeaderDescription),
       showGenerationStepper: booleanValue(practice.showGenerationStepper, defaults.practice.showGenerationStepper),
+      showAgentActivity: booleanValue(practice.showAgentActivity, defaults.practice.showAgentActivity),
       showSourcePath: booleanValue(practice.showSourcePath, defaults.practice.showSourcePath),
       showSourceExcerpt: booleanValue(practice.showSourceExcerpt, defaults.practice.showSourceExcerpt),
       expandPayloadPreview: booleanValue(practice.expandPayloadPreview, defaults.practice.expandPayloadPreview),

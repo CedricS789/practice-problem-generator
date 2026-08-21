@@ -32,6 +32,7 @@
 }
 
 .practice-lab-header,
+.practice-lab-agent-activity-host,
 .practice-lab-stepper,
 .practice-lab-body {
   width: min(100%, var(--practice-lab-content-width));
@@ -723,6 +724,124 @@
   align-items: center;
   gap: 9px;
   color: var(--text-muted);
+}
+
+.practice-lab-agent-activity-host {
+  margin-bottom: 18px;
+}
+
+.practice-lab-agent-activity-host[hidden] {
+  display: none;
+}
+
+.practice-lab-agent-activity {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 42%, var(--practice-lab-border));
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--interactive-accent) 4%, var(--background-secondary));
+}
+
+.practice-lab-agent-activity > summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.practice-lab-agent-activity > summary::-webkit-details-marker {
+  display: none;
+}
+
+.practice-lab-agent-activity-icon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--interactive-accent);
+}
+
+.practice-lab-agent-activity-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.practice-lab-agent-activity-summary {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+.practice-lab-agent-activity-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--practice-lab-border);
+}
+
+.practice-lab-agent-activity-disclosure {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+}
+
+.practice-lab-agent-activity-job {
+  overflow: hidden;
+  border: 1px solid var(--practice-lab-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.practice-lab-agent-activity-job-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--practice-lab-border);
+  font-size: var(--font-ui-small);
+}
+
+.practice-lab-agent-activity-job-heading > span {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+.practice-lab-agent-activity-log {
+  display: grid;
+  gap: 5px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+}
+
+.practice-lab-agent-activity-log li {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.practice-lab-agent-activity-log time {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.practice-lab-agent-activity-log li.is-completed,
+.practice-lab-agent-activity-log li.is-validating {
+  color: var(--text-success);
+}
+
+.practice-lab-agent-activity-log li.is-failed,
+.practice-lab-agent-activity-log li.is-cancelled {
+  color: var(--text-error);
 }
 
 .practice-lab-spinner svg {

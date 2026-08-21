@@ -180,6 +180,11 @@ export class DesktopProcessRunner implements CliProcessRunner {
         }
         if (target === "stdout") stdout += text;
         else stderr += text;
+        try {
+          request.onOutput?.({ stream: target, text });
+        } catch {
+          // Output observers are informational and must never affect the job.
+        }
       };
 
       child.stdout.on("data", (chunk: unknown) => collect("stdout", chunk));

@@ -10,9 +10,14 @@ import { CliProviderError, normalizeUnknownError } from "./errors";
 import { parseProviderOutput } from "./parse";
 import type { ReasoningEffortV1 } from "../model";
 import { AGY_REASONING_EFFORTS } from "../reasoning";
-import { DEFAULT_AGY_MODEL } from "../model-selection";
+import {
+  agyModelForReasoning,
+  agyModelReasoningProblem,
+  DEFAULT_AGY_MODEL,
+} from "../model-selection";
 
 const PROBE_TIMEOUT_MS = 90_000;
+const PROCESS_EXIT_RESERVE_MS = 10_000;
 const RED_PIXEL_PNG = Uint8Array.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0,
   1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 1, 115, 82,
@@ -66,25 +71,35 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
     prompt: string,
     model: string,
     reasoningEffort: ReasoningEffortV1,
+    timeoutMs: number,
   ): Promise<PreparedInvocation> {
+    const modelProblem = agyModelReasoningProblem(model, reasoningEffort);
+    if (modelProblem !== null) {
+      throw new CliProviderError(
+        "unsupported-capability",
+        modelProblem,
+        { provider: this.id },
+      );
+    }
+    const effectiveModel = agyModelForReasoning(model, reasoningEffort);
     await workspace.writeText("briefing.txt", prompt);
     return {
       args: [
         "--print",
         "Read briefing.txt in the current isolated directory, follow it exactly, and return only the JSON object required by --json-schema.",
         "--output-format",
-        "json",
+        "stream-json",
         "--json-schema",
         schemaPath,
         "--sandbox",
         "--model",
-        model.length > 0 ? model : DEFAULT_AGY_MODEL,
+        effectiveModel,
         "--mode",
         "accept-edits",
         "--effort",
         reasoningEffort,
         "--print-timeout",
-        "4m30s",
+        printTimeout(timeoutMs),
         "--disable-slash-commands",
         "--new-project",
         "--dangerously-skip-permissions",
@@ -129,8 +144,9 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
           },
         ],
         "Inspect media-001.png in this isolated directory. Return its single pixel's color in observedColor. Return JSON only.",
-        DEFAULT_AGY_MODEL,
+        agyModelForReasoning(DEFAULT_AGY_MODEL, "low"),
         "low",
+        PROBE_TIMEOUT_MS,
       );
       const result = await this.runInvocation(
         workspace,
@@ -179,4 +195,13 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
       }
     }
   }
+}
+
+function printTimeout(timeoutMs: number): string {
+  // Let agy unwind its own workers before the outer process-tree deadline so
+  // Windows can remove the neutral job directory without a file-lock race.
+  const reserve = timeoutMs > PROCESS_EXIT_RESERVE_MS + 5_000
+    ? PROCESS_EXIT_RESERVE_MS
+    : Math.min(1_000, Math.floor(timeoutMs / 2));
+  return `${Math.max(1, Math.floor((timeoutMs - reserve) / 1_000))}s`;
 }

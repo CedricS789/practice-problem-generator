@@ -1,6 +1,7 @@
 import type {
   CliJobFileSystem,
   CliJobWorkspace,
+  CliActivityListener,
   CliProcessRunner,
   CliProviderAdapter,
   NeutralMedia,
@@ -15,8 +16,10 @@ import { CliProviderError, normalizeUnknownError } from "./errors";
 import { parseProviderOutput } from "./parse";
 import type { ReasoningEffortV1 } from "../model";
 import { modelIdProblem } from "../model-selection";
+import { DEFAULT_AI_TIMEOUT_MS } from "../settings-values";
+import { CliActivityDecoder, publishCliActivity } from "./activity";
 
-export const DEFAULT_GENERATION_TIMEOUT_MS = 5 * 60 * 1_000;
+export const DEFAULT_GENERATION_TIMEOUT_MS = DEFAULT_AI_TIMEOUT_MS;
 const DETECTION_TIMEOUT_MS = 10_000;
 
 export interface PreparedInvocation {
@@ -58,6 +61,7 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     prompt: string,
     model: string,
     reasoningEffort: ReasoningEffortV1,
+    timeoutMs: number,
   ): PreparedInvocation | Promise<PreparedInvocation>;
 
   async detect(signal?: AbortSignal): Promise<ProviderDetection> {
@@ -138,6 +142,12 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     let workspace: CliJobWorkspace | undefined;
     let primaryError: CliProviderError | undefined;
     try {
+      publishCliActivity(
+        request.onActivity,
+        this.id,
+        "preparing",
+        "Preparing an isolated AI job.",
+      );
       workspace = await this.jobFileSystem.create();
       const schemaJson = JSON.stringify(request.schema);
       const schemaPath = await workspace.writeText("schema.json", schemaJson);
@@ -154,6 +164,13 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
       for (const attempt of [1, 2] as const) {
         if (attempt === 2) {
           prompt = createRepairPrompt(prompt, priorOutput, priorFailure);
+          publishCliActivity(
+            request.onActivity,
+            this.id,
+            "repairing",
+            "The first response did not validate; requesting one structured repair.",
+            attempt,
+          );
         }
 
         const remainingMs = deadline - Date.now();
@@ -172,17 +189,41 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
           prompt,
           request.model ?? "",
           request.reasoningEffort ?? "medium",
+          remainingMs,
+        );
+        publishCliActivity(
+          request.onActivity,
+          this.id,
+          "running",
+          `${this.label} is processing the approved source.`,
+          attempt,
         );
         const result = await this.runInvocation(
           workspace,
           invocation,
           remainingMs,
           request.signal,
+          request.onActivity,
+          attempt,
         );
         priorOutput = result.stdout;
 
         try {
+          publishCliActivity(
+            request.onActivity,
+            this.id,
+            "validating",
+            "Validating the structured response locally.",
+            attempt,
+          );
           const parsed = parseProviderOutput(result.stdout, request.validate);
+          publishCliActivity(
+            request.onActivity,
+            this.id,
+            "completed",
+            "The structured response passed local validation.",
+            attempt,
+          );
           return { provider: this.id, value: parsed.value, attempts: attempt };
         } catch (error) {
           const normalized = normalizeUnknownError(error, this.label);
@@ -205,12 +246,26 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
       );
     } catch (error) {
       primaryError = normalizeUnknownError(error, this.label);
+      publishCliActivity(
+        request.onActivity,
+        this.id,
+        primaryError.code === "cancelled" ? "cancelled" : "failed",
+        primaryError.code === "cancelled"
+          ? "The AI job was cancelled."
+          : "The AI job stopped before producing a valid result.",
+      );
       throw primaryError;
     } finally {
       if (workspace !== undefined) {
         try {
           await workspace.cleanup();
         } catch (cleanupError) {
+          publishCliActivity(
+            request.onActivity,
+            this.id,
+            "failed",
+            "The isolated job could not be cleaned up safely.",
+          );
           // eslint-disable-next-line no-unsafe-finally -- A leaked job can contain submitted material, so cleanup failure must win.
           throw new CliProviderError(
             "workspace-error",
@@ -235,15 +290,38 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     invocation: PreparedInvocation,
     timeoutMs: number,
     signal?: AbortSignal,
+    onActivity?: CliActivityListener,
+    attempt: 1 | 2 = 1,
   ): Promise<ProcessRunResult> {
-    const result = await this.runner.run({
-      executable: this.executable,
-      args: invocation.args,
-      cwd: workspace.absolutePath,
-      stdin: invocation.stdin,
-      timeoutMs,
-      ...(signal === undefined ? {} : { signal }),
-    });
+    const decoder = onActivity === undefined
+      ? undefined
+      : new CliActivityDecoder(this.id, attempt, onActivity);
+    let streamedOutput = false;
+    let result: ProcessRunResult;
+    try {
+      result = await this.runner.run({
+        executable: this.executable,
+        args: invocation.args,
+        cwd: workspace.absolutePath,
+        stdin: invocation.stdin,
+        timeoutMs,
+        ...(signal === undefined ? {} : { signal }),
+        ...(decoder === undefined
+          ? {}
+          : {
+              onOutput: (event): void => {
+                streamedOutput = true;
+                decoder.push(event);
+              },
+            }),
+      });
+      if (decoder !== undefined && !streamedOutput) {
+        decoder.push({ stream: "stdout", text: result.stdout });
+        decoder.push({ stream: "stderr", text: result.stderr });
+      }
+    } finally {
+      decoder?.finish();
+    }
 
     if (result.exitCode !== 0) {
       throw new CliProviderError(

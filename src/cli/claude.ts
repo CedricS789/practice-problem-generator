@@ -43,11 +43,14 @@ export class ClaudeCliProviderAdapter extends BaseCliProviderAdapter {
     prompt: string,
     model: string,
     reasoningEffort: ReasoningEffortV1,
+    _timeoutMs: number,
   ): PreparedInvocation {
     const args = [
       "--print",
       "--output-format",
-      "json",
+      "stream-json",
+      "--include-partial-messages",
+      "--verbose",
       "--json-schema",
       schemaJson,
       "--no-session-persistence",

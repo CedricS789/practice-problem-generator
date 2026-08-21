@@ -43,6 +43,7 @@ export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
     prompt: string,
     model: string,
     reasoningEffort: ReasoningEffortV1,
+    _timeoutMs: number,
   ): PreparedInvocation {
     const args: string[] = [
       "exec",
@@ -56,6 +57,7 @@ export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
       "--skip-git-repo-check",
       "--color",
       "never",
+      "--json",
       "--cd",
       workspace.absolutePath,
       "--output-schema",

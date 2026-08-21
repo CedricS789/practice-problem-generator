@@ -27,9 +27,17 @@ import {
   reasoningEffortsForProvider,
 } from "./reasoning";
 import { installHoverDescriptions } from "./ui/hover-descriptions";
-import { normalizeGifFrameDefault } from "./settings-values";
 import {
+  DEFAULT_AI_TIMEOUT_MS,
+  MAX_AI_TIMEOUT_MS,
+  MIN_AI_TIMEOUT_MS,
+  normalizeAiTimeout,
+  normalizeGifFrameDefault,
+} from "./settings-values";
+import {
+  agyModelForReasoning,
   DEFAULT_AGY_MODEL,
+  LEGACY_DEFAULT_AGY_MODEL,
   MAX_MODEL_ID_LENGTH,
   normalizeModelId,
 } from "./model-selection";
@@ -54,7 +62,12 @@ export type ExerciseTypeId =
   | "ordering"
   | "image-occlusion";
 
+export const SETTINGS_SCHEMA_VERSION = 2;
+const LEGACY_GENERATION_TIMEOUT_MS = 300_000;
+const LEGACY_ANSWER_REVIEW_TIMEOUT_MS = 120_000;
+
 export interface PracticeLabSettings {
+  settingsSchemaVersion: number;
   provider: ProviderId;
   codexModel: string;
   claudeModel: string;
@@ -90,6 +103,7 @@ export interface PracticeLabSettings {
 }
 
 export const DEFAULT_SETTINGS: PracticeLabSettings = {
+  settingsSchemaVersion: SETTINGS_SCHEMA_VERSION,
   provider: "codex",
   codexModel: "",
   claudeModel: "",
@@ -104,11 +118,11 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   exerciseTypePercentages: copyExerciseTypePercentages(
     RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
   ),
-  timeoutMs: 300_000,
+  timeoutMs: DEFAULT_AI_TIMEOUT_MS,
   answerReviewDefault: "self",
   answerReviewProvider: "codex",
   answerReviewReasoningEffort: "high",
-  answerReviewTimeoutMs: 120_000,
+  answerReviewTimeoutMs: DEFAULT_AI_TIMEOUT_MS,
   codexExecutable: "codex",
   claudeExecutable: "claude",
   agyExecutable: "agy",
@@ -128,6 +142,7 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
 
 export function normalizeSettings(value: unknown): PracticeLabSettings {
   const partial = value && typeof value === "object" ? value as Partial<PracticeLabSettings> : {};
+  const migrateLegacyTimeouts = partial.settingsSchemaVersion !== SETTINGS_SCHEMA_VERSION;
   const provider = partial.provider === "claude" || partial.provider === "agy" ? partial.provider : "codex";
   const reasoningEffort = normalizeReasoningEffort(provider, partial.reasoningEffort);
   const gifFrameDefault = normalizeGifFrameDefault(partial.gifFrameDefault);
@@ -137,9 +152,11 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
   const quantity = Number.isInteger(partial.quantity)
     ? Math.min(30, Math.max(1, partial.quantity ?? 10))
     : 10;
-  const timeoutMs = Number.isFinite(partial.timeoutMs)
-    ? Math.min(900_000, Math.max(30_000, partial.timeoutMs ?? 300_000))
-    : 300_000;
+  const timeoutMs = normalizeAiTimeout(
+    partial.timeoutMs,
+    LEGACY_GENERATION_TIMEOUT_MS,
+    migrateLegacyTimeouts,
+  );
   const answerReviewDefault = partial.answerReviewDefault === "ai" ? "ai" : "self";
   const answerReviewProvider = partial.answerReviewProvider === "claude" || partial.answerReviewProvider === "agy"
     ? partial.answerReviewProvider
@@ -148,12 +165,18 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     answerReviewProvider,
     partial.answerReviewReasoningEffort ?? "high",
   );
-  const answerReviewTimeoutMs = Number.isFinite(partial.answerReviewTimeoutMs)
-    ? Math.min(300_000, Math.max(30_000, partial.answerReviewTimeoutMs ?? 120_000))
-    : 120_000;
+  const answerReviewTimeoutMs = normalizeAiTimeout(
+    partial.answerReviewTimeoutMs,
+    LEGACY_ANSWER_REVIEW_TIMEOUT_MS,
+    migrateLegacyTimeouts,
+  );
   const defaultFocusInstructions = typeof partial.defaultFocusInstructions === "string"
     ? partial.defaultFocusInstructions.slice(0, 4_000)
     : "";
+  const normalizedAgyModel = normalizeModelId(partial.agyModel, DEFAULT_AGY_MODEL);
+  const agyModel = migrateLegacyTimeouts && normalizedAgyModel === LEGACY_DEFAULT_AGY_MODEL
+    ? DEFAULT_AGY_MODEL
+    : normalizedAgyModel;
   const pdfMaxPageCount = boundedInteger(partial.pdfMaxPageCount, 1, 100, 40);
   const pdfDefaultPageCount = boundedInteger(
     partial.pdfDefaultPageCount,
@@ -174,10 +197,11 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     120_000,
   );
   return {
+    settingsSchemaVersion: SETTINGS_SCHEMA_VERSION,
     provider,
     codexModel: normalizeModelId(partial.codexModel),
     claudeModel: normalizeModelId(partial.claudeModel),
-    agyModel: normalizeModelId(partial.agyModel, DEFAULT_AGY_MODEL),
+    agyModel,
     reasoningEffort,
     gifFrameDefault,
     difficulty,
@@ -273,6 +297,12 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             this.owner.settings.provider,
             this.owner.settings.reasoningEffort,
           );
+          if (this.owner.settings.provider === "agy") {
+            this.owner.settings.agyModel = agyModelForReasoning(
+              this.owner.settings.agyModel,
+              this.owner.settings.reasoningEffort,
+            );
+          }
           await this.owner.saveSettings();
           this.update();
         }));
@@ -288,7 +318,14 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           .setValue(this.owner.settings.reasoningEffort)
           .onChange(async (value) => {
             this.owner.settings.reasoningEffort = value as ReasoningEffortV1;
+            if (this.owner.settings.provider === "agy") {
+              this.owner.settings.agyModel = agyModelForReasoning(
+                this.owner.settings.agyModel,
+                this.owner.settings.reasoningEffort,
+              );
+            }
             await this.owner.saveSettings();
+            if (this.owner.settings.provider === "agy") this.update();
           });
       });
 
@@ -305,7 +342,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addModelDefault(
       "agy model",
       "agyModel",
-      "Exact agy model. The installed Practice Problem Generator default is preserved unless you change it.",
+      "Exact agy model. Model variants ending in low, medium, or high are visibly kept aligned with the default reasoning choice.",
     );
 
     new Setting(this.containerEl)
@@ -546,29 +583,32 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     );
     new Setting(advanced)
       .setName("Generation timeout")
-      .setDesc("Seconds before the active CLI process is cancelled.")
+      .setDesc("Minutes allowed for one generation job, including its single schema-repair attempt. Default: 180 minutes (3 hours).")
       .addText((text) => text
-        .setPlaceholder("300")
-        .setValue(String(Math.round(this.owner.settings.timeoutMs / 1000)))
+        .setPlaceholder("180")
+        .setValue(String(Math.round(this.owner.settings.timeoutMs / 60_000)))
         .onChange(async (value) => {
-          const seconds = Number(value);
-          if (!Number.isFinite(seconds)) return;
-          this.owner.settings.timeoutMs = Math.min(900_000, Math.max(30_000, seconds * 1000));
+          const minutes = Number(value);
+          if (!Number.isFinite(minutes)) return;
+          this.owner.settings.timeoutMs = Math.min(
+            MAX_AI_TIMEOUT_MS,
+            Math.max(MIN_AI_TIMEOUT_MS, minutes * 60_000),
+          );
           await this.owner.saveSettings();
         }));
 
     new Setting(advanced)
       .setName("Answer-review timeout")
-      .setDesc("Seconds allowed for one background answer review before a bounded retry.")
+      .setDesc("Minutes allowed for one background AI answer review, including its bounded retry. Default: 180 minutes (3 hours); practice continues while it runs.")
       .addText((text) => text
-        .setPlaceholder("120")
-        .setValue(String(Math.round(this.owner.settings.answerReviewTimeoutMs / 1_000)))
+        .setPlaceholder("180")
+        .setValue(String(Math.round(this.owner.settings.answerReviewTimeoutMs / 60_000)))
         .onChange(async (value) => {
-          const seconds = Number(value);
-          if (!Number.isFinite(seconds)) return;
+          const minutes = Number(value);
+          if (!Number.isFinite(minutes)) return;
           this.owner.settings.answerReviewTimeoutMs = Math.min(
-            300_000,
-            Math.max(30_000, seconds * 1_000),
+            MAX_AI_TIMEOUT_MS,
+            Math.max(MIN_AI_TIMEOUT_MS, minutes * 60_000),
           );
           await this.owner.saveSettings();
         }));
@@ -768,6 +808,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
     this.addDisplayToggle("Show view introduction", "Show the short description below the Practice Problem Generator title.", "practice", "showHeaderDescription", group);
     this.addDisplayToggle("Show generation stepper", "Show Source, Configure, and Review navigation steps.", "practice", "showGenerationStepper", group);
+    this.addDisplayToggle("Live agent activity", "Show safe provider events, elapsed time, and emitted reasoning status while AI work runs. Private chain-of-thought is never exposed or saved.", "practice", "showAgentActivity", group);
     this.addDisplayToggle("Show source path", "Show the vault-relative source path.", "practice", "showSourcePath", group);
     this.addDisplayToggle("Show source excerpt", "Show the source preview in the Source stage.", "practice", "showSourceExcerpt", group);
     this.addDisplayToggle("Expand payload preview", "Open the exact provider payload by default. It always remains available.", "practice", "expandPayloadPreview", group);

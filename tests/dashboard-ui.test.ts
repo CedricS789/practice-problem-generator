@@ -182,11 +182,9 @@ test("dashboard exposes duplicate collision details and accessible load status",
     assert.match(diagnostics, new RegExp(`record\\.${field}`, "u"));
   }
 
-  const renderStatus = sourceBetween(
-    dashboardViewSource,
-    "private renderStatus(",
-    "\n  }\n}",
-  );
+  const renderStatusIndex = dashboardViewSource.indexOf("private renderStatus(");
+  assert.ok(renderStatusIndex >= 0, "Missing renderStatus implementation");
+  const renderStatus = dashboardViewSource.slice(renderStatusIndex);
   assert.match(renderStatus, /role: "alert" \| "status" = "status"/u);
   assert.match(renderStatus, /"aria-live": role === "alert" \? "assertive" : "polite"/u);
   assert.match(

@@ -25,7 +25,7 @@ export function parseProviderOutput<T>(
   try {
     envelope = JSON.parse(trimmed) as unknown;
   } catch (initialError) {
-    envelope = parseLastJsonRecord(trimmed);
+    envelope = parseStreamingEnvelope(trimmed);
     if (envelope === undefined) {
       throw new CliProviderError(
         "malformed-output",
@@ -51,16 +51,23 @@ export function parseProviderOutput<T>(
 }
 
 function unwrapEnvelope(value: unknown): unknown {
-  if (!isRecord(value)) return value;
-
-  for (const key of ["structured_output", "structuredOutput"] as const) {
-    if (key in value) return parseNestedJson(value[key]);
+  let current = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!isRecord(current)) return current;
+    let unwrapped = false;
+    for (const key of ["structured_output", "structuredOutput"] as const) {
+      if (key in current) return parseNestedJson(current[key]);
+    }
+    // Claude and agy print modes can nest the final result more than once.
+    for (const key of ["result", "response"] as const) {
+      if (!(key in current)) continue;
+      current = parseNestedJson(current[key]);
+      unwrapped = true;
+      break;
+    }
+    if (!unwrapped) return current;
   }
-
-  // Claude and agy JSON print modes wrap the final text in `result`.
-  if ("result" in value) return parseNestedJson(value.result);
-  if ("response" in value) return parseNestedJson(value.response);
-  return value;
+  return current;
 }
 
 function parseNestedJson(value: unknown): unknown {
@@ -96,21 +103,38 @@ function formatIssue(issue: unknown): string {
     : (JSON.stringify(issue) ?? String(issue));
 }
 
-function parseLastJsonRecord(text: string): unknown {
-  const starts: number[] = [];
-  for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === "{" && (index === 0 || text[index - 1] === "\n")) {
-      starts.push(index);
-    }
-  }
-  for (const start of starts.reverse()) {
+function parseStreamingEnvelope(text: string): unknown {
+  const records: unknown[] = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || !trimmed.startsWith("{")) continue;
     try {
-      return JSON.parse(text.slice(start).trim()) as unknown;
+      records.push(JSON.parse(trimmed) as unknown);
     } catch {
-      // Try the previous line-start object; CLI diagnostics can contain braces.
+      // JSONL diagnostics may contain non-JSON lines; ignore them here.
     }
   }
-  return undefined;
+
+  for (const record of [...records].reverse()) {
+    if (
+      isRecord(record)
+      && (record.type === "result" || record.event === "result")
+    ) {
+      return record;
+    }
+  }
+  for (const record of [...records].reverse()) {
+    if (!isRecord(record) || record.type !== "item.completed") continue;
+    const item = record.item;
+    if (
+      isRecord(item)
+      && item.type === "agent_message"
+      && typeof item.text === "string"
+    ) {
+      return parseNestedJson(item.text);
+    }
+  }
+  return records.at(-1);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -28,7 +28,7 @@ import {
 import { retryAsync } from "./async-retry";
 import { PracticeBankRepository, createSessionSummary } from "./bank-repository";
 import { renderBankStatistics } from "./bank-statistics-view";
-import type { CliProviderLayer, ProviderDetection } from "./cli";
+import type { CliActivityEvent, CliProviderLayer, ProviderDetection } from "./cli";
 import type { DashboardBankRecord, DashboardScope } from "./dashboard-model";
 import { PracticeDashboardRepository } from "./dashboard-repository";
 import {
@@ -100,6 +100,7 @@ import {
   presentExercises,
   type DraftExercisePresentation,
   type AnswerReviewRequest,
+  type AnswerReviewActivityPresentation,
   type AnswerReviewStatus,
   type EditableDraftExercise,
   type GenerationConfiguration,
@@ -196,7 +197,11 @@ export default class PracticeLabPlugin extends Plugin {
   private activeGenerationJobId: string | undefined;
 
   override async onload(): Promise<void> {
-    this.settings = normalizeSettings(await this.loadData());
+    const storedSettings: unknown = await this.loadData();
+    this.settings = normalizeSettings(storedSettings);
+    if (JSON.stringify(storedSettings) !== JSON.stringify(this.settings)) {
+      await this.saveData(this.settings);
+    }
     this.repository = new PracticeBankRepository(this.app);
     this.dashboardRepository = new PracticeDashboardRepository(this.app, {
       hasPracticeBankMarker: (file) =>
@@ -614,7 +619,11 @@ export default class PracticeLabPlugin extends Plugin {
           },
         }),
         previewPayload: async (source, configuration) => this.previewPayload(source, configuration),
-        generate: async (request) => this.runGeneration(request.source, request.configuration),
+        generate: async (request) => this.runGeneration(
+          request.source,
+          request.configuration,
+          request.onActivity,
+        ),
         cancelGeneration: () => {
           if (this.activeGenerationJobId !== undefined) {
             this.cliLayer?.coordinator.cancel(this.activeGenerationJobId);
@@ -914,7 +923,8 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async runGeneration(
     presentation: SourcePresentation,
-    configuration: GenerationConfiguration
+    configuration: GenerationConfiguration,
+    onActivity?: (event: CliActivityEvent) => void,
   ): Promise<readonly DraftExercisePresentation[]> {
     if (Platform.isMobileApp) throw new Error("Exercise generation is available in Obsidian desktop only.");
     const pending = this.pendingGeneration;
@@ -944,7 +954,8 @@ export default class PracticeLabPlugin extends Plugin {
         ...(configuration.model.length === 0 ? {} : { model: configuration.model }),
         reasoningEffort: configuration.reasoningEffort,
         media: pending.preparedVisuals.map((visual) => visual.media),
-        timeoutMs: this.settings.timeoutMs
+        timeoutMs: this.settings.timeoutMs,
+        ...(onActivity === undefined ? {} : { onActivity }),
       }, {
         id: generationJobId,
         kind: "generation",
@@ -1326,6 +1337,9 @@ export default class PracticeLabPlugin extends Plugin {
           reasoningEffort: job.reasoningEffort,
           timeoutMs: job.timeoutMs ?? this.settings.answerReviewTimeoutMs,
           signal,
+          onActivity: (activity) => {
+            this.publishAnswerReviewActivity(job.input.requestId, activity);
+          },
         }, {
           id: job.input.requestId,
           kind: "answer-review",
@@ -1658,6 +1672,26 @@ export default class PracticeLabPlugin extends Plugin {
   private publishAnswerReviewStatus(status: AnswerReviewStatus): void {
     for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
       if (leaf.view instanceof PracticeLabView) leaf.view.publishAnswerReviewStatus(status);
+    }
+  }
+
+  private publishAnswerReviewActivity(
+    requestId: string,
+    activity: CliActivityEvent,
+  ): void {
+    const request = this.answerReviewRequests.get(requestId);
+    if (request === undefined) return;
+    const presentation: AnswerReviewActivityPresentation = {
+      ...activity,
+      requestId,
+      sessionId: request.sessionId,
+      exerciseId: request.exerciseId,
+      exerciseTitle: request.exerciseTitle,
+    };
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView) {
+        leaf.view.publishAnswerReviewActivity(presentation);
+      }
     }
   }
 

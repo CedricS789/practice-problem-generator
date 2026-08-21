@@ -1,4 +1,5 @@
 import type { DetectedVisual, OcclusionMaskCandidate } from "../visuals";
+import type { CliActivityEvent } from "../cli/contracts";
 import type {
   ExerciseV1,
   GifFramePositionV1,
@@ -274,6 +275,14 @@ export interface GenerateRequest {
   readonly source: SourcePresentation;
   readonly configuration: GenerationConfiguration;
   readonly payloadAccepted: true;
+  readonly onActivity?: (event: CliActivityEvent) => void;
+}
+
+export interface AnswerReviewActivityPresentation extends CliActivityEvent {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly exerciseId: string;
+  readonly exerciseTitle: string;
 }
 
 export interface PracticeLabCallbacks {

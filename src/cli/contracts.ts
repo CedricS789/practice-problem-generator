@@ -2,6 +2,33 @@ import type { ReasoningEffortV1 } from "../model";
 
 export type ProviderId = "codex" | "claude" | "agy";
 
+export type CliActivityPhase =
+  | "preparing"
+  | "running"
+  | "reasoning"
+  | "tool"
+  | "receiving"
+  | "validating"
+  | "repairing"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+/**
+ * A deliberately bounded, provider-neutral progress update. Messages are
+ * generated locally from event metadata; raw prompts, paths, structured
+ * answers, and private reasoning content are never placed in this contract.
+ */
+export interface CliActivityEvent {
+  readonly occurredAt: string;
+  readonly provider: ProviderId;
+  readonly phase: CliActivityPhase;
+  readonly message: string;
+  readonly attempt?: 1 | 2;
+}
+
+export type CliActivityListener = (event: CliActivityEvent) => void;
+
 export type CliJobKind =
   | "generation"
   | "answer-review"
@@ -71,6 +98,7 @@ export interface StructuredGenerationRequest<T> {
   readonly media?: readonly MediaInput[];
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly onActivity?: CliActivityListener;
 }
 
 export interface StructuredGenerationResult<T> {
@@ -98,6 +126,12 @@ export interface ProcessRunRequest {
   readonly stdin: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs: number;
+  readonly onOutput?: (event: ProcessOutputEvent) => void;
+}
+
+export interface ProcessOutputEvent {
+  readonly stream: "stdout" | "stderr";
+  readonly text: string;
 }
 
 export interface ProcessRunResult {
