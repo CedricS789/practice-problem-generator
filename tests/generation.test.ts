@@ -74,6 +74,24 @@ test("generation prompt treats note content as untrusted and exposes exact segme
   assert.doesNotMatch(prompt, /C:\\|private-vault/);
 });
 
+test("generation prompt applies the selected difficulty to reasoning and item labels", () => {
+  const expectations = [
+    ["foundational", /easy and medium items/u],
+    ["deep-exam", /medium and hard items/u],
+    ["challenge", /Favor hard items/u],
+  ] as const;
+  for (const [difficulty, calibration] of expectations) {
+    const prompt = buildGenerationPrompt(source, {
+      ...foundational,
+      difficulty,
+    }, []);
+    assert.match(prompt, new RegExp(`Difficulty profile: ${difficulty}`, "u"));
+    assert.match(prompt, calibration);
+    assert.match(prompt, /Apply the profile to both the reasoning demanded/u);
+    assert.match(prompt, /Do not make an item harder by omitting necessary evidence/u);
+  }
+});
+
 test("PDF prompts lock generation to the selected, page-labeled range", () => {
   const prompt = buildGenerationPrompt(
     {

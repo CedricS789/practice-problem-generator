@@ -240,6 +240,72 @@ test("study checkpoint restores current input and locks the exact bank revision"
   assert.equal(parseStudySessionCheckpoint(checkpoint).status, "ok");
 });
 
+test("a skipped question survives recovery and final merge without becoming an answer", () => {
+  const bank = checkpointBank();
+  const active = createStudySessionCheckpoint(
+    "Notes/Practice/Synthetic - Practice.md",
+    bank,
+    startingProgress(bank),
+    "2026-08-22T08:05:05.000Z",
+  );
+  const skippedProgress: StudySessionProgressV1 = {
+    ...startingProgress(bank),
+    currentQuestionIndex: 1,
+    answers: [],
+    skippedExerciseIds: ["exercise-checkpoint-1"],
+    currentInput: null,
+  };
+  const completed = updateStudySessionCheckpoint(
+    active,
+    skippedProgress,
+    "2026-08-22T08:05:50.000Z",
+  );
+  assert.deepEqual(completed.skippedExerciseIds, ["exercise-checkpoint-1"]);
+  assert.equal(parseStudySessionCheckpoint(completed).status, "ok");
+
+  const merging = markStudySessionCheckpointMerging(completed, {
+    id: completed.sessionId,
+    startedAt: completed.startedAt,
+    finishedAt: "2026-08-22T08:06:00.000Z",
+    answers: [],
+    skippedExerciseIds: ["exercise-checkpoint-1"],
+    bankRevisionAtStart: bank.revision,
+    exerciseCountAtStart: 1,
+    orderedExerciseIds: ["exercise-checkpoint-1"],
+  });
+  const restored = finishedSessionFromCheckpoint(merging);
+  assert.deepEqual(restored.skippedExerciseIds, ["exercise-checkpoint-1"]);
+  assert.deepEqual(restored.answers, []);
+
+  const summary = createSessionSummary(checkpointBankSnapshot(merging), restored);
+  assert.equal(summary.exerciseCount, 1);
+  assert.equal(summary.completedCount, 0);
+  assert.deepEqual(summary.results, []);
+  assert.deepEqual(summary.score, { correct: 0, total: 0 });
+});
+
+test("checkpoint rejects a question recorded as both answered and skipped", () => {
+  const bank = checkpointBank();
+  const active = createStudySessionCheckpoint(
+    "Notes/Practice/Synthetic - Practice.md",
+    bank,
+    startingProgress(bank),
+  );
+  const malformed = {
+    ...active,
+    currentQuestionIndex: 1,
+    answers: [{ exerciseId: "exercise-checkpoint-1", correct: true }],
+    skippedExerciseIds: ["exercise-checkpoint-1"],
+    currentInput: null,
+  };
+  const parsed = parseStudySessionCheckpoint(malformed);
+  assert.equal(parsed.status, "invalid");
+  assert.match(
+    parsed.status === "invalid" ? parsed.message : "",
+    /both answered and skipped/iu,
+  );
+});
+
 test("completed checkpoint merges once after a newer bank revision arrives", () => {
   const bank = checkpointBank();
   const active = createStudySessionCheckpoint(
@@ -449,6 +515,63 @@ test("guided checkpoint makes the first attempt and recovery trail append-only",
     ),
     /rewrite earlier progress|immutable/iu,
   );
+});
+
+test("guided independent question can be skipped without creating lesson evidence", () => {
+  const bank = guidedCheckpointBank();
+  const lesson = tutorLesson(bank);
+  let state = createGuidedLessonState(lesson, lesson.guidedExerciseId);
+  for (let index = 0; index < lesson.teachingBlocks.length; index += 1) {
+    state = revealNextTeachingBlock(lesson, state);
+  }
+  state = submitSelfExplanation(lesson, state, "Alpha causes beta.");
+  state = revealSelfExplanationAnswer(lesson, state);
+  assert.equal(state.phase, "independent");
+
+  const initialProgress = withLearningProgress(
+    startingProgress(bank),
+    learningProgress(lesson, state, ""),
+  );
+  const active = createStudySessionCheckpoint(
+    initialProgress.bankPath,
+    bank,
+    initialProgress,
+  );
+  const skippedProgress = withLearningProgress(
+    {
+      ...startingProgress(bank),
+      currentQuestionIndex: 1,
+      answers: [],
+      skippedExerciseIds: [lesson.guidedExerciseId],
+      currentInput: null,
+    },
+    learningProgress(lesson, null, ""),
+  );
+  const completed = updateStudySessionCheckpoint(active, skippedProgress);
+  assert.equal(completed.learningProgress?.activeLesson, null);
+  assert.deepEqual(completed.learningProgress?.evidence, []);
+  assert.deepEqual(completed.learningProgress?.completedTutorLessons, []);
+
+  const merging = markStudySessionCheckpointMerging(completed, {
+    id: completed.sessionId,
+    startedAt: completed.startedAt,
+    finishedAt: "2026-08-22T08:06:00.000Z",
+    answers: [],
+    skippedExerciseIds: [lesson.guidedExerciseId],
+    bankRevisionAtStart: bank.revision,
+    exerciseCountAtStart: 1,
+    orderedExerciseIds: [lesson.guidedExerciseId],
+    learning: {
+      scope: skippedProgress.learningProgress.scope,
+      evidence: [],
+      completedTutorLessons: [],
+    },
+  });
+  const restored = finishedSessionFromCheckpoint(merging);
+  const summary = createSessionSummary(checkpointBankSnapshot(merging), restored);
+  assert.equal(summary.completedCount, 0);
+  assert.deepEqual(summary.evidence, []);
+  assert.deepEqual(summary.completedTutorLessons, []);
 });
 
 test("leaving a completed tutor lesson requires an appended completion snapshot", () => {

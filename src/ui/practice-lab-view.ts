@@ -51,6 +51,7 @@ import {
   focusInstructionsProblem,
   MAX_FOCUS_INSTRUCTIONS_LENGTH,
 } from "../focus-instructions";
+import { difficultyProfile, displayDifficulty } from "../difficulty";
 import {
   hasLatexMarkup,
   latexMarkupProblem,
@@ -109,6 +110,7 @@ import {
 import { isGifVisual, selectAllVisuals } from "./visual-selection";
 import { presentStudyOcclusionVisual } from "./study-occlusion";
 import { chooseStudyOrder } from "./study-order-modal";
+import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
 import {
   applyAnswerReviewStatus as mergeAnswerReviewStatus,
@@ -359,6 +361,7 @@ export class PracticeLabView extends ItemView {
   private studySessionId = "";
   private studyStartedAt = "";
   private studyAnswers: StudyAnswerRecord[] = [];
+  private studySkippedExerciseIds: string[] = [];
   private studySubmitted: { readonly correct?: boolean; readonly answer: string } | null = null;
   private studyOrigin: StudySessionOriginV1 | null = null;
   private studyLearningProgress: StudySessionLearningProgressV1 | null = null;
@@ -493,6 +496,7 @@ export class PracticeLabView extends ItemView {
     this.drafts = [];
     this.studyExercises = [];
     this.studyAnswers = [];
+    this.studySkippedExerciseIds = [];
     this.studySubmitted = null;
     this.studyOrigin = null;
     this.studyCurrentInput = null;
@@ -875,6 +879,7 @@ export class PracticeLabView extends ItemView {
       this.studySessionId = `session-${crypto.randomUUID()}`;
       this.studyStartedAt = new Date().toISOString();
       this.studyAnswers = [];
+      this.studySkippedExerciseIds = [];
       this.studySubmitted = null;
       this.studyOrigin = origin
         ?? this.options.callbacks.resolveStudySessionOrigin?.()
@@ -930,13 +935,15 @@ export class PracticeLabView extends ItemView {
     evidenceByExerciseId: readonly SessionExerciseEvidenceV3[] = [],
   ): void {
     const orderedIds = exercises.map((exercise) => exercise.id);
+    const skippedExerciseIds = progress.skippedExerciseIds ?? [];
     if (JSON.stringify(orderedIds) !== JSON.stringify(progress.orderedExerciseIds)) {
       throw new Error("The recovered exercise order does not match its saved checkpoint.");
     }
     if (
       progress.currentQuestionIndex < 0
       || progress.currentQuestionIndex > exercises.length
-      || progress.answers.length !== progress.currentQuestionIndex
+      || progress.answers.length + skippedExerciseIds.length
+        !== progress.currentQuestionIndex
     ) {
       throw new Error("The recovered study position is invalid.");
     }
@@ -970,6 +977,7 @@ export class PracticeLabView extends ItemView {
     this.studyStartedAt = progress.startedAt;
     this.studyIndex = progress.currentQuestionIndex;
     this.studyAnswers = progress.answers.map((answer) => structuredClone(answer));
+    this.studySkippedExerciseIds = [...skippedExerciseIds];
     this.studyCurrentInput = structuredClone(progress.currentInput);
     this.studySubmitted = structuredClone(progress.currentInput?.submitted ?? null);
     this.answerReviewMode = progress.answerReviewMode;
@@ -989,6 +997,7 @@ export class PracticeLabView extends ItemView {
     this.clearStudyCheckpointTimer();
     this.studyExercises = [];
     this.studyAnswers = [];
+    this.studySkippedExerciseIds = [];
     this.studyIndex = 0;
     this.studySessionId = "";
     this.studyStartedAt = "";
@@ -1686,20 +1695,19 @@ export class PracticeLabView extends ItemView {
         });
       });
 
-    new Setting(form)
+    const difficultySetting = new Setting(form)
       .setName("Difficulty")
-      .setDesc("Deep exam practice is the recommended default.")
-      .addDropdown((component) => {
-        component
-          .addOption("foundational", "Foundational")
-          .addOption("deep-exam", "Deep exam practice")
-          .addOption("challenge", "Challenge")
-          .setValue(this.difficulty)
-          .onChange((value) => {
-            this.difficulty = value as Difficulty;
-            configurationChanged();
-          });
-      });
+      .setDesc("Choose the reasoning demand for this set. It never expands the approved source or permits missing assumptions.");
+    difficultySetting.settingEl.addClass("practice-lab-difficulty-setting");
+    renderDifficultySelector(difficultySetting.controlEl, {
+      value: this.difficulty,
+      name: "practice-lab-generation-difficulty",
+      ariaLabel: "Generation difficulty profile",
+      onChange: (value) => {
+        this.difficulty = value;
+        configurationChanged();
+      },
+    });
 
     const focusSetting = new Setting(form)
       .setName("Focus instructions for the AI")
@@ -2086,6 +2094,11 @@ export class PracticeLabView extends ItemView {
     body.createDiv({
       cls: "practice-lab-payload-provider",
       text: `Reasoning effort: ${this.payloadPreview.reasoningEffortLabel}`,
+    });
+    const difficulty = difficultyProfile(this.difficulty);
+    body.createDiv({
+      cls: "practice-lab-payload-provider",
+      text: `Difficulty: ${displayDifficulty(this.difficulty)} — ${difficulty.tagline}`,
     });
     const pre = body.createEl("pre", {
       cls: "practice-lab-payload-text",
@@ -2629,10 +2642,35 @@ export class PracticeLabView extends ItemView {
     const answerArea = card.createDiv({ cls: "practice-lab-study-answer" });
     if (this.studySubmitted === null) {
       this.renderStudyInput(answerArea, exercise);
+      this.renderStudySkipAction(answerArea, exercise);
     } else {
       this.renderStudyFeedback(answerArea, exercise);
     }
     this.prepareStudyCard(card, exercise.id);
+  }
+
+  private renderStudySkipAction(
+    container: HTMLElement,
+    exercise: EditableDraftExercise,
+  ): void {
+    if (!this.canSkipCurrentQuestion(exercise)) return;
+    const actions = container.createDiv({ cls: "practice-lab-study-question-actions" });
+    new ButtonComponent(actions)
+      .setButtonText("Skip question")
+      .setIcon("skip-forward")
+      .setTooltip(
+        "Leave this question unanswered. It will be excluded from scores and recorded as skipped for this session.",
+      )
+      .onClick(() => void this.skipCurrentQuestion(exercise));
+  }
+
+  private canSkipCurrentQuestion(exercise: EditableDraftExercise): boolean {
+    if (this.studySubmitted !== null) return false;
+    const activeLesson = this.studyLearningProgress?.activeLesson ?? null;
+    if (activeLesson === null) return true;
+    return activeLesson.lesson.guidedExerciseId === exercise.id
+      && activeLesson.state.phase === "independent"
+      && activeLesson.state.originalIndependentAttempt === null;
   }
 
   private renderTutorLesson(
@@ -3825,6 +3863,9 @@ export class PracticeLabView extends ItemView {
       const rating = this.studyAnswerRating(answer);
       return rating === undefined ? [] : [rating];
     });
+    if (objectiveAnswers === 0 && freeResponseRatings.length === 0) {
+      return "No questions were answered.";
+    }
     if (objectiveAnswers === 0) {
       return `${freeResponseRatings.length} assessed free responses: ${summarizeFreeResponseOutcomes(freeResponseRatings)}.`;
     }
@@ -3846,6 +3887,10 @@ export class PracticeLabView extends ItemView {
 
   private studyCompletionProvisionalText(): string {
     const reviews = countAnswerReviews(this.studyAnswers);
+    const skipped = this.studySkippedExerciseIds.length;
+    const skippedText = skipped === 0
+      ? ""
+      : `${skipped} ${skipped === 1 ? "question was" : "questions were"} skipped and excluded from scores, performance, and streaks. `;
     if (reviews.pending > 0 || reviews.failed > 0) {
       const unresolved = [
         reviews.pending > 0
@@ -3862,9 +3907,9 @@ export class PracticeLabView extends ItemView {
       const continuation = paused > 0
         ? `${paused} paused ${paused === 1 ? "review remains" : "reviews remain"} pending and will resume on a later desktop start.`
         : "Background results will update the saved history later.";
-      return `Provisional result: ${unresolved} remain unscored and are excluded from points, performance, and streaks. You can finish now. ${continuation}`;
+      return `${skippedText}Provisional result: ${unresolved} remain unscored and are excluded from points, performance, and streaks. You can finish now. ${continuation}`;
     }
-    return "Partial free responses count as half credit. Nothing has been written yet; finish the session to save this score and history as one batched update.";
+    return `${skippedText}Partial free responses count as half credit. Nothing has been written yet; finish the session to save this score and history as one batched update.`;
   }
 
   private applyAnswerReviewStatus(status: AnswerReviewStatus): boolean {
@@ -4813,6 +4858,55 @@ export class PracticeLabView extends ItemView {
     this.render();
   }
 
+  private async skipCurrentQuestion(exercise: EditableDraftExercise): Promise<void> {
+    if (
+      this.studyExercises[this.studyIndex]?.id !== exercise.id
+      || !this.canSkipCurrentQuestion(exercise)
+      || this.studySkippedExerciseIds.includes(exercise.id)
+    ) {
+      return;
+    }
+    const previousSkippedExerciseIds = this.studySkippedExerciseIds;
+    const previousIndex = this.studyIndex;
+    const previousSubmitted = this.studySubmitted;
+    const previousInput = this.studyCurrentInput;
+    const previousOrderingState = this.orderingState;
+    const previousLearningProgress = this.studyLearningProgress;
+    const previousTutorProblemStarted = this.studyTutorProblemStarted;
+    const activeLesson = previousLearningProgress?.activeLesson ?? null;
+
+    this.studySkippedExerciseIds = [...this.studySkippedExerciseIds, exercise.id];
+    if (previousLearningProgress !== null && activeLesson !== null) {
+      this.studyLearningProgress = {
+        ...previousLearningProgress,
+        activeLesson: null,
+      };
+    }
+    this.studyIndex += 1;
+    this.studySubmitted = null;
+    this.studyTutorProblemStarted = false;
+    this.resetOrderingState();
+    this.resetStudyCurrentInput();
+    this.clearStudyCheckpointTimer();
+    try {
+      await this.persistStudyCheckpoint();
+      this.studyCheckpointWarningShown = false;
+    } catch (error) {
+      this.studySkippedExerciseIds = previousSkippedExerciseIds;
+      this.studyIndex = previousIndex;
+      this.studySubmitted = previousSubmitted;
+      this.studyCurrentInput = previousInput;
+      this.orderingState = previousOrderingState;
+      this.studyLearningProgress = previousLearningProgress;
+      this.studyTutorProblemStarted = previousTutorProblemStarted;
+      new Notice(this.errorMessage(
+        error,
+        "Could not save the skipped-question checkpoint. The session did not advance.",
+      ), 10_000);
+    }
+    this.render();
+  }
+
   private async recordAndContinue(answer: StudyAnswerRecord): Promise<void> {
     const activeLesson = this.studyLearningProgress?.activeLesson ?? null;
     if (activeLesson?.lesson.guidedExerciseId === answer.exerciseId) {
@@ -5052,6 +5146,7 @@ export class PracticeLabView extends ItemView {
       orderedExerciseIds: this.studyExercises.map((exercise) => exercise.id),
       currentQuestionIndex: this.studyIndex,
       answers: structuredClone(this.studyAnswers),
+      skippedExerciseIds: [...this.studySkippedExerciseIds],
       currentInput: structuredClone(this.studyCurrentInput),
       answerReviewMode: this.answerReviewMode,
       answerReviewProvider: this.answerReviewProvider,
@@ -5130,6 +5225,7 @@ export class PracticeLabView extends ItemView {
       startedAt: this.studyStartedAt,
       finishedAt: new Date().toISOString(),
       answers: this.studyAnswers,
+      skippedExerciseIds: [...this.studySkippedExerciseIds],
       ...(this.studyOrigin === null
         ? {}
         : {
@@ -5163,6 +5259,7 @@ export class PracticeLabView extends ItemView {
       this.studyFinishing = false;
       this.clearStudyCheckpointTimer();
       this.studyOrigin = null;
+      this.studySkippedExerciseIds = [];
       this.studyLearningProgress = null;
       this.studyLearningEvidenceByExerciseId.clear();
       this.studyTutorProblemStarted = false;

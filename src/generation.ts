@@ -13,8 +13,9 @@ import {
   focusInstructionsProblem,
 } from "./focus-instructions";
 import { exerciseLatexMarkupProblems } from "./latex";
+import { difficultyPromptGuidance } from "./difficulty";
 
-export const GENERATION_PROMPT_VERSION = "practice-lab-v3.4";
+export const GENERATION_PROMPT_VERSION = "practice-lab-v3.5";
 
 const EXERCISE_GUIDANCE: Readonly<Record<ExerciseV1["type"], string>> = {
   "short-answer": "Ask for a concise reconstruction, distinction, definition in context, or relationship. The grounded answer must fully answer the wording, and keyPoints must identify the essential scoring elements.",
@@ -27,12 +28,6 @@ const EXERCISE_GUIDANCE: Readonly<Record<ExerciseV1["type"], string>> = {
   matching: "Match concepts, properties, stages, or consequences only when every pair is explicitly supported and the pairing is not arbitrary.",
   ordering: "Order a sequence only when the source establishes that sequence or dependency. Do not infer an unstated chronology.",
   "image-occlusion": "Hide a meaningful visual label or region whose answer can be determined from the attached image and cited source context. Propose precise normalized masks for user review.",
-};
-
-const DIFFICULTY_GUIDANCE: Readonly<Record<GenerationConfiguration["difficulty"], string>> = {
-  foundational: "Prioritize clear single-concept understanding and essential distinctions without making the answer trivial.",
-  "deep-exam": "Prioritize explanation, integration, transfer, and defensible calculations at a demanding university-practice level. This is a design profile, not a claim about an official exam syllabus.",
-  challenge: "Use multi-step integration and subtle distinctions that remain completely solvable from the supplied evidence; difficulty must come from reasoning, not missing information.",
 };
 
 export interface GenerationValidationOptions {
@@ -96,7 +91,8 @@ export function buildGenerationPrompt(
     "GENERATION CONTRACT",
     `Return exactly ${configuration.quantity} ${configuration.quantity === 1 ? "exercise" : "exercises"} with schemaVersion ${GENERATION_DRAFT_SCHEMA_VERSION}.`,
     `Difficulty profile: ${configuration.difficulty}.`,
-    `Difficulty intent: ${DIFFICULTY_GUIDANCE[configuration.difficulty]}`,
+    `Difficulty intent: ${difficultyPromptGuidance(configuration.difficulty)}`,
+    "Apply the profile to both the reasoning demanded by each prompt and each exercise's easy, medium, or hard difficulty label. Do not make an item harder by omitting necessary evidence.",
     `Enabled exercise types only: ${enabled}.`,
     "Every exercise must cite one or more exact sourceSegmentIds from the list. Never invent data, assumptions, distractors, causal links, or numerical values.",
     "The user's distribution below is authoritative. Meet every exact count and do not silently redistribute exercises between types. A type with a rounded count of 0 must not appear.",

@@ -1480,7 +1480,7 @@ export class PracticeDashboardView extends ItemView {
         text: new Date(recent.session.finishedAt).toLocaleString(),
       });
       row.createEl("p", {
-        text: `${recent.session.provisional ? "Provisional · " : ""}${practiceRunRankText(recent.session.practiceRun.rank)} · ${percentText(recent.session.performance.percent)} · ${recent.session.completedCount}/${recent.session.exerciseCount} completed · ${recent.session.pendingAiReviewCount} AI pending · ${durationText(recent.session.durationMs)}`,
+        text: `${recent.session.provisional ? "Provisional · " : ""}${practiceRunRankText(recent.session.practiceRun.rank)} · ${percentText(recent.session.performance.percent)} · ${recent.session.completedCount}/${recent.session.exerciseCount} answered${recent.session.skippedCount === 0 ? "" : ` · ${recent.session.skippedCount} skipped`} · ${recent.session.pendingAiReviewCount} AI pending · ${durationText(recent.session.durationMs)}`,
       });
     }
   }

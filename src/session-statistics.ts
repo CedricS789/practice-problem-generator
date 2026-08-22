@@ -41,6 +41,7 @@ export interface SessionStatistic {
   readonly durationMs: number;
   readonly completedCount: number;
   readonly exerciseCount: number;
+  readonly skippedCount: number;
   readonly completionPercent: number;
   readonly performance: PerformanceScore;
   readonly practiceRun: PracticeRunScore;
@@ -181,6 +182,7 @@ function sessionStatistic(session: SessionSummaryV2): SessionStatistic {
     durationMs: Math.max(0, finished - started),
     completedCount: session.completedCount,
     exerciseCount: session.exerciseCount,
+    skippedCount: Math.max(0, session.exerciseCount - session.completedCount),
     completionPercent: percentage(
       session.completedCount,
       session.exerciseCount,

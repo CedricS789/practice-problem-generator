@@ -17,6 +17,7 @@ import {
   rebalanceExerciseTypePercentageWithIntent,
   RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
 } from "../exercise-distribution";
+import { displayDifficulty } from "../difficulty";
 import { focusInstructionsProblem, MAX_FOCUS_INSTRUCTIONS_LENGTH } from "../focus-instructions";
 import {
   agyModelForReasoning,
@@ -39,7 +40,6 @@ import type {
 } from "../saved-set-generation";
 import { repairFocusInstructions } from "../saved-set-generation";
 import type {
-  Difficulty,
   EditableDraftExercise,
   ExerciseType,
   GenerationConfiguration,
@@ -50,6 +50,7 @@ import type {
 } from "./contracts";
 import { EXERCISE_TYPES } from "./contracts";
 import { installHoverDescriptions } from "./hover-descriptions";
+import { renderDifficultySelector } from "./difficulty-selector";
 import { OcclusionEditor } from "./occlusion-editor";
 import { renderLatexMarkup } from "./latex-renderer";
 
@@ -332,16 +333,19 @@ export class SavedSetGenerationModal extends Modal {
     quantity.addEventListener("change", () => this.updateConfiguration({
       quantity: Math.min(30, Math.max(1, Number.parseInt(quantity.value, 10) || 1)),
     }));
-    const difficultyLabel = grid.createEl("label");
-    difficultyLabel.createSpan({ text: "Difficulty" });
-    const difficulty = difficultyLabel.createEl("select");
-    difficulty.createEl("option", { value: "foundational", text: "Foundational" });
-    difficulty.createEl("option", { value: "deep-exam", text: "Deep exam practice" });
-    difficulty.createEl("option", { value: "challenge", text: "Challenge" });
-    difficulty.value = this.request.configuration.difficulty;
-    difficulty.addEventListener("change", () => this.updateConfiguration({
-      difficulty: difficulty.value as Difficulty,
-    }));
+    const difficulty = section.createDiv({
+      cls: "practice-learning-path-set-difficulty",
+    });
+    difficulty.createEl("strong", { text: "Difficulty profile" });
+    difficulty.createSpan({
+      text: "This changes the reasoning demand for the replacement set, not its approved source boundary.",
+    });
+    renderDifficultySelector(difficulty, {
+      value: this.request.configuration.difficulty,
+      name: "practice-lab-saved-set-difficulty",
+      ariaLabel: "Saved set generation difficulty profile",
+      onChange: (value) => this.updateConfiguration({ difficulty: value }),
+    });
   }
 
   private renderFocus(container: HTMLElement): void {
@@ -484,7 +488,7 @@ export class SavedSetGenerationModal extends Modal {
     const section = this.section(container, "Exact payload preview", "This is the complete text plus neutral-media manifest that the selected local CLI may send to its provider.");
     section.createEl("p", {
       cls: "practice-lab-muted",
-      text: `${preview.providerLabel} · ${preview.modelLabel} · ${preview.reasoningEffortLabel}`,
+      text: `${preview.providerLabel} · ${preview.modelLabel} · ${preview.reasoningEffortLabel} · ${displayDifficulty(this.request.configuration.difficulty)}`,
     });
     if (preview.warning !== undefined) section.createEl("p", { cls: "practice-lab-callout", text: preview.warning });
     const details = section.createEl("details", { attr: { open: "" } });

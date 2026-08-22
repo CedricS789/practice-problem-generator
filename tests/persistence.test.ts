@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+  DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
   derivePracticePath,
   getStaleSourceState,
   isPracticeBankStale,
@@ -10,7 +12,10 @@ import {
   mergeAiReviewStateTransition,
   migratePracticeBankV1ToV3,
   parsePracticeBankMarkdown,
+  practiceBankPathPreview,
+  practiceBankStoragePolicyProblem,
   serializePracticeBank,
+  type PracticeBankStoragePolicyV1,
 } from "../src/persistence";
 import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
@@ -155,6 +160,83 @@ test("derives the fixed per-course Practice path", () => {
     () => derivePracticePath("Notes/Term/Course/Practice/Bank.md"),
     /cannot be used as its own source/u,
   );
+});
+
+test("custom storage derives deterministic note and PDF paths from supported tokens", () => {
+  const policy: PracticeBankStoragePolicyV1 = {
+    mode: "custom",
+    customBaseFolder: "Learning/Practice banks",
+    customPathTemplate: "{term}/{course}/{sourceType}/{parent}/{source}{pdfHashSuffix} - Practice.md",
+  };
+  assert.equal(
+    derivePracticePath("Notes/Term/Course/Chapters/Evidence.md", policy),
+    "Learning/Practice banks/Term/Course/note/Chapters/Evidence - Practice.md",
+  );
+  assert.match(
+    derivePracticePath("Notes/Term/Course/Slides/Lecture 1.pdf", policy),
+    /^Learning\/Practice banks\/Term\/Course\/pdf\/Slides\/Lecture 1 - [a-f0-9]{10} - Practice\.md$/u,
+  );
+  assert.equal(
+    derivePracticePath("Library/Topic.md", policy),
+    "Learning/Practice banks/External/Practice Sources/note/Library/Topic - Practice.md",
+  );
+  assert.equal(
+    derivePracticePath("Library/Topic.md", policy),
+    derivePracticePath("Library/Topic.md", policy),
+  );
+});
+
+test("custom storage validation fails closed on unsafe or collision-prone formats", () => {
+  const valid: PracticeBankStoragePolicyV1 = {
+    mode: "custom",
+    customBaseFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+    customPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+  };
+  assert.equal(practiceBankStoragePolicyProblem(valid), null);
+  const invalidCases: readonly [
+    Partial<PracticeBankStoragePolicyV1>,
+    RegExp,
+    string?,
+  ][] = [
+    [{ customBaseFolder: "C:/Vault/Practice" }, /vault-relative/u],
+    [{ customBaseFolder: "../Practice" }, /parent-directory/u],
+    [{ customBaseFolder: ".vault-config/Practice" }, /configuration/u, ".vault-config"],
+    [{ customBaseFolder: "CON" }, /reserved Windows/u],
+    [{ customPathTemplate: "{term}/{course}/Bank.md" }, /\{source\} or \{sourceHash\}/u],
+    [{ customPathTemplate: "{source}/{unknown}.md" }, /Unknown.*\{unknown\}/u],
+    [{ customPathTemplate: "{source.md" }, /incomplete token/u],
+    [{ customPathTemplate: "../{source}.md" }, /parent-directory/u],
+    [{ customPathTemplate: "{source}.txt" }, /end with \.md/u],
+    [{ customPathTemplate: "{source}/AUX.md" }, /reserved Windows/u],
+    [{ customPathTemplate: "Folder. /{source}.md" }, /ending in a period or space/u],
+  ];
+  for (const [change, expected, configDir] of invalidCases) {
+    const problem = practiceBankStoragePolicyProblem(
+      { ...valid, ...change },
+      configDir,
+    );
+    assert.match(problem ?? "", expected);
+  }
+});
+
+test("storage preview reports the exact example path or an actionable problem", () => {
+  const valid = practiceBankPathPreview({
+    mode: "custom",
+    customBaseFolder: "Practice Problems",
+    customPathTemplate: "{course}/{sourceHash}/{source}.md",
+  });
+  assert.equal(valid.problem, undefined);
+  assert.match(
+    valid.path ?? "",
+    /^Practice Problems\/ELEC-Y418\/[a-f0-9]{10}\/Chapter 8 - Image Sensors\.md$/u,
+  );
+  const invalid = practiceBankPathPreview({
+    mode: "custom",
+    customBaseFolder: ".vault-config",
+    customPathTemplate: "{source}.md",
+  }, undefined, ".vault-config");
+  assert.equal(invalid.path, undefined);
+  assert.match(invalid.problem ?? "", /configuration/u);
 });
 
 test("round-trips readable Markdown and its versioned fenced block", () => {

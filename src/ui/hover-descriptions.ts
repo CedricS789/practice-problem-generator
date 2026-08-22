@@ -1,3 +1,5 @@
+import { setTooltip } from "obsidian";
+
 const INTERACTIVE_SELECTOR = [
   "button",
   "input",
@@ -9,6 +11,7 @@ const INTERACTIVE_SELECTOR = [
 ].join(",");
 
 const INSTALLED_ATTRIBUTE = "data-practice-lab-hover-descriptions";
+const TOOLTIP_TEXT_ATTRIBUTE = "data-practice-lab-tooltip-text";
 
 /**
  * Adds concise native hover descriptions to every current and future control
@@ -29,6 +32,16 @@ export function installHoverDescriptions(root: HTMLElement): void {
   };
   root.addEventListener("mouseover", describeTarget);
   root.addEventListener("focusin", describeTarget);
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) {
+        const element = asElement(node);
+        if (element === null || !element.instanceOf(HTMLElement)) continue;
+        applyHoverDescriptionTree(element);
+      }
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
   applyHoverDescriptions(root);
 }
 
@@ -47,17 +60,27 @@ export function applyHoverDescriptions(root: HTMLElement): void {
 }
 
 export function applyHoverDescription(control: HTMLElement): void {
-  if (control.title.trim().length > 0) return;
   const description = explicitDescription(control)
     ?? describedByText(control)
+    ?? nonempty(control.title)
     ?? settingDescription(control)
     ?? actionDescription(control);
-  if (description !== null) control.title = compact(description).slice(0, 360);
+  if (description === null) return;
+  const tooltip = compact(description).slice(0, 360);
+  if (control.getAttribute(TOOLTIP_TEXT_ATTRIBUTE) === tooltip) return;
+  control.setAttribute(TOOLTIP_TEXT_ATTRIBUTE, tooltip);
+  setTooltip(control, tooltip, { delay: 250 });
+}
+
+function applyHoverDescriptionTree(root: HTMLElement): void {
+  if (root.matches(INTERACTIVE_SELECTOR)) applyHoverDescription(root);
+  applyHoverDescriptions(root);
 }
 
 function explicitDescription(control: HTMLElement): string | null {
   return nonempty(control.dataset.practiceLabDescription)
-    ?? nonempty(control.getAttribute("aria-description"));
+    ?? nonempty(control.getAttribute("aria-description"))
+    ?? nonempty(control.getAttribute("aria-label"));
 }
 
 function describedByText(control: HTMLElement): string | null {

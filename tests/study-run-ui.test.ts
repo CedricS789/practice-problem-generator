@@ -30,3 +30,12 @@ test("completion and saved history retain derived run rank and best streak", () 
   assert.match(statisticsViewSource, /session\.practiceRun\.rank/u);
   assert.match(statisticsViewSource, /session\.practiceRun\.bestStreak/u);
 });
+
+test("study mode offers a described, score-neutral skip action", () => {
+  assert.match(viewSource, /setButtonText\("Skip question"\)/u);
+  assert.match(viewSource, /setIcon\("skip-forward"\)/u);
+  assert.match(viewSource, /excluded from scores and recorded as skipped/u);
+  assert.match(viewSource, /private async skipCurrentQuestion\(/u);
+  assert.match(viewSource, /skippedExerciseIds: \[\.\.\.this\.studySkippedExerciseIds\]/u);
+  assert.match(statisticsViewSource, /session\.skippedCount/u);
+});

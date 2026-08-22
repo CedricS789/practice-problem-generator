@@ -24,6 +24,7 @@ import {
   enabledExerciseTypes,
   rebalanceExerciseTypePercentageWithIntent,
 } from "../exercise-distribution";
+import { displayDifficulty } from "../difficulty";
 import { MAX_FOCUS_INSTRUCTIONS_LENGTH } from "../focus-instructions";
 import type {
   LearningPathStartingLevelV1,
@@ -36,6 +37,7 @@ import {
 } from "../visuals";
 import { OcclusionEditor } from "./occlusion-editor";
 import { installHoverDescriptions } from "./hover-descriptions";
+import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
 import { isGifVisual } from "./visual-selection";
 import type {
@@ -763,14 +765,22 @@ export class PracticeLearningPathView extends ItemView {
       this.updateSetConfiguration(state.id, { quantity: value });
       quantityInput.value = String(value);
     });
-    const difficulty = compact.createEl("label");
-    difficulty.createSpan({ text: "Difficulty" });
-    const difficultySelect = difficulty.createEl("select");
-    for (const value of ["foundational", "deep-exam", "challenge"] as const) {
-      difficultySelect.createEl("option", { value, text: value === "deep-exam" ? "Deep exam practice" : value === "foundational" ? "Foundational" : "Challenge" });
-    }
-    difficultySelect.value = state.configuration.difficulty;
-    difficultySelect.addEventListener("change", () => this.updateSetConfiguration(state.id, { difficulty: difficultySelect.value as Difficulty }));
+    const difficulty = card.createDiv({
+      cls: "practice-learning-path-set-difficulty",
+    });
+    difficulty.createEl("strong", { text: "Difficulty profile" });
+    difficulty.createSpan({
+      text: "Calibrate this set independently. The approved sources and set purpose remain fixed.",
+    });
+    renderDifficultySelector(difficulty, {
+      value: state.configuration.difficulty,
+      name: `practice-lab-path-difficulty-${state.id}`,
+      ariaLabel: `Difficulty profile for ${brief.title}`,
+      compact: true,
+      onChange: (value) => this.updateSetConfiguration(state.id, {
+        difficulty: value,
+      }),
+    });
 
     const advanced = card.createEl("details", { cls: "practice-learning-path-advanced" });
     advanced.open = state.advancedOpen;
@@ -882,7 +892,11 @@ export class PracticeLearningPathView extends ItemView {
       const details = section.createEl("details", { cls: "practice-learning-path-payload" });
       const summary = details.createEl("summary");
       summary.createEl("strong", { text: preview.setTitle });
-      summary.createSpan({ text: `${preview.providerLabel} · ${preview.modelLabel} · ${preview.reasoningEffortLabel}` });
+      const configuration = this.setStates.find((state) => state.id === preview.setId)?.configuration;
+      const difficulty = configuration === undefined
+        ? "Difficulty not available"
+        : displayDifficulty(configuration.difficulty);
+      summary.createSpan({ text: `${preview.providerLabel} · ${preview.modelLabel} · ${preview.reasoningEffortLabel} · ${difficulty}` });
       details.createEl("code", { text: preview.payloadHash });
       details.createEl("pre", { text: preview.text });
     }

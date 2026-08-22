@@ -4,6 +4,10 @@ import {
   exerciseTypeDistributionProblem,
   planExerciseDistribution,
 } from "./exercise-distribution";
+import {
+  difficultyProfilesForPrompt,
+  difficultyPromptGuidance,
+} from "./difficulty";
 import { focusInstructionsProblem } from "./focus-instructions";
 import { exerciseLatexMarkupProblems, latexMarkupProblem } from "./latex";
 import {
@@ -30,7 +34,7 @@ import {
 export const LEARNING_BLUEPRINT_DRAFT_VERSION = 1 as const;
 export const PRACTICE_SET_DRAFT_VERSION = 1 as const;
 export const PRACTICE_SET_PAYLOAD_VERSION = 1 as const;
-export const LEARNING_PATH_PROMPT_VERSION = "practice-learning-path-v1";
+export const LEARNING_PATH_PROMPT_VERSION = "practice-learning-path-v1.1";
 export const MIN_LEARNING_PATH_SETS = 2;
 export const DEFAULT_MAX_LEARNING_PATH_SETS = 5;
 export const MAX_LEARNING_PATH_SETS = 6;
@@ -505,6 +509,8 @@ export function buildLearningBlueprintPrompt(
     "Every prerequisiteAspectId must point backward to an earlier aspect. Never create cycles or forward prerequisites.",
     "Sets must have unique purposes and together form a useful progression. Prefer foundations, mechanisms, guided application, and independent transfer when the evidence supports them; reduce or adapt the progression instead of inventing coverage.",
     `The complete path may recommend at most ${MAX_LEARNING_PATH_EXERCISES} exercises. Each set recommends 1-30 exercises.`,
+    "Choose each set's recommendedDifficulty from the profiles below according to its instructional role, prerequisites, and the learner's starting level. Difficulty controls reasoning demand, not source scope:",
+    difficultyProfilesForPrompt(),
     "Tutor lesson briefs must introduce supported ideas from premise to consequence. They must cite exact segments and must not claim knowledge absent from those segments.",
     "Use canonical Obsidian LaTeX delimiters ($...$ and $$...$$) for mathematical notation in every learner-visible field. Balance delimiters and braces; never use \\(...\\) or \\[...\\].",
     "Return only the final JSON object. Do not include reasoning, Markdown fences, or commentary.",
@@ -804,6 +810,9 @@ export function buildPracticeSetPrompt(payload: PracticeSetPayloadV1): string {
     "",
     "OUTPUT CONTRACT",
     `Return schemaVersion ${PRACTICE_SET_DRAFT_VERSION}, setId ${JSON.stringify(payload.targetSet.id)}, exactly ${configuration.quantity} exercises, one assignment per exercise, and exactly the tutor lessons owned by targetSet.`,
+    `Difficulty profile: ${configuration.difficulty}.`,
+    `Difficulty intent: ${difficultyPromptGuidance(configuration.difficulty)}`,
+    "Apply this profile to prompt complexity and every exercise's easy, medium, or hard label. Do not manufacture difficulty by withholding necessary evidence.",
     "Every exercise and every tutor claim must cite exact submitted source segment IDs. Tutor blocks with plausible but uncited or unsupported claims are invalid.",
     "Each exercise must address one or more target-set aspect IDs. Do not create duplicate or substantially paraphrased exercises within this set or across sibling purposes.",
     "A guided-check assignment must be the guidedExerciseId of exactly one tutor lesson. Independent and transfer attempts remain distinct from guided support.",

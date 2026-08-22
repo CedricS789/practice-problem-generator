@@ -46,6 +46,47 @@ import {
 const READ_ONLY_RECOVERY =
   "Practice Problem Generator will keep this block read-only. Back up the Markdown file, update Practice Problem Generator, then use its recovery or migration command; do not hand-edit the stored JSON unless you are restoring from a known-good backup.";
 
+export type PracticeBankStorageMode = "course" | "custom";
+
+export interface PracticeBankStoragePolicyV1 {
+  readonly mode: PracticeBankStorageMode;
+  readonly customBaseFolder: string;
+  readonly customPathTemplate: string;
+}
+
+export const DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER = "Practice Problems";
+export const DEFAULT_PRACTICE_BANK_PATH_TEMPLATE =
+  "{term}/{course}/{source}{pdfHashSuffix} - Practice.md";
+export const PRACTICE_BANK_PATH_TEMPLATE_TOKENS = [
+  "{term}",
+  "{course}",
+  "{source}",
+  "{sourceHash}",
+  "{pdfHashSuffix}",
+  "{sourceType}",
+  "{parent}",
+] as const;
+
+export const DEFAULT_PRACTICE_BANK_STORAGE_POLICY: PracticeBankStoragePolicyV1 = {
+  mode: "course",
+  customBaseFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+  customPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+};
+
+const PATH_TOKEN_VALUES: Readonly<Record<string, string>> = {
+  term: "2025-26 - Q2",
+  course: "ELEC-Y418",
+  source: "Chapter 8 - Image Sensors",
+  sourceHash: "0123456789",
+  pdfHashSuffix: " - 0123456789",
+  sourceType: "pdf",
+  parent: "Slides",
+};
+
+const PROTECTED_STORAGE_SEGMENTS = new Set([".tmp", ".trash"]);
+const WINDOWS_RESERVED_STORAGE_SEGMENT =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
+
 function normalizeVaultPath(path: string): string {
   const normalized = path.replace(/\\/gu, "/").replace(/^\.\//u, "");
   const parts = normalized.split("/");
@@ -60,7 +101,11 @@ function normalizeVaultPath(path: string): string {
 }
 
 /** Derives a safe, deterministic practice-bank path for a note or PDF source. */
-export function derivePracticePath(sourceVaultPath: string): string {
+export function derivePracticePath(
+  sourceVaultPath: string,
+  policy: PracticeBankStoragePolicyV1 = DEFAULT_PRACTICE_BANK_STORAGE_POLICY,
+  configDir?: string,
+): string {
   const normalized = normalizeVaultPath(sourceVaultPath);
   const parts = normalized.split("/");
   const filename = parts.at(-1);
@@ -71,6 +116,28 @@ export function derivePracticePath(sourceVaultPath: string): string {
   const isMarkdown = /\.md$/iu.test(filename);
   if (!isPdf && !isMarkdown) {
     throw new Error("Practice Problem Generator sources must be Markdown notes or PDF files.");
+  }
+  if (policy.mode === "custom") {
+    const problem = practiceBankStoragePolicyProblem(policy, configDir);
+    if (problem !== null) throw new Error(problem);
+    const title = safeFilename(filename.replace(/\.(?:md|pdf)$/iu, ""));
+    if (title.length === 0) throw new Error("The source note must have a filename.");
+    const notesHierarchy = parts[0]?.toLowerCase() === "notes" && parts.length >= 4;
+    const sourceHash = sha256Hex(normalized.toLowerCase()).slice(0, 10);
+    const parent = parts.at(-2) ?? "Vault Root";
+    const values: Readonly<Record<string, string>> = {
+      term: safeFilename(notesHierarchy ? parts[1] ?? "External" : "External"),
+      course: safeFilename(notesHierarchy ? parts[2] ?? "Practice Sources" : "Practice Sources"),
+      source: title,
+      sourceHash,
+      pdfHashSuffix: isPdf ? ` - ${sourceHash}` : "",
+      sourceType: isPdf ? "pdf" : "note",
+      parent: safeFilename(parent),
+    };
+    const relative = renderPracticeBankPathTemplate(policy.customPathTemplate, values);
+    return normalizeVaultPath(
+      `${normalizedStorageFolder(policy.customBaseFolder, configDir)}/${relative}`,
+    );
   }
   const notesIndex = parts.findIndex((part) => part.toLowerCase() === "notes");
   const pdfPathKey = isPdf
@@ -96,6 +163,118 @@ export function derivePracticePath(sourceVaultPath: string): string {
   const title = safeFilename(filename.replace(/\.(?:md|pdf)$/iu, ""));
   if (title.length === 0) throw new Error("The source note must have a filename.");
   return `Notes/${term}/${course}/Practice/${title}${pdfPathKey === undefined ? "" : ` - ${pdfPathKey}`} - Practice.md`;
+}
+
+export function practiceBankStoragePolicyProblem(
+  policy: PracticeBankStoragePolicyV1,
+  configDir?: string,
+): string | null {
+  if (policy.mode !== "course" && policy.mode !== "custom") {
+    return "Choose either the per-course or custom practice-bank storage mode.";
+  }
+  if (policy.mode === "course") return null;
+  const folderProblem = storageFolderProblem(policy.customBaseFolder, configDir);
+  if (folderProblem !== null) return folderProblem;
+  const template = policy.customPathTemplate.trim().replace(/\\/gu, "/");
+  if (template.length === 0) return "The custom practice-bank path template is empty.";
+  if (template.startsWith("/") || /^[A-Za-z]:\//u.test(template)) {
+    return "The custom practice-bank path template must be relative to the selected base folder.";
+  }
+  const unknownTokens = [...template.matchAll(/\{([^{}]+)\}/gu)]
+    .map((match) => match[1])
+    .filter((token): token is string => token !== undefined && !(token in PATH_TOKEN_VALUES));
+  if (unknownTokens.length > 0) {
+    return `Unknown practice-bank path token: {${unknownTokens[0]}}.`;
+  }
+  if (/\{|\}/u.test(template.replace(/\{[^{}]+\}/gu, ""))) {
+    return "The custom practice-bank path template contains an incomplete token.";
+  }
+  if (!template.includes("{source}") && !template.includes("{sourceHash}")) {
+    return "The custom practice-bank path template must include {source} or {sourceHash} to avoid collisions.";
+  }
+  const rendered = renderPracticeBankPathTemplate(template, PATH_TOKEN_VALUES);
+  const pathProblem = safeStoragePathProblem(rendered, "The custom practice-bank path template");
+  if (pathProblem !== null) return pathProblem;
+  if (!/\.md$/iu.test(rendered)) {
+    return "The custom practice-bank path template must end with .md.";
+  }
+  return null;
+}
+
+export function practiceBankPathPreview(
+  policy: PracticeBankStoragePolicyV1,
+  sampleSourcePath = "Notes/2025-26 - Q2/ELEC-Y418/Slides/Chapter 8 - Image Sensors.pdf",
+  configDir?: string,
+): { readonly path?: string; readonly problem?: string } {
+  try {
+    return { path: derivePracticePath(sampleSourcePath, policy, configDir) };
+  } catch (error) {
+    return { problem: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function normalizedStorageFolder(value: string, configDir?: string): string {
+  const trimmed = value.trim().replace(/\\/gu, "/").replace(/\/$/u, "");
+  const problem = storageFolderProblem(trimmed, configDir);
+  if (problem !== null) throw new Error(problem);
+  return trimmed;
+}
+
+function storageFolderProblem(value: string, configDir?: string): string | null {
+  const folder = value.trim().replace(/\\/gu, "/").replace(/\/$/u, "");
+  if (folder.length === 0) return "Choose a vault-relative custom practice-bank folder.";
+  if (/\.md$/iu.test(folder)) return "The custom practice-bank location must be a folder, not a Markdown file.";
+  const pathProblem = safeStoragePathProblem(folder, "The custom practice-bank folder");
+  if (pathProblem !== null) return pathProblem;
+  const configParts = configDir?.replace(/\\/gu, "/").replace(/^\/+|\/+$/gu, "")
+    .split("/")
+    .filter((part) => part.length > 0);
+  if (
+    configParts !== undefined
+    && configParts.length > 0
+    && configParts.every((part, index) =>
+      folder.split("/")[index]?.toLocaleLowerCase() === part.toLocaleLowerCase())
+  ) {
+    return "The custom practice-bank folder cannot be inside Obsidian's configuration folder.";
+  }
+  return null;
+}
+
+function safeStoragePathProblem(value: string, label: string): string | null {
+  if (value.startsWith("/") || /^[A-Za-z]:\//u.test(value)) {
+    return `${label} must be vault-relative.`;
+  }
+  const parts = value.split("/");
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) {
+    return `${label} cannot contain empty, current-directory, or parent-directory segments.`;
+  }
+  if (parts.some((part) => PROTECTED_STORAGE_SEGMENTS.has(part.toLowerCase()))) {
+    return `${label} cannot use Obsidian configuration, trash, or temporary folders.`;
+  }
+  if (
+    parts.some((part) => /[<>:"|?*]/u.test(part))
+    || parts.some((part) => [...part].some((character) =>
+      (character.codePointAt(0) ?? 0) <= 31))
+  ) {
+    return `${label} contains characters that are unsafe in a vault path.`;
+  }
+  if (parts.some((part) => /[. ]$/u.test(part))) {
+    return `${label} cannot contain a folder or filename ending in a period or space.`;
+  }
+  if (parts.some((part) => WINDOWS_RESERVED_STORAGE_SEGMENT.test(part))) {
+    return `${label} cannot use a reserved Windows filename.`;
+  }
+  return null;
+}
+
+function renderPracticeBankPathTemplate(
+  template: string,
+  values: Readonly<Record<string, string>>,
+): string {
+  return template.trim().replace(/\\/gu, "/").replace(
+    /\{([^{}]+)\}/gu,
+    (token, name: string) => values[name] ?? token,
+  );
 }
 
 function safeFilename(value: string): string {

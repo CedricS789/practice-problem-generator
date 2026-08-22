@@ -28,6 +28,7 @@ function recent(
     durationMs: options.durationMinutes * 60_000,
     completedCount: options.answers,
     exerciseCount: options.answers,
+    skippedCount: 0,
     completionPercent: 100,
     performance: {
       earnedPoints: options.earned,

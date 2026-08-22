@@ -168,6 +168,24 @@ test("a bank without completed sessions reports neutral statistics", () => {
   assert.deepEqual(statistics.history, []);
 });
 
+test("skipped questions are visible in history and excluded from performance", () => {
+  const withSkips = session(
+    "session-with-skips",
+    "2026-08-20T11:00:00.000Z",
+    "2026-08-20T11:02:00.000Z",
+    [{ exerciseId: "objective-1", grading: "objective", correct: true }],
+    3,
+  );
+  const statistics = calculatePracticeBankStatistics(bank([withSkips]));
+  const latest = statistics.history[0];
+  assert.equal(latest?.completedCount, 1);
+  assert.equal(latest?.skippedCount, 2);
+  assert.equal(latest?.completionPercent, 33);
+  assert.equal(latest?.performance.totalPoints, 1);
+  assert.equal(latest?.performance.percent, 100);
+  assert.equal(latest?.practiceRun.totalPoints, 1);
+});
+
 test("pending AI reviews count as completed but stay outside provisional scoring", () => {
   const pending = session(
     "session-pending",

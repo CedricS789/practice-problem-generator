@@ -89,6 +89,8 @@ export interface StudySessionCheckpointV1 {
   readonly finishedAt?: string;
   readonly currentQuestionIndex: number;
   readonly answers: readonly StudyAnswerRecord[];
+  /** Added after the original v1 contract; absence means no skipped questions. */
+  readonly skippedExerciseIds?: readonly string[];
   readonly currentInput: StudyCurrentInputStateV1 | null;
   readonly answerReviewMode: AnswerReviewMode;
   readonly answerReviewProvider: ProviderId;
@@ -625,6 +627,7 @@ function learningProgressProblem(
     StudySessionCheckpointV1,
     | "phase"
     | "answers"
+    | "skippedExerciseIds"
     | "exercises"
     | "segments"
     | "bankId"
@@ -692,7 +695,11 @@ function learningProgressProblem(
     || scopedSets.get((entry as { set: { id: string } }).set.id)?.title
       !== (entry as { set: { title: string } }).set.title
   )) return "learning evidence must match completed answers and their locked set scope";
-  if (checkpoint.phase === "merging" && value.evidence.length > 0) {
+  if (
+    checkpoint.phase === "merging"
+    && value.evidence.length > 0
+    && (checkpoint.skippedExerciseIds ?? []).length === 0
+  ) {
     const contributingSetIds = new Set(value.evidence.map((entry) =>
       (entry as SessionExerciseEvidenceV3).set.id
     ));
@@ -831,6 +838,8 @@ function guidedStateTransitionProblem(
 function learningProgressTransitionProblem(
   previous: StudySessionLearningProgressV1,
   next: StudySessionLearningProgressV1,
+  previousSkippedExerciseIds: readonly string[] = [],
+  nextSkippedExerciseIds: readonly string[] = [],
 ): string | null {
   if (canonicalJson(previous.scope) !== canonicalJson(next.scope)) {
     return "the locked learning set/path scope cannot change during a session";
@@ -869,7 +878,10 @@ function learningProgressTransitionProblem(
     return "a completed tutor lesson must append its immutable completion snapshot before the path advances";
   }
   if (newLesson === null) {
-    return oldLesson.state.phase === "complete"
+    const guidedExerciseWasSkipped = !previousSkippedExerciseIds.includes(
+      oldLesson.lesson.guidedExerciseId,
+    ) && nextSkippedExerciseIds.includes(oldLesson.lesson.guidedExerciseId);
+    return oldLesson.state.phase === "complete" || guidedExerciseWasSkipped
       ? null
       : "an unfinished tutor lesson cannot be discarded";
   }
@@ -967,8 +979,34 @@ function checkpointProblem(value: StudySessionCheckpointV1): string | null {
   ) {
     return "currentQuestionIndex is outside the locked session";
   }
-  if (!Array.isArray(value.answers) || value.answers.length !== value.currentQuestionIndex) {
-    return "completed answers must match the current question index";
+  if (!Array.isArray(value.answers)) {
+    return "completed answers must be an array";
+  }
+  const skippedExerciseIds = value.skippedExerciseIds ?? [];
+  if (
+    !Array.isArray(skippedExerciseIds)
+    || skippedExerciseIds.some((id) => !safeId(id))
+    || new Set(skippedExerciseIds).size !== skippedExerciseIds.length
+  ) {
+    return "skipped exercise IDs are invalid or duplicated";
+  }
+  const answers = value.answers as readonly StudyAnswerRecord[];
+  const validatedSkippedExerciseIds = skippedExerciseIds as readonly string[];
+  const answerIds = answers.map((answer) => answer.exerciseId);
+  const completedIds = [...answerIds, ...validatedSkippedExerciseIds];
+  if (new Set(completedIds).size !== completedIds.length) {
+    return "an exercise cannot be both answered and skipped";
+  }
+  if (completedIds.length !== value.currentQuestionIndex) {
+    return "answered and skipped questions must match the current question index";
+  }
+  const completedPrefix = exerciseIds.slice(0, value.currentQuestionIndex);
+  const completedIdSet = new Set(completedIds);
+  if (
+    completedPrefix.some((id) => !completedIdSet.has(id))
+    || completedIds.some((id) => !completedPrefix.includes(id))
+  ) {
+    return "answered and skipped questions must exactly match the completed question prefix";
   }
   const inputProblem = inputStateProblem(
     value.currentInput,
@@ -996,7 +1034,8 @@ function checkpointProblem(value: StudySessionCheckpointV1): string | null {
       id: value.sessionId,
       startedAt: value.startedAt,
       finishedAt: value.finishedAt ?? value.updatedAt,
-      answers: value.answers,
+      answers,
+      skippedExerciseIds: validatedSkippedExerciseIds,
       bankRevisionAtStart: value.bankRevisionAtStart,
       exerciseCountAtStart: value.exerciseCountAtStart,
       orderedExerciseIds: exerciseIds,
@@ -1117,6 +1156,7 @@ export function createStudySessionCheckpoint(
     updatedAt,
     currentQuestionIndex: progress.currentQuestionIndex,
     answers: structuredClone(progress.answers),
+    skippedExerciseIds: [...(progress.skippedExerciseIds ?? [])],
     currentInput: structuredClone(progress.currentInput),
     answerReviewMode: progress.answerReviewMode,
     answerReviewProvider: progress.answerReviewProvider,
@@ -1173,6 +1213,8 @@ export function updateStudySessionCheckpoint(
     const transitionProblem = learningProgressTransitionProblem(
       checkpoint.learningProgress,
       suppliedLearningProgress,
+      checkpoint.skippedExerciseIds ?? [],
+      progress.skippedExerciseIds ?? [],
     );
     if (transitionProblem !== null) throw new Error(transitionProblem);
   }
@@ -1181,6 +1223,7 @@ export function updateStudySessionCheckpoint(
     updatedAt,
     currentQuestionIndex: progress.currentQuestionIndex,
     answers: structuredClone(progress.answers),
+    skippedExerciseIds: [...(progress.skippedExerciseIds ?? [])],
     currentInput: structuredClone(progress.currentInput),
     answerReviewMode: progress.answerReviewMode,
     answerReviewProvider: progress.answerReviewProvider,
@@ -1211,6 +1254,12 @@ export function markStudySessionCheckpointMerging(
   if (canonicalJson(lockedLearning) !== canonicalJson(session.learning)) {
     throw new Error("The finished session learning evidence does not match its locked checkpoint.");
   }
+  if (
+    canonicalJson(checkpoint.skippedExerciseIds ?? [])
+      !== canonicalJson(session.skippedExerciseIds ?? [])
+  ) {
+    throw new Error("The finished session skipped questions do not match its locked checkpoint.");
+  }
   const finishedAt = session.finishedAt;
   const next: StudySessionCheckpointV1 = {
     ...checkpoint,
@@ -1219,6 +1268,7 @@ export function markStudySessionCheckpointMerging(
     finishedAt,
     currentQuestionIndex: checkpoint.exercises.length,
     answers: structuredClone(session.answers),
+    skippedExerciseIds: [...(session.skippedExerciseIds ?? [])],
     currentInput: null,
   };
   const parsed = parseStudySessionCheckpoint(next);
@@ -1252,6 +1302,7 @@ export function finishedSessionFromCheckpoint(
     startedAt: checkpoint.startedAt,
     finishedAt: checkpoint.finishedAt,
     answers: structuredClone(checkpoint.answers),
+    skippedExerciseIds: [...(checkpoint.skippedExerciseIds ?? [])],
     bankRevisionAtStart: checkpoint.bankRevisionAtStart,
     exerciseCountAtStart: checkpoint.exerciseCountAtStart,
     orderedExerciseIds: checkpoint.exercises.map((exercise) => exercise.id),

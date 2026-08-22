@@ -13,6 +13,7 @@ import type {
   StudyOrderDefault,
   VisualSelectionDefault,
 } from "../preferences";
+import type { GenerationDifficulty } from "../difficulty";
 
 export const EXERCISE_TYPES = [
   "short-answer",
@@ -33,7 +34,7 @@ export type ProviderExecutionMode =
   | "execute-now"
   | "queue-for-desktop"
   | "unavailable";
-export type Difficulty = "foundational" | "deep-exam" | "challenge";
+export type Difficulty = GenerationDifficulty;
 export type MarkdownSourceMode = "selection" | "note";
 export type SourceMode = MarkdownSourceMode | "pdf";
 export type SelfRating = SelfRatingV1;
@@ -313,6 +314,8 @@ export interface StudySessionProgressV1 extends StudySessionOriginV1 {
   readonly orderedExerciseIds: readonly string[];
   readonly currentQuestionIndex: number;
   readonly answers: readonly StudyAnswerRecord[];
+  /** Questions deliberately left unanswered in this run. */
+  readonly skippedExerciseIds?: readonly string[];
   readonly currentInput: StudyCurrentInputStateV1 | null;
   readonly answerReviewMode: AnswerReviewMode;
   readonly answerReviewProvider: ProviderId;
@@ -325,6 +328,8 @@ export interface FinishedStudySession {
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly answers: readonly StudyAnswerRecord[];
+  /** Questions deliberately left unanswered; excluded from grading. */
+  readonly skippedExerciseIds?: readonly string[];
   readonly bankRevisionAtStart?: number;
   readonly exerciseCountAtStart?: number;
   readonly orderedExerciseIds?: readonly string[];

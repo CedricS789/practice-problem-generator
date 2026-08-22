@@ -21,6 +21,7 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "Practice Problem Generator view",
     "Practice bank statistics",
     "Dashboard",
+    "Practice-bank storage",
     "Advanced runtime",
   ]) {
     assert.match(settingsSource, new RegExp(`"${heading}"`, "u"));
@@ -36,6 +37,10 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "pdfMaxExtractedCharacters",
     "pdfinfoExecutable",
     "pdftotextExecutable",
+    "practiceBankStorageMode",
+    "practiceBankCustomFolder",
+    "practiceBankPathTemplate",
+    "practiceViewLocation",
     "studyOrderDefault",
     "studyTypeSequence",
     "studyShuffleWithinTypesDefault",
@@ -51,10 +56,45 @@ test("settings expose generation, study, view, bank, and dashboard control group
   }
 });
 
+test("the full practice workspace defaults to a main tab with a sidebar opt-in", () => {
+  assert.match(settingsSource, /practiceViewLocation: "main-tab"/u);
+  assert.match(settingsSource, /setName\("Open workspace in"\)/u);
+  assert.match(settingsSource, /addOption\("main-tab", "Main tab \(recommended\)"\)/u);
+  assert.match(settingsSource, /addOption\("right-sidebar", "Right sidebar"\)/u);
+  assert.match(mainSource, /this\.settings\.practiceViewLocation === "right-sidebar"/u);
+  assert.match(
+    mainSource,
+    /\? this\.app\.workspace\.getRightLeaf\(false\) \?\? this\.app\.workspace\.getLeaf\("tab"\)\s*: this\.app\.workspace\.getLeaf\("tab"\)/u,
+  );
+  assert.match(mainSource, /!Platform\.isMobileApp/u);
+});
+
+test("practice-bank storage exposes a guarded live path preview without moving existing banks", () => {
+  assert.match(settingsSource, /Per-course practice folder/u);
+  assert.match(settingsSource, /Custom folder and template/u);
+  assert.match(
+    settingsSource,
+    /practiceBankPathPreview\(\s*candidate\(\),\s*undefined,\s*this\.app\.vault\.configDir/su,
+  );
+  assert.match(
+    settingsSource,
+    /practiceBankStoragePolicyProblem\(policy, this\.app\.vault\.configDir\)/u,
+  );
+  assert.match(settingsSource, /PRACTICE_BANK_PATH_TEMPLATE_TOKENS\.join/u);
+  assert.match(settingsSource, /Existing bank files are not moved/u);
+  assert.match(mainSource, /preferredPath: \(sourcePath\) => derivePracticePath/u);
+  assert.match(mainSource, /locateExistingPath: async \(sourcePath\)/u);
+  assert.match(mainSource, /Multiple practice banks already reference/u);
+});
+
 test("all major surfaces provide native hover descriptions for interactive controls", () => {
   assert.match(hoverSource, /button.*input.*select.*textarea.*summary.*a\[href\]/su);
   assert.match(hoverSource, /\.setting-item-description/u);
-  assert.match(hoverSource, /control\.title =/u);
+  assert.match(hoverSource, /import \{ setTooltip \} from "obsidian"/u);
+  assert.match(hoverSource, /setTooltip\(control, tooltip, \{ delay: 250 \}\)/u);
+  assert.match(hoverSource, /new MutationObserver/u);
+  assert.match(hoverSource, /observer\.observe\(root, \{ childList: true, subtree: true \}\)/u);
+  assert.match(hoverSource, /nonempty\(control\.title\)/u);
   assert.match(viewSource, /installHoverDescriptions\(this\.contentEl\)/u);
   assert.match(dashboardSource, /installHoverDescriptions\(this\.contentEl\)/u);
   assert.match(bankSource, /installHoverDescriptions\(container\)/u);

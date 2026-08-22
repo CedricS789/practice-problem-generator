@@ -6,6 +6,7 @@ import type {
   SessionItemResultV2,
 } from "./model";
 import { displayReasoningEffort } from "./reasoning";
+import { displayDifficulty } from "./difficulty";
 import { displayModelSelection } from "./model-selection";
 import {
   generationForBankRevision,
@@ -146,11 +147,6 @@ function providerLabel(provider: "codex" | "claude" | "agy"): string {
   return provider === "agy" ? "agy" : "Codex";
 }
 
-function difficultyLabel(difficulty: GenerationHistoryEntryV1["difficulty"]): string {
-  if (difficulty === "foundational") return "Foundational";
-  return difficulty === "challenge" ? "Challenge" : "Deep exam practice";
-}
-
 function generationAuditSummary(entry: GenerationHistoryEntryV1): string {
   const version = entry.providerVersion === undefined
     ? "CLI version not recorded"
@@ -160,7 +156,7 @@ function generationAuditSummary(entry: GenerationHistoryEntryV1): string {
     version,
     `Model ${displayModelSelection(entry.model)}`,
     `${displayReasoningEffort(entry.reasoningEffort)} reasoning`,
-    difficultyLabel(entry.difficulty),
+    displayDifficulty(entry.difficulty),
   ].join(" · ");
 }
 
@@ -412,7 +408,7 @@ export function renderBankStatistics(
         percentText(statistics.latestScorePercent),
         statistics.history[0] === undefined
           ? "No completed run"
-          : `${statistics.history[0].provisional ? "Provisional · " : ""}${practiceRunRankText(statistics.history[0].practiceRun.rank)} · ${statistics.history[0].completedCount} answered`,
+          : `${statistics.history[0].provisional ? "Provisional · " : ""}${practiceRunRankText(statistics.history[0].practiceRun.rank)} · ${statistics.history[0].completedCount} answered${statistics.history[0].skippedCount === 0 ? "" : ` · ${statistics.history[0].skippedCount} skipped`}`,
       );
     }
     if (visibility.showBestSession) {
@@ -535,7 +531,7 @@ export function renderBankStatistics(
       createPerformanceBar(row, session.performance.percent, "Session score");
       row.createSpan({
         cls: "practice-lab-session-history-meta",
-        text: `${formatPracticeRunPoints(session.practiceRun.earnedPoints)}/${session.practiceRun.totalPoints} run points · Best answer streak ${session.practiceRun.bestStreak} · ${session.completedCount}/${session.exerciseCount} completed · ${durationText(session.durationMs)} · ${sessionOutcomeText(session)}`,
+        text: `${formatPracticeRunPoints(session.practiceRun.earnedPoints)}/${session.practiceRun.totalPoints} run points · Best answer streak ${session.practiceRun.bestStreak} · ${session.completedCount}/${session.exerciseCount} answered${session.skippedCount === 0 ? "" : ` · ${session.skippedCount} skipped`} · ${durationText(session.durationMs)} · ${sessionOutcomeText(session)}`,
       });
       if (visibility.showGenerationHistory) {
         renderSessionGenerationAudit(row, session, options.generationHistory);

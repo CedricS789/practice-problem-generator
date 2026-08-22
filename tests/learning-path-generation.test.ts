@@ -298,6 +298,10 @@ test("blueprint prompt carries the exact approved multi-source payload without v
   assert.match(prompt, /seg-foundation/u);
   assert.match(prompt, /support:seg-application/u);
   assert.match(prompt, /pages 3-4 only/u);
+  assert.match(prompt, /Difficulty controls reasoning demand, not source scope/u);
+  assert.match(prompt, /foundational \(Foundational\)/u);
+  assert.match(prompt, /deep-exam \(Deep exam practice\)/u);
+  assert.match(prompt, /challenge \(Challenge\)/u);
   assert.match(prompt, /source-gap/u);
   assert.match(prompt, /not flashcards, spaced repetition/u);
   assert.doesNotMatch(prompt, /C:\\|OneDrive|School Vault/u);
@@ -372,6 +376,9 @@ test("per-set payloads are exact, sequentially ordered, and contain global sibli
   assert.match(prompt, /set-application/u);
   assert.match(prompt, /support:seg-application/u);
   assert.match(prompt, /exactly 2 exercises/u);
+  assert.match(prompt, /Difficulty profile: deep-exam/u);
+  assert.match(prompt, /medium and hard items/u);
+  assert.match(prompt, /Do not manufacture difficulty by withholding necessary evidence/u);
   assert.doesNotMatch(prompt, /C:\\|OneDrive|School Vault/u);
 });
 

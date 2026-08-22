@@ -99,27 +99,26 @@ export interface ReplacePracticeSetInput extends LearningWorkspaceSidecarsV1 {
   readonly replacement: PracticeSetContentReplacementV1;
 }
 
+export interface PracticeBankRepositoryOptions {
+  /** Dynamic preferred path for newly created banks. */
+  readonly preferredPath?: (sourcePath: string) => string;
+  /** Finds an already saved bank so changing defaults never relocates it. */
+  readonly locateExistingPath?: (sourcePath: string) => Promise<string | undefined>;
+}
+
 export class PracticeBankRepository {
-  constructor(private readonly app: App) {}
+  constructor(
+    private readonly app: App,
+    private readonly options: PracticeBankRepositoryOptions = {},
+  ) {}
 
   async loadForSource(sourcePath: string): Promise<LoadedPracticeBank> {
-    const path = derivePracticePath(sourcePath);
-    const abstract = this.app.vault.getAbstractFileByPath(path);
-    if (!isVaultFile(abstract)) {
-      return {
-        path,
-        file: null,
-        parsed: {
-          status: "missing",
-          recoveryMessage: "No saved Practice Problem Generator bank exists for this source note."
-        }
-      };
-    }
-    return { path, file: abstract, parsed: parsePracticeBankMarkdown(await this.app.vault.cachedRead(abstract)) };
+    return this.resolveForSource(sourcePath);
   }
 
   async saveGenerated(input: SaveBankInput): Promise<{ path: string; bank: PracticeBankV3 }> {
-    const path = derivePracticePath(input.source.path);
+    const target = await this.resolveForSource(input.source.path);
+    const path = target.path;
     await ensureParentFolder(this.app, path);
     const now = new Date().toISOString();
     const createBank = (previous?: PracticeBankV2): PracticeBankV3 => migratePracticeBankV2ToV3({
@@ -185,6 +184,7 @@ export class PracticeBankRepository {
         if (!isVaultFile(raced)) throw error;
         return this.replaceExisting(
           raced,
+          input.source.path,
           createBank,
           input.generationRecipe,
           input.generationHistoryEntry,
@@ -194,6 +194,7 @@ export class PracticeBankRepository {
     }
     return this.replaceExisting(
       existing,
+      input.source.path,
       createBank,
       input.generationRecipe,
       input.generationHistoryEntry,
@@ -204,10 +205,11 @@ export class PracticeBankRepository {
   async saveLearningWorkspace(
     input: SaveLearningWorkspaceInput,
   ): Promise<{ path: string; bank: PracticeBankV3 }> {
-    const path = derivePracticePath(input.bank.source.vaultPath);
+    const target = await this.resolveForSource(input.bank.source.vaultPath);
+    const path = target.path;
     await ensureParentFolder(this.app, path);
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (!isVaultFile(existing)) {
+    const existing = target.file;
+    if (existing === null) {
       if (input.expectedRevision !== undefined) {
         throw new Error("The expected learning workspace no longer exists.");
       }
@@ -419,6 +421,7 @@ export class PracticeBankRepository {
 
   private async replaceExisting(
     file: TFile,
+    expectedSourcePath: string,
     createBank: (previous: PracticeBankV2) => PracticeBankV3,
     generationRecipe: GenerationRecipeV2,
     generationHistoryEntry: GenerationHistoryEntryDraftV1,
@@ -428,6 +431,7 @@ export class PracticeBankRepository {
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
+      assertSameSource(file.path, parsed.bank.source.vaultPath, expectedSourcePath);
       const quickReplacementProblem = quickGenerationReplacementProblem(parsed.bank);
       if (quickReplacementProblem !== null) {
         throw new Error(quickReplacementProblem);
@@ -473,6 +477,49 @@ export class PracticeBankRepository {
     });
     if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the saved bank.");
     return { path: file.path, bank: saved };
+  }
+
+  private async resolveForSource(sourcePath: string): Promise<LoadedPracticeBank> {
+    const locatedPath = await this.options.locateExistingPath?.(sourcePath);
+    const checkedPaths = new Set<string>();
+    const existingAt = async (path: string | undefined): Promise<LoadedPracticeBank | null> => {
+      if (path === undefined || checkedPaths.has(path)) return null;
+      checkedPaths.add(path);
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!isVaultFile(file)) return null;
+      const parsed = parsePracticeBankMarkdown(await this.app.vault.cachedRead(file));
+      if (parsed.status === "ok") {
+        assertSameSource(file.path, parsed.bank.source.vaultPath, sourcePath);
+      }
+      return { path: file.path, file, parsed };
+    };
+
+    // A bank already associated with this source owns its current path. Resolve it
+    // before evaluating the new preference so changing storage settings never makes
+    // a previously valid workspace unreachable.
+    const located = await existingAt(locatedPath);
+    if (located !== null) return located;
+
+    const preferredPath = this.options.preferredPath?.(sourcePath)
+      ?? derivePracticePath(sourcePath);
+    let legacyPath: string | undefined;
+    try {
+      legacyPath = derivePracticePath(sourcePath);
+    } catch {
+      // Custom storage may intentionally support sources outside Notes/<term>/<course>/.
+    }
+    for (const path of [preferredPath, legacyPath]) {
+      const existing = await existingAt(path);
+      if (existing !== null) return existing;
+    }
+    return {
+      path: preferredPath,
+      file: null,
+      parsed: {
+        status: "missing",
+        recoveryMessage: "No saved Practice Problem Generator bank exists for this source note.",
+      },
+    };
   }
 
   private async updateSessions(
@@ -693,6 +740,13 @@ export function createSessionSummary(
   if (!Number.isInteger(bankRevisionAtStart) || bankRevisionAtStart < 0) {
     throw new Error("The session's starting bank revision is invalid.");
   }
+  const skippedExerciseIds = session.skippedExerciseIds ?? [];
+  if (new Set(skippedExerciseIds).size !== skippedExerciseIds.length) {
+    throw new Error("The session contains duplicate skipped exercise IDs.");
+  }
+  if (skippedExerciseIds.some((id) => !exerciseIds.has(id))) {
+    throw new Error("The session contains an unknown skipped exercise.");
+  }
   const seen = new Set<string>();
   const results: SessionItemResultV2[] = session.answers.map((answer) => {
     if (!exerciseIds.has(answer.exerciseId)) throw new Error(`Unknown exercise in session: ${answer.exerciseId}`);
@@ -710,6 +764,12 @@ export function createSessionSummary(
     if (answer.correct === undefined) throw new Error(`Session answer ${answer.exerciseId} has no grade or rating.`);
     return { exerciseId: answer.exerciseId, grading: "objective", correct: answer.correct };
   });
+  if (skippedExerciseIds.some((id) => seen.has(id))) {
+    throw new Error("A session exercise cannot be both answered and skipped.");
+  }
+  if (results.length + skippedExerciseIds.length > exerciseCount) {
+    throw new Error("The session contains more answered and skipped questions than its locked exercise count.");
+  }
   const objective = results.filter((result): result is Extract<SessionItemResultV2, { grading: "objective" }> => (
     result.grading === "objective"
   ));
@@ -752,7 +812,7 @@ export function createSessionSummary(
   })) {
     throw new Error("Every session evidence set must exactly match its scoped snapshot.");
   }
-  if (learning.evidence.length > 0) {
+  if (learning.evidence.length > 0 && skippedExerciseIds.length === 0) {
     const contributingSetIds = new Set(learning.evidence.map((entry) => entry.set.id));
     if (
       contributingSetIds.size !== scopedSets.size
@@ -925,6 +985,20 @@ async function ensureParentFolder(app: App, filePath: string): Promise<void> {
 
 function normalizeVaultPath(value: string): string {
   return value.replace(/\\/gu, "/").replace(/\/{2,}/gu, "/").replace(/^\/+|\/+$/gu, "");
+}
+
+function assertSameSource(
+  bankPath: string,
+  actualSourcePath: string,
+  expectedSourcePath: string,
+): void {
+  if (
+    normalizeVaultPath(actualSourcePath).toLocaleLowerCase()
+    === normalizeVaultPath(expectedSourcePath).toLocaleLowerCase()
+  ) return;
+  throw new Error(
+    `The configured practice-bank path ${bankPath} is already used by ${actualSourcePath}. Add {sourceHash} to the custom path template or choose another base folder.`,
+  );
 }
 
 function isVaultFile(value: unknown): value is TFile {

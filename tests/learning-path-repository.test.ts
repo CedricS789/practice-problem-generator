@@ -54,6 +54,10 @@ class FakeVault {
     return file;
   }
 
+  async cachedRead(file: FakeFile): Promise<string> {
+    return file.content;
+  }
+
   async process(
     file: FakeFile,
     processor: (markdown: string) => string,
@@ -222,6 +226,63 @@ const recipeCatalog = generationRecipeCatalogFromLegacy("set-general", {
   status: "ok",
   recipe,
   storedSchemaVersion: 2,
+});
+
+test("new workspaces use the configured preferred path", async () => {
+  const bank = migratePracticeBankV2ToV3(bankV2());
+  const vault = new FakeVault();
+  const customPath = "Practice Problems/Term/Course/Evidence.md";
+  const repository = new PracticeBankRepository(
+    { vault } as unknown as App,
+    { preferredPath: () => customPath },
+  );
+
+  const saved = await repository.saveLearningWorkspace({ bank });
+
+  assert.equal(saved.path, customPath);
+  assert.ok(vault.files.has(customPath));
+  assert.equal(
+    vault.files.has("Notes/Term/Course/Practice/Evidence - Practice.md"),
+    false,
+  );
+});
+
+test("an existing source-owned bank remains discoverable after storage defaults change", async () => {
+  const bank = migratePracticeBankV2ToV3(bankV2());
+  const existingPath = "Previously chosen/Evidence - Practice.md";
+  const vault = new FakeVault();
+  await vault.create(existingPath, serializePracticeBank(bank));
+  const repository = new PracticeBankRepository(
+    { vault } as unknown as App,
+    {
+      locateExistingPath: async () => existingPath,
+      preferredPath: () => {
+        throw new Error("The new default does not support this old source location.");
+      },
+    },
+  );
+
+  const loaded = await repository.loadForSource(bank.source.vaultPath);
+
+  assert.equal(loaded.path, existingPath);
+  assert.equal(loaded.file?.path, existingPath);
+  assert.equal(loaded.parsed.status, "ok");
+});
+
+test("a custom-path collision cannot overwrite a bank owned by another source", async () => {
+  const bank = migratePracticeBankV2ToV3(bankV2());
+  const collisionPath = "Practice Problems/Evidence.md";
+  const vault = new FakeVault();
+  await vault.create(collisionPath, serializePracticeBank(bank));
+  const repository = new PracticeBankRepository(
+    { vault } as unknown as App,
+    { preferredPath: () => collisionPath },
+  );
+
+  await assert.rejects(
+    repository.loadForSource("Notes/Term/Course/Another Evidence.md"),
+    /already used by Notes\/Term\/Course\/Evidence\.md.*\{sourceHash\}/u,
+  );
 });
 
 test("learning workspace replacement is revision-aware and preserves sessions and sidecars", async () => {

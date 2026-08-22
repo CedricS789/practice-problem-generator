@@ -26,6 +26,7 @@ import {
   type AnswerReviewQueueEvent,
 } from "./answer-review-queue";
 import { retryAsync } from "./async-retry";
+import { generationDifficultyFromSetting } from "./difficulty";
 import { enabledExerciseTypes } from "./exercise-distribution";
 import { auditOfflineReadiness } from "./offline-readiness";
 import { PracticeBankRepository, createSessionSummary } from "./bank-repository";
@@ -90,6 +91,7 @@ import type {
   VisualSourceV1,
 } from "./model";
 import {
+  derivePracticePath,
   getStaleSourceState,
   parsePracticeBankMarkdown,
   type AiReviewResolutionPatchV2,
@@ -311,7 +313,23 @@ export default class PracticeLabPlugin extends Plugin {
     if (JSON.stringify(storedData) !== JSON.stringify(this.storedDataSnapshot())) {
       await this.saveData(this.storedDataSnapshot());
     }
-    this.repository = new PracticeBankRepository(this.app);
+    this.dashboardRepository = new PracticeDashboardRepository(this.app, {
+      hasPracticeBankMarker: (file) =>
+        this.app.metadataCache.getFileCache(file)?.frontmatter?.["practice-lab"] === true,
+      sourceTags: (file) => {
+        const cache = this.app.metadataCache.getFileCache(file);
+        return cache === null ? [] : getAllTags(cache) ?? [];
+      }
+    });
+    this.repository = new PracticeBankRepository(this.app, {
+      preferredPath: (sourcePath) => derivePracticePath(sourcePath, {
+        mode: this.settings.practiceBankStorageMode,
+        customBaseFolder: this.settings.practiceBankCustomFolder,
+        customPathTemplate: this.settings.practiceBankPathTemplate,
+      }, this.app.vault.configDir),
+      locateExistingPath: async (sourcePath) =>
+        this.existingPracticeBankPathForSource(sourcePath),
+    });
     this.learningPathController = new LearningPathController({
       app: this.app,
       repository: this.repository,
@@ -336,15 +354,6 @@ export default class PracticeLabPlugin extends Plugin {
       providers: () => this.providers,
       timeoutMs: () => this.settings.timeoutMs,
     });
-    this.dashboardRepository = new PracticeDashboardRepository(this.app, {
-      hasPracticeBankMarker: (file) =>
-        this.app.metadataCache.getFileCache(file)?.frontmatter?.["practice-lab"] === true,
-      sourceTags: (file) => {
-        const cache = this.app.metadataCache.getFileCache(file);
-        return cache === null ? [] : getAllTags(cache) ?? [];
-      }
-    });
-
     this.registerView(PRACTICE_LAB_VIEW_TYPE, (leaf) => new PracticeLabView(leaf, this.createViewOptions()));
     this.registerView(
       PRACTICE_LEARNING_PATH_VIEW_TYPE,
@@ -625,7 +634,7 @@ export default class PracticeLabPlugin extends Plugin {
       title: "Reset all Practice Problem Generator settings?",
       warning: "Every Practice Problem Generator preference will return to its installed default.",
       consequences: [
-        "Provider, model, reasoning, exercise mix, focus, PDF, study, interface, timeout, and executable settings will be reset.",
+        "Provider, model, reasoning, exercise mix, focus, PDF, study, interface, storage, timeout, and executable settings will be reset.",
         "Generated practice banks, session history, answers, and statistics will not be changed.",
         "You will need to re-enter any custom executable paths.",
       ],
@@ -1234,9 +1243,7 @@ export default class PracticeLabPlugin extends Plugin {
         model: modelForProvider(this.settings, this.settings.provider),
         reasoningEffort: this.settings.reasoningEffort,
         quantity: this.settings.quantity,
-        difficulty: this.settings.difficulty === "foundation"
-          ? "foundational"
-          : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+        difficulty: generationDifficultyFromSetting(this.settings.difficulty),
         focusInstructions: this.settings.defaultFocusInstructions,
         gifFrameDefault: this.settings.gifFrameDefault,
       },
@@ -2129,9 +2136,7 @@ export default class PracticeLabPlugin extends Plugin {
           }),
       quantity: options.quantity
         ?? Math.max(1, Math.min(30, targetSet.assignments.length || this.settings.quantity)),
-      difficulty: this.settings.difficulty === "foundation"
-        ? "foundational"
-        : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+      difficulty: generationDifficultyFromSetting(this.settings.difficulty),
       exerciseTypes: enabledExerciseTypes(basePercentages),
       exerciseTypePercentages: basePercentages,
       selectedVisualIds: bank.visuals.map((visual) => visual.id),
@@ -2290,9 +2295,7 @@ export default class PracticeLabPlugin extends Plugin {
         currentBank.generation?.provider ?? this.settings.provider,
       ),
       reasoningEffort: this.settings.reasoningEffort,
-      difficulty: this.settings.difficulty === "foundation"
-        ? "foundational"
-        : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+      difficulty: generationDifficultyFromSetting(this.settings.difficulty),
       focusInstructions: this.settings.defaultFocusInstructions,
     });
     let restored: RegenerationSourceResult;
@@ -2372,7 +2375,10 @@ export default class PracticeLabPlugin extends Plugin {
     }
     let leaf = this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)[0];
     if (leaf === undefined) {
-      leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf("tab");
+      leaf = !Platform.isMobileApp
+        && this.settings.practiceViewLocation === "right-sidebar"
+        ? this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf("tab")
+        : this.app.workspace.getLeaf("tab");
       await leaf.setViewState({ type: PRACTICE_LAB_VIEW_TYPE, active: true });
     }
     await this.app.workspace.revealLeaf(leaf);
@@ -2391,9 +2397,7 @@ export default class PracticeLabPlugin extends Plugin {
       studyShuffleWithinTypesDefault:
         this.settings.studyShuffleWithinTypesDefault,
       quantity: this.settings.quantity,
-      difficulty: this.settings.difficulty === "foundation"
-        ? "foundational"
-        : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+      difficulty: generationDifficultyFromSetting(this.settings.difficulty),
       exerciseTypePercentages: { ...this.settings.exerciseTypePercentages },
       answerReviewMode: this.settings.answerReviewDefault,
       answerReviewProvider: this.settings.answerReviewProvider,
@@ -3380,6 +3384,32 @@ export default class PracticeLabPlugin extends Plugin {
       expectedRevision: bank.revision,
     });
     await this.retryAnswerReview(request);
+  }
+
+  private async existingPracticeBankPathForSource(
+    sourcePath: string,
+  ): Promise<string | undefined> {
+    const normalizedSource = normalizePath(sourcePath).toLocaleLowerCase();
+    const snapshot = await this.dashboardRepository.load();
+    const paths = new Set(
+      snapshot.records
+        .filter((record) =>
+          normalizePath(record.bank.source.vaultPath).toLocaleLowerCase() === normalizedSource)
+        .map((record) => normalizePath(record.bankPath)),
+    );
+    if (
+      this.activeBank !== undefined
+      && normalizePath(this.activeBank.bank.source.vaultPath).toLocaleLowerCase()
+        === normalizedSource
+    ) {
+      paths.add(normalizePath(this.activeBank.path));
+    }
+    if (paths.size > 1) {
+      throw new Error(
+        `Multiple practice banks already reference ${sourcePath}: ${[...paths].sort().join(", ")}. Remove the duplicate before generating again.`,
+      );
+    }
+    return [...paths][0];
   }
 
   private async loadPracticeBank(bankPath: string): Promise<PracticeBankV3> {

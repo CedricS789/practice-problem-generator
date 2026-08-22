@@ -59,11 +59,27 @@ import type {
   ActivityRangeWeeks,
   WeekStart,
 } from "./activity-analytics";
+import {
+  DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+  DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+  PRACTICE_BANK_PATH_TEMPLATE_TOKENS,
+  practiceBankPathPreview,
+  practiceBankStoragePolicyProblem,
+  type PracticeBankStorageMode,
+  type PracticeBankStoragePolicyV1,
+} from "./persistence";
+import {
+  generationDifficultyFromSetting,
+  settingDifficultyFromGeneration,
+  type StoredDifficulty,
+} from "./difficulty";
+import { renderDifficultySelector } from "./ui/difficulty-selector";
 
 export type ProviderId = "codex" | "claude" | "agy";
 export type AnswerReviewDefault = "self" | "ai";
-export type Difficulty = "foundation" | "exam" | "challenge";
+export type Difficulty = StoredDifficulty;
 export type ExerciseTypeId = StudyExerciseType;
+export type PracticeViewLocation = "main-tab" | "right-sidebar";
 
 const EXERCISE_TYPE_LABELS: Readonly<Record<ExerciseTypeId, string>> = {
   "short-answer": "Short answer",
@@ -78,7 +94,7 @@ const EXERCISE_TYPE_LABELS: Readonly<Record<ExerciseTypeId, string>> = {
   "image-occlusion": "Image occlusion",
 };
 
-export const SETTINGS_SCHEMA_VERSION = 4;
+export const SETTINGS_SCHEMA_VERSION = 6;
 const LEGACY_GENERATION_TIMEOUT_MS = 300_000;
 const LEGACY_ANSWER_REVIEW_TIMEOUT_MS = 120_000;
 
@@ -116,6 +132,10 @@ export interface PracticeLabSettings {
   pdfMaxPageCount: number;
   pdfMaxExtractedCharacters: number;
   pdfExtractionTimeoutMs: number;
+  practiceBankStorageMode: PracticeBankStorageMode;
+  practiceBankCustomFolder: string;
+  practiceBankPathTemplate: string;
+  practiceViewLocation: PracticeViewLocation;
   dashboardActivityRangeWeeks: ActivityRangeWeeks;
   dashboardActivityMetric: ActivityMetric;
   dashboardWeekStart: WeekStart;
@@ -158,6 +178,10 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   pdfMaxPageCount: 40,
   pdfMaxExtractedCharacters: 120_000,
   pdfExtractionTimeoutMs: 120_000,
+  practiceBankStorageMode: "course",
+  practiceBankCustomFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+  practiceBankPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+  practiceViewLocation: "main-tab",
   dashboardActivityRangeWeeks: 52,
   dashboardActivityMetric: "answers",
   dashboardWeekStart: "monday",
@@ -166,7 +190,10 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
 
 export function normalizeSettings(value: unknown): PracticeLabSettings {
   const partial = value && typeof value === "object" ? value as Partial<PracticeLabSettings> : {};
-  const migrateLegacyTimeouts = partial.settingsSchemaVersion !== SETTINGS_SCHEMA_VERSION;
+  const storedSchemaVersion = Number.isInteger(partial.settingsSchemaVersion)
+    ? partial.settingsSchemaVersion ?? 0
+    : 0;
+  const migrateLegacyTimeouts = storedSchemaVersion < 4;
   const provider = partial.provider === "claude" || partial.provider === "agy" ? partial.provider : "codex";
   const reasoningEffort = normalizeReasoningEffort(provider, partial.reasoningEffort);
   const gifFrameDefault = normalizeGifFrameDefault(partial.gifFrameDefault);
@@ -220,6 +247,22 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     300_000,
     120_000,
   );
+  const storagePolicyCandidate: PracticeBankStoragePolicyV1 = {
+    mode: partial.practiceBankStorageMode === "custom" ? "custom" : "course",
+    customBaseFolder: typeof partial.practiceBankCustomFolder === "string"
+      ? partial.practiceBankCustomFolder.trim().replace(/\\/gu, "/").replace(/\/$/u, "")
+      : DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+    customPathTemplate: typeof partial.practiceBankPathTemplate === "string"
+      ? partial.practiceBankPathTemplate.trim().replace(/\\/gu, "/")
+      : DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+  };
+  const storagePolicy = practiceBankStoragePolicyProblem(storagePolicyCandidate) === null
+    ? storagePolicyCandidate
+    : {
+        mode: "course" as const,
+        customBaseFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
+        customPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
+      };
   return {
     settingsSchemaVersion: SETTINGS_SCHEMA_VERSION,
     provider,
@@ -269,6 +312,12 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     pdfMaxPageCount,
     pdfMaxExtractedCharacters,
     pdfExtractionTimeoutMs,
+    practiceBankStorageMode: storagePolicy.mode,
+    practiceBankCustomFolder: storagePolicy.customBaseFolder,
+    practiceBankPathTemplate: storagePolicy.customPathTemplate,
+    practiceViewLocation: partial.practiceViewLocation === "right-sidebar"
+      ? "right-sidebar"
+      : "main-tab",
     dashboardActivityRangeWeeks:
       partial.dashboardActivityRangeWeeks === 13
       || partial.dashboardActivityRangeWeeks === 26
@@ -409,18 +458,19 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
 
-    new Setting(this.containerEl)
+    const difficultySetting = new Setting(this.containerEl)
       .setName("Default difficulty")
-      .setDesc("Deep exam practice is the recommended starting point.")
-      .addDropdown((dropdown) => dropdown
-        .addOption("foundation", "Foundational")
-        .addOption("exam", "Deep exam practice")
-        .addOption("challenge", "Challenge")
-        .setValue(this.owner.settings.difficulty)
-        .onChange(async (value) => {
-          this.owner.settings.difficulty = value as Difficulty;
-          await this.owner.saveSettings();
-        }));
+      .setDesc("Default reasoning demand for new quick sets and guided-path sets. You can still change each set before generation.");
+    difficultySetting.settingEl.addClass("practice-lab-difficulty-setting");
+    renderDifficultySelector(difficultySetting.controlEl, {
+      value: generationDifficultyFromSetting(this.owner.settings.difficulty),
+      name: "practice-lab-default-difficulty",
+      ariaLabel: "Default generation difficulty profile",
+      onChange: (value) => {
+        this.owner.settings.difficulty = settingDifficultyFromGeneration(value);
+        void this.owner.saveSettings();
+      },
+    });
 
     const focus = new Setting(this.containerEl)
       .setName("Default focus instructions")
@@ -533,6 +583,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           });
       });
 
+    this.addPracticeBankStorageSettings();
     this.addExerciseMixEditor();
     new Setting(this.containerEl)
       .setName("Restore generation defaults")
@@ -787,6 +838,112 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
   }
 
+  private addPracticeBankStorageSettings(): void {
+    this.addHeading(
+      "Practice-bank storage",
+      "Choose where newly created practice Markdown workspaces are saved. Existing banks stay at their current paths and remain discoverable; changing this default never moves them.",
+    );
+    new Setting(this.containerEl)
+      .setName("Save-location strategy")
+      .setDesc("Per-course preserves Notes/<term>/<course>/Practice/. Custom uses a vault-relative base folder and the path template below.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("course", "Per-course practice folder")
+        .addOption("custom", "Custom folder and template")
+        .setValue(this.owner.settings.practiceBankStorageMode)
+        .onChange(async (value) => {
+          this.owner.settings.practiceBankStorageMode = value === "custom"
+            ? "custom"
+            : "course";
+          await this.owner.saveSettings();
+          this.update();
+        }));
+
+    if (this.owner.settings.practiceBankStorageMode === "course") {
+      this.containerEl.createEl("p", {
+        cls: "setting-item-description practice-lab-storage-preview",
+        text: "Example: Notes/2025-26 - Q2/ELEC-Y418/Practice/Chapter 8 - Image Sensors - Practice.md",
+      });
+    } else {
+      let folderDraft = this.owner.settings.practiceBankCustomFolder;
+      let templateDraft = this.owner.settings.practiceBankPathTemplate;
+      let preview: HTMLElement | null = null;
+      const candidate = (): PracticeBankStoragePolicyV1 => ({
+        mode: "custom",
+        customBaseFolder: folderDraft,
+        customPathTemplate: templateDraft,
+      });
+      const renderPreview = (): void => {
+        if (preview === null) return;
+        const result = practiceBankPathPreview(
+          candidate(),
+          undefined,
+          this.app.vault.configDir,
+        );
+        preview.toggleClass("is-error", result.problem !== undefined);
+        preview.setText(result.path === undefined
+          ? `Not saved: ${result.problem ?? "The storage format is invalid."}`
+          : `Example PDF bank: ${result.path}`);
+      };
+      const saveCandidate = async (): Promise<void> => {
+        const policy = candidate();
+        if (
+          practiceBankStoragePolicyProblem(policy, this.app.vault.configDir)
+          !== null
+        ) return;
+        this.owner.settings.practiceBankCustomFolder = policy.customBaseFolder
+          .trim()
+          .replace(/\\/gu, "/")
+          .replace(/\/$/u, "");
+        this.owner.settings.practiceBankPathTemplate = policy.customPathTemplate
+          .trim()
+          .replace(/\\/gu, "/");
+        await this.owner.saveSettings();
+      };
+      new Setting(this.containerEl)
+        .setName("Custom base folder")
+        .setDesc("Vault-relative folder only. Obsidian configuration, trash, temporary folders, absolute paths, and parent traversal are blocked.")
+        .addText((text) => text
+          .setPlaceholder(DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER)
+          .setValue(folderDraft)
+          .onChange(async (value) => {
+            folderDraft = value;
+            renderPreview();
+            await saveCandidate();
+          }));
+      new Setting(this.containerEl)
+        .setName("Path inside the custom folder")
+        .setDesc(`Available tokens: ${PRACTICE_BANK_PATH_TEMPLATE_TOKENS.join(", ")}. The result must end in .md and include {source} or {sourceHash}.`)
+        .addText((text) => {
+          text.inputEl.addClass("practice-lab-storage-template-input");
+          text
+            .setPlaceholder(DEFAULT_PRACTICE_BANK_PATH_TEMPLATE)
+            .setValue(templateDraft)
+            .onChange(async (value) => {
+              templateDraft = value;
+              renderPreview();
+              await saveCandidate();
+            });
+        });
+      preview = this.containerEl.createEl("p", {
+        cls: "setting-item-description practice-lab-storage-preview",
+      });
+      renderPreview();
+    }
+
+    new Setting(this.containerEl)
+      .setName("Restore storage defaults")
+      .setDesc("Return new banks to the established per-course practice folder. Existing bank files are not moved.")
+      .addButton((button) => button
+        .setButtonText("Restore")
+        .onClick(async () => {
+          this.owner.settings.practiceBankStorageMode = DEFAULT_SETTINGS.practiceBankStorageMode;
+          this.owner.settings.practiceBankCustomFolder = DEFAULT_SETTINGS.practiceBankCustomFolder;
+          this.owner.settings.practiceBankPathTemplate = DEFAULT_SETTINGS.practiceBankPathTemplate;
+          await this.owner.saveSettings();
+          this.update();
+        }));
+  }
+
   private addHeading(name: string, description: string): void {
     new Setting(this.containerEl).setName(name).setDesc(description).setHeading();
   }
@@ -942,6 +1099,19 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       "Choose information density for source, review, study, and completion. Grounded answers and required AI-review notices cannot be hidden.",
     );
     new Setting(group)
+      .setName("Open workspace in")
+      .setDesc("Main tab is recommended for generation, occlusion editing, and study. Right sidebar is available for a compact layout. An already-open workspace keeps its location so active work is not discarded; close it before reopening in the new location.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("main-tab", "Main tab (recommended)")
+        .addOption("right-sidebar", "Right sidebar")
+        .setValue(this.owner.settings.practiceViewLocation)
+        .onChange(async (value) => {
+          this.owner.settings.practiceViewLocation = value === "right-sidebar"
+            ? "right-sidebar"
+            : "main-tab";
+          await this.owner.saveSettings();
+        }));
+    new Setting(group)
       .setName("Interface density")
       .setDesc("Compact reduces spacing without removing controls.")
       .addDropdown((dropdown) => dropdown
@@ -1069,7 +1239,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     );
     new Setting(group)
       .setName("Reset all settings")
-      .setDesc("Restore generation, study, interface, timeout, and executable settings. Generated banks and session history are preserved.")
+      .setDesc("Restore generation, study, interface, storage, timeout, and executable settings. Generated banks and session history are preserved.")
       .addButton((button) => button
         .setButtonText("Review reset…")
         .setDestructive()
