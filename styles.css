@@ -1,3 +1,18 @@
+.metadata-container:has(.metadata-property[data-property-key="practice-lab"])
+  .metadata-property:is(
+    [data-property-key="practice-lab"],
+    [data-property-key="practice-lab-version"],
+    [data-property-key="source-scope"],
+    [data-property-key="source-hash"],
+    [data-property-key="bank-id"],
+    [data-property-key="revision"],
+    [data-property-key="updated"],
+    [data-property-key^="practice-lab-generation-"],
+    [data-property-key="practice-lab-source-import"]
+  ) {
+  display: none;
+}
+
 .practice-lab-view {
   --practice-lab-content-width: 880px;
   --practice-lab-border: var(--background-modifier-border);

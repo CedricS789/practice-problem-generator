@@ -1,5 +1,6 @@
 import { exerciseTypeDistributionProblem } from "./exercise-distribution";
 import { modelIdProblem } from "./model-selection";
+import { parseHiddenPracticeMetadata } from "./hidden-practice-metadata";
 import {
   EXERCISE_TYPES,
   type Difficulty,
@@ -140,6 +141,18 @@ export function serializeGenerationHistoryFrontmatter(
 export function parseGenerationHistoryMarkdown(
   markdown: string,
 ): GenerationHistoryParseResult {
+  const hidden = parseHiddenPracticeMetadata(markdown);
+  if (hidden.status === "invalid") {
+    return { status: "invalid", message: hidden.message };
+  }
+  if (hidden.status === "ok") {
+    const value = hidden.metadata.generationHistory;
+    if (value === undefined) return { status: "missing" };
+    const problem = generationHistoryProblem(value);
+    return problem === null
+      ? { status: "ok", history: cloneHistory(value) }
+      : { status: "invalid", message: problem };
+  }
   const raw = frontmatterValue(markdown, GENERATION_HISTORY_FRONTMATTER_KEY);
   if (raw === undefined) return { status: "missing" };
   try {

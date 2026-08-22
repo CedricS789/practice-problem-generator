@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.3
+
+- Reduced practice-note Properties to the useful source link and a hidden discovery marker.
+- Moved generation recipes, model history, hashes, revisions, and PDF provenance into one invisible versioned metadata block.
+- Preserved legacy frontmatter parsing and immediately hid legacy plugin-owned properties without rewriting notes.
+
 ## 1.2.2
 
 - Replaced the crowded all-visible dashboard default with a focused layout while preserving customized layouts.

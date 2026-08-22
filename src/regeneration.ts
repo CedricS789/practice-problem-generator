@@ -14,6 +14,7 @@ import {
   type ReasoningEffort,
 } from "./ui/contracts";
 import { modelIdProblem } from "./model-selection";
+import { parseHiddenPracticeMetadata } from "./hidden-practice-metadata";
 
 export const LEGACY_GENERATION_RECIPE_VERSION = 1 as const;
 export const GENERATION_RECIPE_VERSION = 2 as const;
@@ -191,6 +192,21 @@ export function serializeGenerationRecipeCatalogFrontmatter(
 export function parseGenerationRecipeCatalogMarkdown(
   markdown: string,
 ): GenerationRecipeCatalogParseResult {
+  const hidden = parseHiddenPracticeMetadata(markdown);
+  if (hidden.status === "invalid") {
+    return { status: "invalid", message: hidden.message };
+  }
+  if (hidden.status === "ok") {
+    const value = hidden.metadata.generationRecipeCatalog;
+    if (value === undefined) return { status: "missing" };
+    const problem = generationRecipeCatalogProblem(value);
+    return problem === null
+      ? {
+          status: "ok",
+          catalog: cloneRecipeCatalog(value as GenerationRecipeCatalogV1),
+        }
+      : { status: "invalid", message: problem };
+  }
   const raw = frontmatterValue(markdown, GENERATION_RECIPE_CATALOG_FRONTMATTER_KEY);
   if (raw === undefined) return { status: "missing" };
   try {
@@ -235,6 +251,22 @@ export function serializeGenerationRecipeFrontmatter(
 export function parseGenerationRecipeMarkdown(
   markdown: string,
 ): GenerationRecipeParseResult {
+  const hidden = parseHiddenPracticeMetadata(markdown);
+  if (hidden.status === "invalid") {
+    return { status: "invalid", message: hidden.message };
+  }
+  if (hidden.status === "ok") {
+    const value = hidden.metadata.generationRecipe;
+    if (value === undefined) return { status: "missing" };
+    const problem = generationRecipeProblem(value);
+    return problem === null
+      ? {
+          status: "ok",
+          recipe: cloneRecipe(value as GenerationRecipeV2),
+          storedSchemaVersion: GENERATION_RECIPE_VERSION,
+        }
+      : { status: "invalid", message: problem };
+  }
   const rawVersion = frontmatterValue(markdown, RECIPE_FIELDS.version);
   if (rawVersion === undefined) return { status: "missing" };
   const storedSchemaVersion = rawVersion.trim() === String(LEGACY_GENERATION_RECIPE_VERSION)

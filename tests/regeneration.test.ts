@@ -15,6 +15,7 @@ import {
   removeGenerationRecipeForSet,
   regenerationPreset,
   serializeGenerationRecipeCatalogFrontmatter,
+  serializeGenerationRecipeFrontmatter,
   setGenerationRecipeForSet,
 } from "../src/regeneration";
 import { createSourceHash, segmentSource } from "../src/segmenter";
@@ -101,7 +102,7 @@ const configuration: GenerationConfiguration = {
   selectedVisualIds: [],
 };
 
-test("stores a complete generation recipe outside the versioned bank JSON", () => {
+test("stores a complete generation recipe in hidden plugin metadata", () => {
   const savedBank = bank();
   const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
   const markdown = serializePracticeBank(savedBank, recipe);
@@ -115,8 +116,9 @@ test("stores a complete generation recipe outside the versioned bank JSON", () =
     /focusInstructions/u,
     "the existing PracticeBankV2 JSON contract stays unchanged",
   );
-  assert.match(markdown, /practice-lab-generation-recipe: 2/u);
-  assert.match(markdown, /practice-lab-generation-model: "gpt-5.6"/u);
+  assert.match(markdown, /<!-- practice-problem-generator-metadata-v1/u);
+  assert.doesNotMatch(markdown, /^practice-lab-generation-recipe:/mu);
+  assert.doesNotMatch(markdown, /^practice-lab-generation-model:/mu);
 });
 
 test("loads the exact saved recipe when its source hash matches the bank", () => {
@@ -149,9 +151,13 @@ test("loads the exact saved recipe when its source hash matches the bank", () =>
 test("version-one recipes migrate in memory with an explicitly unpinned model", () => {
   const savedBank = bank();
   const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
-  const legacyMarkdown = serializePracticeBank(savedBank, recipe)
-    .replace("practice-lab-generation-recipe: 2", "practice-lab-generation-recipe: 1")
-    .replace(/^practice-lab-generation-model:.*\n/mu, "");
+  const legacyLines = serializeGenerationRecipeFrontmatter(recipe)
+    .map((line) => line.replace(
+      "practice-lab-generation-recipe: 2",
+      "practice-lab-generation-recipe: 1",
+    ))
+    .filter((line) => !line.startsWith("practice-lab-generation-model:"));
+  const legacyMarkdown = ["---", ...legacyLines, "---", ""].join("\n");
   const parsed = parseGenerationRecipeMarkdown(legacyMarkdown);
   assert.equal(parsed.status, "ok");
   if (parsed.status !== "ok") return;
@@ -250,10 +256,15 @@ test("a malformed or mismatched saved recipe fails closed to bank inference", ()
 test("recipe parsing rejects permissive numeric prefixes instead of guessing", () => {
   const savedBank = bank();
   const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
-  const markdown = serializePracticeBank(savedBank, recipe).replace(
-    "practice-lab-generation-quantity: 12",
-    "practice-lab-generation-quantity: 12items",
-  );
+  const markdown = [
+    "---",
+    ...serializeGenerationRecipeFrontmatter(recipe).map((line) => line.replace(
+      "practice-lab-generation-quantity: 12",
+      "practice-lab-generation-quantity: 12items",
+    )),
+    "---",
+    "",
+  ].join("\n");
 
   assert.deepEqual(parseGenerationRecipeMarkdown(markdown), {
     status: "invalid",

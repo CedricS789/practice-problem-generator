@@ -1,3 +1,5 @@
+import { parseHiddenPracticeMetadata } from "./hidden-practice-metadata";
+
 export const SOURCE_IMPORT_VERSION = 1 as const;
 export const SOURCE_IMPORT_FRONTMATTER_KEY = "practice-lab-source-import";
 
@@ -103,6 +105,18 @@ export function serializeSourceImportFrontmatter(
 export function parseSourceImportMarkdown(
   markdown: string,
 ): SourceImportParseResult {
+  const hidden = parseHiddenPracticeMetadata(markdown);
+  if (hidden.status === "invalid") {
+    return { status: "invalid", message: hidden.message };
+  }
+  if (hidden.status === "ok") {
+    const value = hidden.metadata.sourceImport;
+    if (value === undefined) return { status: "missing" };
+    const problem = sourceImportProblem(value);
+    return problem === null
+      ? { status: "ok", sourceImport: structuredClone(value as SourceImportV1) }
+      : { status: "invalid", message: problem };
+  }
   const raw = frontmatterValue(markdown, SOURCE_IMPORT_FRONTMATTER_KEY);
   if (raw === undefined) return { status: "missing" };
   try {

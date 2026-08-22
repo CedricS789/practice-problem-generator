@@ -28,20 +28,17 @@ import {
 import { createSourceHash, sha256Hex } from "./segmenter";
 import {
   generationRecipeCatalogFromLegacy,
-  serializeGenerationRecipeFrontmatter,
-  serializeGenerationRecipeCatalogFrontmatter,
   type GenerationRecipeCatalogV1,
   type GenerationRecipeV2,
 } from "./regeneration";
 import {
-  serializeGenerationHistoryFrontmatter,
   type GenerationHistoryV1,
 } from "./generation-history";
 import {
   parseSourceImportMarkdown,
-  serializeSourceImportFrontmatter,
   type SourceImportV1,
 } from "./source-import";
+import { serializeHiddenPracticeMetadata } from "./hidden-practice-metadata";
 
 const READ_ONLY_RECOVERY =
   "Practice Problem Generator will keep this block read-only. Back up the Markdown file, update Practice Problem Generator, then use its recovery or migration command; do not hand-edit the stored JSON unless you are restoring from a known-good backup.";
@@ -353,9 +350,6 @@ export function serializePracticeBank(
           storedSchemaVersion: generationRecipe.schemaVersion,
         })
   );
-  const serializedCatalog = catalog === undefined
-    ? undefined
-    : serializeGenerationRecipeCatalogFrontmatter(catalog);
   if (
     catalog !== undefined
     && Object.keys(catalog.recipesBySetId).some((setId) =>
@@ -382,30 +376,18 @@ export function serializePracticeBank(
   const compatibleRecipe = catalog === undefined
     ? generationRecipe
     : generationRecipe ?? catalogFallback;
+  const hiddenMetadata = serializeHiddenPracticeMetadata({
+    generationRecipe: compatibleRecipe,
+    generationRecipeCatalog: catalog,
+    generationHistory,
+    sourceImport,
+  });
   const title = persisted.source.title.replace(/[\r\n]+/gu, " ").trim();
   const json = JSON.stringify(persisted, null, 2);
   return [
     "---",
     "practice-lab: true",
-    `practice-lab-version: ${CURRENT_PRACTICE_BANK_SCHEMA_VERSION}`,
     `source: ${yamlString(persisted.source.wikilink)}`,
-    `source-scope: ${persisted.source.scope}`,
-    `source-hash: ${yamlString(persisted.source.hash)}`,
-    `bank-id: ${yamlString(persisted.bankId)}`,
-    `revision: ${persisted.revision}`,
-    `updated: ${yamlString(persisted.updatedAt)}`,
-    ...(compatibleRecipe === undefined
-      ? []
-      : serializeGenerationRecipeFrontmatter(compatibleRecipe)),
-    ...(serializedCatalog === undefined
-      ? []
-      : [serializedCatalog]),
-    ...(generationHistory === undefined
-      ? []
-      : [serializeGenerationHistoryFrontmatter(generationHistory)]),
-    ...(sourceImport === undefined
-      ? []
-      : [serializeSourceImportFrontmatter(sourceImport)]),
     "---",
     "",
     `# ${title} - Practice`,
@@ -413,6 +395,7 @@ export function serializePracticeBank(
     "> [!info] Practice Problem Generator bank",
     "> Open this note in Reading view to study. The JSON block below is the portable source of truth; edits made through Practice Problem Generator are preserved across desktop and mobile.",
     "",
+    ...(hiddenMetadata === undefined ? [] : [hiddenMetadata, ""]),
     `\`\`\`${PRACTICE_BLOCK_LANGUAGE}`,
     json,
     "```",
