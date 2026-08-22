@@ -69,6 +69,7 @@ export interface BankStatisticsPreferences {
 
 export interface DashboardPreferences {
   showIntroduction: boolean;
+  showScopeControls: boolean;
   showBreadcrumbs: boolean;
   showPerformance: boolean;
   showBankCount: boolean;
@@ -79,6 +80,9 @@ export interface DashboardPreferences {
   showObjectiveAnswers: boolean;
   showFreeResponses: boolean;
   showAiReviews: boolean;
+  showOfflinePreparation: boolean;
+  showLearningPathAnalytics: boolean;
+  showActivitySummary: boolean;
   showActivityHeatmap: boolean;
   showActivityTrend: boolean;
   showPerformanceTrend: boolean;
@@ -139,6 +143,7 @@ export const DEFAULT_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
   },
   dashboard: {
     showIntroduction: true,
+    showScopeControls: true,
     showBreadcrumbs: true,
     showPerformance: true,
     showBankCount: true,
@@ -149,6 +154,9 @@ export const DEFAULT_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     showObjectiveAnswers: true,
     showFreeResponses: true,
     showAiReviews: true,
+    showOfflinePreparation: true,
+    showLearningPathAnalytics: true,
+    showActivitySummary: true,
     showActivityHeatmap: true,
     showActivityTrend: true,
     showPerformanceTrend: true,
@@ -178,9 +186,30 @@ const FOCUSED_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
   },
   dashboard: {
     ...DEFAULT_DISPLAY_PREFERENCES.dashboard,
+    showScopeControls: true,
+    showBreadcrumbs: true,
+    showPerformance: true,
+    showBankCount: true,
+    showProblemCount: false,
+    showSessionCount: false,
+    showCompletion: true,
+    showBestStreak: false,
     showObjectiveAnswers: false,
     showFreeResponses: false,
+    showAiReviews: true,
+    showOfflinePreparation: false,
+    showLearningPathAnalytics: false,
+    showActivitySummary: false,
+    showActivityHeatmap: true,
+    showActivityTrend: false,
+    showPerformanceTrend: false,
+    showOutcomeChart: false,
+    showTypeBreakdown: false,
+    showRecentSessions: false,
+    showBankList: true,
     showBankPaths: false,
+    showBankTags: false,
+    showBankActivity: false,
     showIntroduction: false,
   },
 };
@@ -225,6 +254,7 @@ const MINIMAL_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
   },
   dashboard: {
     showIntroduction: false,
+    showScopeControls: true,
     showBreadcrumbs: false,
     showPerformance: true,
     showBankCount: true,
@@ -235,6 +265,9 @@ const MINIMAL_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     showObjectiveAnswers: false,
     showFreeResponses: false,
     showAiReviews: true,
+    showOfflinePreparation: false,
+    showLearningPathAnalytics: false,
+    showActivitySummary: false,
     showActivityHeatmap: false,
     showActivityTrend: false,
     showPerformanceTrend: false,
@@ -272,6 +305,10 @@ export function displayPreset(preset: DisplayPreset): PracticeLabDisplayPreferen
   if (preset === "focused") return copyDisplayPreferences(FOCUSED_DISPLAY_PREFERENCES);
   if (preset === "minimal") return copyDisplayPreferences(MINIMAL_DISPLAY_PREFERENCES);
   return copyDisplayPreferences(DEFAULT_DISPLAY_PREFERENCES);
+}
+
+export function dashboardPreset(preset: DisplayPreset): DashboardPreferences {
+  return { ...displayPreset(preset).dashboard };
 }
 
 export function normalizeDisplayPreferences(
@@ -322,6 +359,7 @@ export function normalizeDisplayPreferences(
     },
     dashboard: {
       showIntroduction: booleanValue(dashboard.showIntroduction, defaults.dashboard.showIntroduction),
+      showScopeControls: booleanValue(dashboard.showScopeControls, defaults.dashboard.showScopeControls),
       showBreadcrumbs: booleanValue(dashboard.showBreadcrumbs, defaults.dashboard.showBreadcrumbs),
       showPerformance: booleanValue(dashboard.showPerformance, defaults.dashboard.showPerformance),
       showBankCount: booleanValue(dashboard.showBankCount, defaults.dashboard.showBankCount),
@@ -332,6 +370,9 @@ export function normalizeDisplayPreferences(
       showObjectiveAnswers: booleanValue(dashboard.showObjectiveAnswers, defaults.dashboard.showObjectiveAnswers),
       showFreeResponses: booleanValue(dashboard.showFreeResponses, defaults.dashboard.showFreeResponses),
       showAiReviews: booleanValue(dashboard.showAiReviews, defaults.dashboard.showAiReviews),
+      showOfflinePreparation: booleanValue(dashboard.showOfflinePreparation, defaults.dashboard.showOfflinePreparation),
+      showLearningPathAnalytics: booleanValue(dashboard.showLearningPathAnalytics, defaults.dashboard.showLearningPathAnalytics),
+      showActivitySummary: booleanValue(dashboard.showActivitySummary, defaults.dashboard.showActivitySummary),
       showActivityHeatmap: booleanValue(dashboard.showActivityHeatmap, defaults.dashboard.showActivityHeatmap),
       showActivityTrend: booleanValue(dashboard.showActivityTrend, defaults.dashboard.showActivityTrend),
       showPerformanceTrend: booleanValue(dashboard.showPerformanceTrend, defaults.dashboard.showPerformanceTrend),
@@ -344,6 +385,58 @@ export function normalizeDisplayPreferences(
       showBankActivity: booleanValue(dashboard.showBankActivity, defaults.dashboard.showBankActivity),
     },
   };
+}
+
+const LEGACY_DASHBOARD_KEYS = [
+  "showIntroduction",
+  "showBreadcrumbs",
+  "showPerformance",
+  "showBankCount",
+  "showProblemCount",
+  "showSessionCount",
+  "showCompletion",
+  "showBestStreak",
+  "showObjectiveAnswers",
+  "showFreeResponses",
+  "showAiReviews",
+  "showActivityHeatmap",
+  "showActivityTrend",
+  "showPerformanceTrend",
+  "showOutcomeChart",
+  "showTypeBreakdown",
+  "showRecentSessions",
+  "showBankList",
+  "showBankPaths",
+  "showBankTags",
+  "showBankActivity",
+] as const satisfies readonly (keyof DashboardPreferences)[];
+
+const NEW_DASHBOARD_KEYS = [
+  "showScopeControls",
+  "showOfflinePreparation",
+  "showLearningPathAnalytics",
+  "showActivitySummary",
+] as const satisfies readonly (keyof DashboardPreferences)[];
+
+export function migrateLegacyDashboardPreferences(
+  value: unknown,
+): DashboardPreferences {
+  const source = record(value);
+  const detailed = DEFAULT_DISPLAY_PREFERENCES.dashboard;
+  const focused = dashboardPreset("focused");
+  const hasLegacyCustomization = LEGACY_DASHBOARD_KEYS.some((key) =>
+    typeof source[key] === "boolean" && source[key] !== detailed[key]
+  );
+  const hasNewPreferences = NEW_DASHBOARD_KEYS.some((key) =>
+    typeof source[key] === "boolean"
+  );
+  if (!hasLegacyCustomization && !hasNewPreferences) return focused;
+
+  const migrated = normalizeDisplayPreferences({ dashboard: source }).dashboard;
+  for (const key of NEW_DASHBOARD_KEYS) {
+    migrated[key] = booleanValue(source[key], focused[key]);
+  }
+  return migrated;
 }
 
 export function hasVisibleDashboardOverview(

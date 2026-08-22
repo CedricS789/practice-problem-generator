@@ -43,14 +43,21 @@ test("dashboard scope state survives workspace restoration and opens in a main t
     "scopeValue",
     "tagPrefix",
     "search",
-    "activityRangeWeeks",
-    "activityMetric",
-    "activityWeekStart",
   ]) {
     assert.match(dashboardViewSource, new RegExp(`${stateKey}:`, "u"));
     assert.match(
       dashboardViewSource,
       new RegExp(`recordValue\\(state, "${stateKey}"\\)`, "u"),
+    );
+  }
+  for (const settingsOwnedKey of [
+    "activityRangeWeeks",
+    "activityMetric",
+    "activityWeekStart",
+  ]) {
+    assert.doesNotMatch(
+      dashboardViewSource,
+      new RegExp(`recordValue\\(state, "${settingsOwnedKey}"\\)`, "u"),
     );
   }
 
@@ -82,8 +89,6 @@ test("dashboard analytics stay scoped, accessible, and descriptive rather than s
   for (const label of [
     "Practice activity",
     "Activity heatmap",
-    "Answers",
-    "Sessions",
     "Practice time",
     "Performance by week",
     "Scored answer outcomes",
@@ -102,6 +107,9 @@ test("dashboard analytics stay scoped, accessible, and descriptive rather than s
     /do not create due dates, quotas, or review schedules/u,
   );
   assert.match(analytics, /never turns this history into a due queue/u);
+  assert.doesNotMatch(analytics, /setName\("Time window"\)/u);
+  assert.doesNotMatch(analytics, /setName\("Weekly volume"\)/u);
+  assert.match(analytics, /preferences\.showActivitySummary/u);
 
   const options = sourceBetween(
     mainSource,
@@ -152,6 +160,7 @@ test("guided-path dashboard separates evidence, assistance, coverage, and adviso
     "private render(): void",
     "private contextualTagOptions(",
   );
+  assert.match(render, /display\.showLearningPathAnalytics/u);
   assert.match(render, /summary\.learning\.pathBankCount > 0/u);
   assert.match(render, /this\.renderLearningPathAnalytics\(summary, snapshot\.records\)/u);
 });
@@ -168,6 +177,7 @@ test("restored unavailable filters stay selected and visible", () => {
       < render.indexOf("if (snapshot.records.length === 0)"),
     "Filters must render even when every saved bank disappeared",
   );
+  assert.match(render, /display\.showScopeControls/u);
 
   const filters = sourceBetween(
     dashboardViewSource,

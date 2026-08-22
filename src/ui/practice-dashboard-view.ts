@@ -235,9 +235,6 @@ export class PracticeDashboardView extends ItemView {
         : this.primary.kind === "source" ? this.primary.path : "",
       tagPrefix: this.tagPrefix ?? "",
       search: this.search,
-      activityRangeWeeks: this.activityRangeWeeks,
-      activityMetric: this.activityMetric,
-      activityWeekStart: this.activityWeekStart,
     };
   }
 
@@ -265,22 +262,6 @@ export class PracticeDashboardView extends ItemView {
       : undefined;
     const search = recordValue(state, "search");
     this.search = typeof search === "string" ? search : "";
-    const activityRangeWeeks = recordValue(state, "activityRangeWeeks");
-    if (activityRangeWeeks === 13 || activityRangeWeeks === 26 || activityRangeWeeks === 52) {
-      this.activityRangeWeeks = activityRangeWeeks;
-    }
-    const activityMetric = recordValue(state, "activityMetric");
-    if (
-      activityMetric === "answers"
-      || activityMetric === "sessions"
-      || activityMetric === "minutes"
-    ) {
-      this.activityMetric = activityMetric;
-    }
-    const activityWeekStart = recordValue(state, "activityWeekStart");
-    if (activityWeekStart === "monday" || activityWeekStart === "sunday") {
-      this.activityWeekStart = activityWeekStart;
-    }
     if (this.snapshot !== null) this.render();
   }
 
@@ -303,11 +284,25 @@ export class PracticeDashboardView extends ItemView {
     this.render();
   }
 
-  public setDisplayPreferences(preferences: PracticeLabDisplayPreferences): void {
+  public setDisplayPreferences(
+    preferences: PracticeLabDisplayPreferences,
+    analyticsDefaults?: PracticeDashboardViewOptions["analyticsDefaults"],
+  ): void {
     const normalized = normalizeDisplayPreferences(preferences);
-    if (JSON.stringify(normalized) === JSON.stringify(this.displayPreferences)) return;
+    const analyticsChanged = analyticsDefaults !== undefined && (
+      analyticsDefaults.rangeWeeks !== this.activityRangeWeeks
+      || analyticsDefaults.metric !== this.activityMetric
+      || analyticsDefaults.weekStart !== this.activityWeekStart
+    );
+    const changed = JSON.stringify(normalized) !== JSON.stringify(this.displayPreferences)
+      || analyticsChanged;
     this.displayPreferences = normalized;
-    this.render();
+    if (analyticsDefaults !== undefined) {
+      this.activityRangeWeeks = analyticsDefaults.rangeWeeks;
+      this.activityMetric = analyticsDefaults.metric;
+      this.activityWeekStart = analyticsDefaults.weekStart;
+    }
+    if (changed) this.render();
   }
 
   public async refresh(): Promise<void> {
@@ -408,8 +403,9 @@ export class PracticeDashboardView extends ItemView {
       snapshot.records,
       scopeOptions.tags,
     );
-    this.renderFilters(scopeOptions, tagOptions);
-    if (this.displayPreferences.dashboard.showBreadcrumbs) {
+    const display = this.displayPreferences.dashboard;
+    if (display.showScopeControls) this.renderFilters(scopeOptions, tagOptions);
+    if (display.showBreadcrumbs) {
       this.renderBreadcrumbs();
     }
     const summary = aggregatePracticeDashboard(
@@ -431,19 +427,23 @@ export class PracticeDashboardView extends ItemView {
       );
       return;
     }
-    if (this.options.prepareOffline !== undefined) {
+    const showOfflinePreparation = display.showOfflinePreparation
+      && this.options.prepareOffline !== undefined;
+    if (showOfflinePreparation) {
       const selectedPaths = new Set(summary.banks.map((bank) => bank.bankPath));
       this.renderOfflinePreparation(snapshot.records.filter((record) =>
         selectedPaths.has(record.bankPath.replace(/\\/gu, "/")),
       ));
     }
-    const display = this.displayPreferences.dashboard;
     if (hasVisibleDashboardOverview(display)) this.renderMetrics(summary);
-    if (summary.learning.pathBankCount > 0) {
+    const showLearningPathAnalytics = display.showLearningPathAnalytics
+      && summary.learning.pathBankCount > 0;
+    if (showLearningPathAnalytics) {
       this.renderLearningPathAnalytics(summary, snapshot.records);
     }
     if (
-      display.showActivityHeatmap
+      display.showActivitySummary
+      || display.showActivityHeatmap
       || display.showActivityTrend
       || display.showPerformanceTrend
       || display.showOutcomeChart
@@ -455,14 +455,16 @@ export class PracticeDashboardView extends ItemView {
     if (display.showBankList) this.renderBankSection(summary, snapshot.records);
     if (
       !hasVisibleDashboardOverview(display)
+      && !display.showActivitySummary
       && !display.showActivityHeatmap
       && !display.showActivityTrend
       && !display.showPerformanceTrend
       && !display.showOutcomeChart
+      && !showLearningPathAnalytics
       && !display.showTypeBreakdown
       && !display.showRecentSessions
       && !display.showBankList
-      && summary.learning.pathBankCount === 0
+      && !showOfflinePreparation
     ) {
       this.contentEl.createEl("p", {
         cls: "practice-lab-muted",
@@ -1064,61 +1066,33 @@ export class PracticeDashboardView extends ItemView {
       "Practice activity",
       "Completed sessions in the current dashboard scope. These graphs describe past work only; they do not create due dates, quotas, or review schedules.",
     );
-    const controls = section.createDiv({ cls: "practice-lab-analytics-controls" });
-    new Setting(controls)
-      .setName("Time window")
-      .setDesc("Applies to the heatmap and weekly graphs.")
-      .addDropdown((dropdown) => dropdown
-        .addOption("13", "13 Weeks")
-        .addOption("26", "26 Weeks")
-        .addOption("52", "52 Weeks")
-        .setValue(String(this.activityRangeWeeks))
-        .onChange((value) => {
-          this.activityRangeWeeks = value === "13" ? 13 : value === "26" ? 26 : 52;
-          this.render();
-        }));
-    if (preferences.showActivityTrend) {
-      new Setting(controls)
-        .setName("Weekly volume")
-        .setDesc("Switch the bar graph without changing saved data.")
-        .addDropdown((dropdown) => dropdown
-          .addOption("answers", "Answers")
-          .addOption("sessions", "Sessions")
-          .addOption("minutes", "Practice time")
-          .setValue(this.activityMetric)
-          .onChange((value) => {
-            this.activityMetric = value === "sessions"
-              ? "sessions"
-              : value === "minutes" ? "minutes" : "answers";
-            this.render();
-          }));
+    if (preferences.showActivitySummary) {
+      const metrics = section.createDiv({ cls: "practice-lab-dashboard-metrics practice-lab-activity-metrics" });
+      this.dashboardMetric(
+        metrics,
+        "Active days",
+        String(activity.activeDayCount),
+        `${activity.rangeWeeks}-week window`,
+      );
+      this.dashboardMetric(
+        metrics,
+        "Practice sessions",
+        String(activity.sessionCount),
+        `${activity.answerCount} completed answers`,
+      );
+      this.dashboardMetric(
+        metrics,
+        "Practice time",
+        durationText(activity.durationMs),
+        "Elapsed session time",
+      );
+      this.dashboardMetric(
+        metrics,
+        "Window performance",
+        percentText(activity.performancePercent),
+        `${formatPracticeRunPoints(activity.earnedPoints)} / ${activity.scoredAnswerCount} scored points`,
+      );
     }
-
-    const metrics = section.createDiv({ cls: "practice-lab-dashboard-metrics practice-lab-activity-metrics" });
-    this.dashboardMetric(
-      metrics,
-      "Active days",
-      String(activity.activeDayCount),
-      `${activity.rangeWeeks}-week window`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Practice sessions",
-      String(activity.sessionCount),
-      `${activity.answerCount} completed answers`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Practice time",
-      durationText(activity.durationMs),
-      "Elapsed session time",
-    );
-    this.dashboardMetric(
-      metrics,
-      "Window performance",
-      percentText(activity.performancePercent),
-      `${formatPracticeRunPoints(activity.earnedPoints)} / ${activity.scoredAnswerCount} scored points`,
-    );
 
     if (preferences.showActivityHeatmap) this.renderActivityHeatmap(section, activity);
     if (preferences.showActivityTrend) this.renderActivityTrend(section, activity);

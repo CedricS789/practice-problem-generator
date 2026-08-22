@@ -416,7 +416,11 @@ export default class PracticeLabPlugin extends Plugin {
     }
     for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_DASHBOARD_VIEW_TYPE)) {
       if (leaf.view instanceof PracticeDashboardView) {
-        leaf.view.setDisplayPreferences(this.settings.display);
+        leaf.view.setDisplayPreferences(this.settings.display, {
+          rangeWeeks: this.settings.dashboardActivityRangeWeeks,
+          metric: this.settings.dashboardActivityMetric,
+          weekStart: this.settings.dashboardWeekStart,
+        });
       }
     }
     if (options.refreshProviders !== true) return;
@@ -2513,6 +2517,11 @@ export default class PracticeLabPlugin extends Plugin {
     if (!(leaf.view instanceof PracticeDashboardView)) {
       throw new Error("Practice dashboard could not be opened.");
     }
+    leaf.view.setDisplayPreferences(this.settings.display, {
+      rangeWeeks: this.settings.dashboardActivityRangeWeeks,
+      metric: this.settings.dashboardActivityMetric,
+      weekStart: this.settings.dashboardWeekStart,
+    });
     if (scope !== undefined) leaf.view.setScope(scope);
     if (existing) await leaf.view.refresh();
     return leaf.view;

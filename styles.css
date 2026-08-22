@@ -2542,20 +2542,6 @@
   min-height: 32px;
 }
 
-.practice-lab-analytics-controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.practice-lab-analytics-controls .setting-item {
-  border: 0;
-  padding: 8px 10px;
-  border-radius: var(--radius-s);
-  background: var(--background-secondary);
-}
-
 .practice-lab-activity-metrics {
   margin-bottom: 20px;
 }
@@ -3253,6 +3239,28 @@ button.practice-lab-heatmap-day.is-future {
 
 .practice-lab-settings-description {
   margin: 0 16px 8px;
+}
+
+.practice-lab-settings-subgroup {
+  margin: 10px 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  overflow: clip;
+}
+
+.practice-lab-settings-subgroup > summary {
+  cursor: pointer;
+  padding: 11px 12px;
+  color: var(--text-normal);
+}
+
+.practice-lab-settings-subgroup > .setting-item {
+  margin-inline: 12px;
+}
+
+.practice-lab-settings-subgroup > .practice-lab-settings-description {
+  margin-inline: 12px;
 }
 
 .practice-lab-settings-details input[type="number"] {

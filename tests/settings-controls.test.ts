@@ -174,6 +174,9 @@ test("ordinary preference saves do not restart provider detection", () => {
     /saveSettings\(\{ refreshProviders: true \}\)/u,
   );
   assert.match(mainSource, /leaf\.view\.setDisplayPreferences\(this\.settings\.display\)/u);
+  assert.match(mainSource, /rangeWeeks: this\.settings\.dashboardActivityRangeWeeks/u);
+  assert.match(mainSource, /metric: this\.settings\.dashboardActivityMetric/u);
+  assert.match(mainSource, /weekStart: this\.settings\.dashboardWeekStart/u);
 });
 
 test("defaults reach new work without changing persisted banks", () => {
@@ -208,9 +211,15 @@ test("optional presentation never hides consent or repair controls", () => {
   assert.match(dashboardSource, /this\.renderDiagnostics\(snapshot, summary\)/u);
   assert.match(dashboardSource, /All optional dashboard sections are hidden/u);
   for (const analyticsControl of [
-    "Default analytics range",
-    "Default activity graph",
+    "Quick layout",
+    "Layout and scope",
+    "Overview cards",
+    "Activity and analytics",
+    "Breakdowns and history",
+    "Analytics range",
+    "Weekly activity metric",
     "Heatmap week start",
+    "Activity summary cards",
     "Activity heatmap",
     "Weekly activity graph",
     "Weekly performance graph",
@@ -221,6 +230,10 @@ test("optional presentation never hides consent or repair controls", () => {
       `Missing analytics setting: ${analyticsControl}`,
     );
   }
+  assert.match(settingsSource, /SETTINGS_SCHEMA_VERSION = 7/u);
+  assert.match(settingsSource, /migrateLegacyDashboardPreferences/u);
+  assert.doesNotMatch(dashboardSource, /setName\("Time window"\)/u);
+  assert.doesNotMatch(dashboardSource, /setName\("Weekly volume"\)/u);
 });
 
 test("every study launch offers whole-question and type-aware ordering", () => {

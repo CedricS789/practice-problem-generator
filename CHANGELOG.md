@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.2
+
+- Replaced the crowded all-visible dashboard default with a focused layout while preserving customized layouts.
+- Moved activity range, graph metric, week start, section visibility, and dashboard layout presets into grouped plugin settings.
+- Added independent controls for scope filters, offline preparation, guided-path analytics, and activity summary cards.
+
+## 1.2.1
+
+- Fixed mobile practice sessions reopening in a persisted right drawer by relocating them to a root workspace tab safely.
+
 ## 1.1.0
 
 - Added device-local, crash-safe practice-session checkpoints with exact input and exercise-order restoration.

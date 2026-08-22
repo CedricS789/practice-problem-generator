@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   DEFAULT_DISPLAY_PREFERENCES,
+  dashboardPreset,
   displayPreset,
   hasVisibleBankOverview,
   hasVisibleDashboardOverview,
+  migrateLegacyDashboardPreferences,
   normalizeDisplayPreferences,
   normalizeStudyTypeSequence,
   orderStudyItems,
@@ -35,6 +37,8 @@ test("display preferences normalize missing and malformed nested values", () => 
   assert.equal(normalized.dashboard.showBankList, true);
   assert.equal(normalized.dashboard.showActivityHeatmap, true);
   assert.equal(normalized.dashboard.showActivityTrend, true);
+  assert.equal(normalized.dashboard.showScopeControls, true);
+  assert.equal(normalized.dashboard.showLearningPathAnalytics, true);
 });
 
 test("visibility presets are coherent independent copies", () => {
@@ -46,7 +50,10 @@ test("visibility presets are coherent independent copies", () => {
   assert.equal(minimal.practice.density, "compact");
   assert.equal(minimal.dashboard.showRecentSessions, false);
   assert.equal(detailed.dashboard.showActivityHeatmap, true);
-  assert.equal(focused.dashboard.showPerformanceTrend, true);
+  assert.equal(focused.dashboard.showPerformanceTrend, false);
+  assert.equal(focused.dashboard.showActivityHeatmap, true);
+  assert.equal(focused.dashboard.showActivitySummary, false);
+  assert.equal(focused.dashboard.showLearningPathAnalytics, false);
   assert.equal(minimal.dashboard.showActivityHeatmap, false);
   assert.equal(minimal.dashboard.showActivityTrend, false);
   assert.equal(minimal.dashboard.showPerformanceTrend, false);
@@ -61,6 +68,35 @@ test("visibility presets are coherent independent copies", () => {
   assert.equal(minimal.practice.showAgentActivity, false);
   detailed.practice.showSourcePath = false;
   assert.equal(displayPreset("detailed").practice.showSourcePath, true);
+  const dashboardOnly = dashboardPreset("focused");
+  dashboardOnly.showBankList = false;
+  assert.equal(dashboardPreset("focused").showBankList, true);
+});
+
+test("legacy dashboard defaults become focused without overwriting custom layouts", () => {
+  const missing = migrateLegacyDashboardPreferences(undefined);
+  assert.deepEqual(missing, dashboardPreset("focused"));
+
+  const legacyDetailed: Partial<typeof DEFAULT_DISPLAY_PREFERENCES.dashboard> = {
+    ...DEFAULT_DISPLAY_PREFERENCES.dashboard,
+  };
+  delete legacyDetailed.showScopeControls;
+  delete legacyDetailed.showOfflinePreparation;
+  delete legacyDetailed.showLearningPathAnalytics;
+  delete legacyDetailed.showActivitySummary;
+  const formerDetailed = migrateLegacyDashboardPreferences(legacyDetailed);
+  assert.deepEqual(formerDetailed, dashboardPreset("focused"));
+
+  const custom = migrateLegacyDashboardPreferences({
+    ...legacyDetailed,
+    showRecentSessions: false,
+  });
+  assert.equal(custom.showRecentSessions, false);
+  assert.equal(custom.showActivityTrend, true);
+  assert.equal(custom.showScopeControls, true);
+  assert.equal(custom.showOfflinePreparation, false);
+  assert.equal(custom.showLearningPathAnalytics, false);
+  assert.equal(custom.showActivitySummary, false);
 });
 
 test("overview visibility helpers reflect individual metric choices", () => {

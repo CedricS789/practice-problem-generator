@@ -12,9 +12,11 @@ import {
 import type { GifFramePositionV1, ReasoningEffortV1 } from "./model";
 import {
   copyDisplayPreferences,
+  dashboardPreset,
   DEFAULT_STUDY_TYPE_SEQUENCE,
   DEFAULT_DISPLAY_PREFERENCES,
   displayPreset,
+  migrateLegacyDashboardPreferences,
   normalizeDisplayPreferences,
   normalizeStudyTypeSequence,
   type DisplayPreset,
@@ -94,7 +96,7 @@ const EXERCISE_TYPE_LABELS: Readonly<Record<ExerciseTypeId, string>> = {
   "image-occlusion": "Image occlusion",
 };
 
-export const SETTINGS_SCHEMA_VERSION = 6;
+export const SETTINGS_SCHEMA_VERSION = 7;
 const LEGACY_GENERATION_TIMEOUT_MS = 300_000;
 const LEGACY_ANSWER_REVIEW_TIMEOUT_MS = 120_000;
 
@@ -185,7 +187,10 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   dashboardActivityRangeWeeks: 52,
   dashboardActivityMetric: "answers",
   dashboardWeekStart: "monday",
-  display: copyDisplayPreferences(DEFAULT_DISPLAY_PREFERENCES),
+  display: {
+    ...copyDisplayPreferences(DEFAULT_DISPLAY_PREFERENCES),
+    dashboard: dashboardPreset("focused"),
+  },
 };
 
 export function normalizeSettings(value: unknown): PracticeLabSettings {
@@ -263,6 +268,12 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
         customBaseFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
         customPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
       };
+  const display = normalizeDisplayPreferences(partial.display);
+  if (storedSchemaVersion < 7) {
+    display.dashboard = migrateLegacyDashboardPreferences(
+      partial.display?.dashboard,
+    );
+  }
   return {
     settingsSchemaVersion: SETTINGS_SCHEMA_VERSION,
     provider,
@@ -331,7 +342,7 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     dashboardWeekStart: partial.dashboardWeekStart === "sunday"
       ? "sunday"
       : "monday",
-    display: normalizeDisplayPreferences(partial.display),
+    display,
   };
 }
 
@@ -1166,11 +1177,56 @@ export class PracticeLabSettingTab extends PluginSettingTab {
   private addDashboardSettings(): void {
     const group = this.addSettingsGroup(
       "Dashboard",
-      "Choose overview cards and sections. Scope filters and data-integrity diagnostics always remain visible.",
+      "Keep the dashboard as quiet or detailed as you want. These settings control its layout; data-integrity diagnostics remain visible when they need attention.",
     );
     new Setting(group)
-      .setName("Default analytics range")
-      .setDesc("The initial heatmap and trend window. The dashboard can change it without altering saved practice data.")
+      .setName("Quick layout")
+      .setDesc("Focused is the calm recommended layout. Detailed shows every dashboard section. Minimal keeps only core outcomes and the bank list.")
+      .addButton((button) => button
+        .setButtonText("Focused")
+        .setCta()
+        .onClick(() => void this.applyDashboardDisplayPreset("focused")))
+      .addButton((button) => button
+        .setButtonText("Detailed")
+        .onClick(() => void this.applyDashboardDisplayPreset("detailed")))
+      .addButton((button) => button
+        .setButtonText("Minimal")
+        .onClick(() => void this.applyDashboardDisplayPreset("minimal")));
+
+    const layout = this.addSettingsSubgroup(
+      group,
+      "Layout and scope",
+      "Choose the dashboard framing and optional workflow panels.",
+    );
+    this.addDisplayToggle("Scope controls", "Show folder, source, tag, and search controls.", "dashboard", "showScopeControls", layout);
+    this.addDisplayToggle("Scope breadcrumbs", "Show the active folder, source, and tag trail.", "dashboard", "showBreadcrumbs", layout);
+    this.addDisplayToggle("Dashboard introduction", "Show the explanatory sentence below the dashboard title.", "dashboard", "showIntroduction", layout);
+    this.addDisplayToggle("Offline-preparation panel", "Show the audit action for banks and occlusion images in the current scope.", "dashboard", "showOfflinePreparation", layout);
+    this.addDisplayToggle("Guided-path analytics", "Show learning-path evidence, coverage, assistance, and advisory next-step sections when available.", "dashboard", "showLearningPathAnalytics", layout);
+
+    const overview = this.addSettingsSubgroup(
+      group,
+      "Overview cards",
+      "Choose the summary numbers shown at the top of the dashboard.",
+    );
+    this.addDisplayToggle("Performance", "Weighted score across the selected scope.", "dashboard", "showPerformance", overview);
+    this.addDisplayToggle("Practice-bank count", "Practiced and new bank counts.", "dashboard", "showBankCount", overview);
+    this.addDisplayToggle("Practice-problem count", "Attempted and unattempted problem counts.", "dashboard", "showProblemCount", overview);
+    this.addDisplayToggle("Completed-session count", "Sessions and total answers.", "dashboard", "showSessionCount", overview);
+    this.addDisplayToggle("Session completion", "Completion across recorded session sizes.", "dashboard", "showCompletion", overview);
+    this.addDisplayToggle("Best answer streak", "Longest full-credit answer sequence.", "dashboard", "showBestStreak", overview);
+    this.addDisplayToggle("Objective-answer summary", "Locally graded correct and total objective answers.", "dashboard", "showObjectiveAnswers", overview);
+    this.addDisplayToggle("Free-response summary", "Correct, partial, and incorrect free responses.", "dashboard", "showFreeResponses", overview);
+    this.addDisplayToggle("AI-review summary", "Reviewed, pending, and failed AI reviews.", "dashboard", "showAiReviews", overview);
+
+    const activity = this.addSettingsSubgroup(
+      group,
+      "Activity and analytics",
+      "Control the activity section here; the dashboard itself stays free of configuration controls.",
+    );
+    new Setting(activity)
+      .setName("Analytics range")
+      .setDesc("The heatmap and trend window. This changes presentation only, not saved practice data.")
       .addDropdown((dropdown) => dropdown
         .addOption("13", "13 Weeks")
         .addOption("26", "26 Weeks")
@@ -1182,9 +1238,9 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             : value === "26" ? 26 : 52;
           await this.owner.saveSettings();
         }));
-    new Setting(group)
-      .setName("Default activity graph")
-      .setDesc("Choose the initial weekly volume metric. This is descriptive history, not a study quota.")
+    new Setting(activity)
+      .setName("Weekly activity metric")
+      .setDesc("Choose answers, sessions, or practice time for the optional weekly activity graph.")
       .addDropdown((dropdown) => dropdown
         .addOption("answers", "Answers")
         .addOption("sessions", "Sessions")
@@ -1196,7 +1252,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             : value === "minutes" ? "minutes" : "answers";
           await this.owner.saveSettings();
         }));
-    new Setting(group)
+    new Setting(activity)
       .setName("Heatmap week start")
       .setDesc("Start activity weeks on monday or sunday. Dates use the device's local timezone.")
       .addDropdown((dropdown) => dropdown
@@ -1209,27 +1265,29 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             : "monday";
           await this.owner.saveSettings();
         }));
-    this.addDisplayToggle("Dashboard introduction", "Show the explanatory sentence below the dashboard title.", "dashboard", "showIntroduction", group);
-    this.addDisplayToggle("Scope breadcrumbs", "Show the active folder, source, and tag trail.", "dashboard", "showBreadcrumbs", group);
-    this.addDisplayToggle("Performance", "Weighted score across the selected scope.", "dashboard", "showPerformance", group);
-    this.addDisplayToggle("Practice-bank count", "Practiced and new bank counts.", "dashboard", "showBankCount", group);
-    this.addDisplayToggle("Practice-problem count", "Attempted and unattempted problem counts.", "dashboard", "showProblemCount", group);
-    this.addDisplayToggle("Completed-session count", "Sessions and total answers.", "dashboard", "showSessionCount", group);
-    this.addDisplayToggle("Session completion", "Completion across recorded session sizes.", "dashboard", "showCompletion", group);
-    this.addDisplayToggle("Best answer streak", "Longest full-credit answer sequence.", "dashboard", "showBestStreak", group);
-    this.addDisplayToggle("Objective-answer summary", "Locally graded correct and total objective answers.", "dashboard", "showObjectiveAnswers", group);
-    this.addDisplayToggle("Free-response summary", "Correct, partial, and incorrect free responses.", "dashboard", "showFreeResponses", group);
-    this.addDisplayToggle("AI-review summary", "Reviewed, pending, and failed AI reviews.", "dashboard", "showAiReviews", group);
-    this.addDisplayToggle("Activity heatmap", "Calendar of completed practice activity in the selected dashboard scope.", "dashboard", "showActivityHeatmap", group);
-    this.addDisplayToggle("Weekly activity graph", "Answers, sessions, or practice time grouped by week.", "dashboard", "showActivityTrend", group);
-    this.addDisplayToggle("Weekly performance graph", "Scored-answer performance over time; provisional sessions remain identified.", "dashboard", "showPerformanceTrend", group);
-    this.addDisplayToggle("Answer-outcome graph", "Accessible distribution of correct, partial, and incorrect scored answers.", "dashboard", "showOutcomeChart", group);
-    this.addDisplayToggle("Performance by exercise type", "Per-type performance cards.", "dashboard", "showTypeBreakdown", group);
-    this.addDisplayToggle("Recent sessions", "Ten newest sessions in the selected scope.", "dashboard", "showRecentSessions", group);
-    this.addDisplayToggle("Practice-bank list", "Searchable bank cards and actions.", "dashboard", "showBankList", group);
-    this.addDisplayToggle("Bank paths", "Show vault-relative source paths on bank cards.", "dashboard", "showBankPaths", group);
-    this.addDisplayToggle("Bank tags", "Show source-tag filter chips on bank cards.", "dashboard", "showBankTags", group);
-    this.addDisplayToggle("Bank activity details", "Show per-bank counts, AI status, streak, and last-practiced date.", "dashboard", "showBankActivity", group);
+    this.addDisplayToggle("Activity summary cards", "Show active days, session count, practice time, and window performance.", "dashboard", "showActivitySummary", activity);
+    this.addDisplayToggle("Activity heatmap", "Calendar of completed practice activity in the selected dashboard scope.", "dashboard", "showActivityHeatmap", activity);
+    this.addDisplayToggle("Weekly activity graph", "Answers, sessions, or practice time grouped by week.", "dashboard", "showActivityTrend", activity);
+    this.addDisplayToggle("Weekly performance graph", "Scored-answer performance over time; provisional sessions remain identified.", "dashboard", "showPerformanceTrend", activity);
+    this.addDisplayToggle("Answer-outcome graph", "Accessible distribution of correct, partial, and incorrect scored answers.", "dashboard", "showOutcomeChart", activity);
+
+    const history = this.addSettingsSubgroup(
+      group,
+      "Breakdowns and history",
+      "Optional detail sections below the activity overview.",
+    );
+    this.addDisplayToggle("Performance by exercise type", "Per-type performance cards.", "dashboard", "showTypeBreakdown", history);
+    this.addDisplayToggle("Recent sessions", "Ten newest sessions in the selected scope.", "dashboard", "showRecentSessions", history);
+
+    const banks = this.addSettingsSubgroup(
+      group,
+      "Practice-bank list",
+      "Choose the bank list and the metadata shown on each bank card.",
+    );
+    this.addDisplayToggle("Show practice-bank list", "Searchable bank cards and actions.", "dashboard", "showBankList", banks);
+    this.addDisplayToggle("Bank paths", "Show vault-relative source paths on bank cards.", "dashboard", "showBankPaths", banks);
+    this.addDisplayToggle("Bank tags", "Show source-tag filter chips on bank cards.", "dashboard", "showBankTags", banks);
+    this.addDisplayToggle("Bank activity details", "Show per-bank counts, AI status, streak, and last-practiced date.", "dashboard", "showBankActivity", banks);
   }
 
   private addDataManagementSettings(): void {
@@ -1313,6 +1371,23 @@ export class PracticeLabSettingTab extends PluginSettingTab {
   private addSettingsGroup(name: string, description: string): HTMLElement {
     const details = this.containerEl.createEl("details", {
       cls: "practice-lab-settings-details practice-lab-settings-visibility",
+    });
+    const summary = details.createEl("summary");
+    summary.createEl("strong", { text: name });
+    details.createEl("p", {
+      cls: "setting-item-description practice-lab-settings-description",
+      text: description,
+    });
+    return details;
+  }
+
+  private addSettingsSubgroup(
+    container: HTMLElement,
+    name: string,
+    description: string,
+  ): HTMLElement {
+    const details = container.createEl("details", {
+      cls: "practice-lab-settings-subgroup",
     });
     const summary = details.createEl("summary");
     summary.createEl("strong", { text: name });
@@ -1534,6 +1609,12 @@ export class PracticeLabSettingTab extends PluginSettingTab {
 
   private async applyDisplayPreset(preset: DisplayPreset): Promise<void> {
     this.owner.settings.display = displayPreset(preset);
+    await this.owner.saveSettings();
+    this.update();
+  }
+
+  private async applyDashboardDisplayPreset(preset: DisplayPreset): Promise<void> {
+    this.owner.settings.display.dashboard = dashboardPreset(preset);
     await this.owner.saveSettings();
     this.update();
   }
