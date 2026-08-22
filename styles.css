@@ -4615,3 +4615,87 @@ button.practice-learning-path-mode-card {
     transition: none;
   }
 }
+.practice-creation-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.15rem 0 0.85rem;
+  padding: 0.2rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.practice-creation-mode-switch button {
+  min-height: 2.15rem;
+  padding: 0.4rem 0.85rem;
+  border: 0;
+  border-radius: calc(var(--radius-m) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  box-shadow: none;
+}
+
+.practice-creation-mode-switch button.is-selected {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.practice-creation-mode-switch button:not(.is-selected):not(:disabled):hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.practice-generation-recovery {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--color-orange);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--color-orange) 8%, var(--background-primary));
+}
+
+.practice-generation-recovery.is-ready {
+  border-left-color: var(--color-green);
+  background: color-mix(in srgb, var(--color-green) 8%, var(--background-primary));
+}
+
+.practice-generation-recovery.is-failed,
+.practice-generation-recovery.is-blocked {
+  border-left-color: var(--color-red);
+  background: color-mix(in srgb, var(--color-red) 8%, var(--background-primary));
+}
+
+.practice-generation-recovery-copy {
+  min-width: 0;
+}
+
+.practice-generation-recovery-copy p {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+}
+
+.practice-generation-recovery-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+@media (max-width: 700px) {
+  .practice-generation-recovery {
+    flex-direction: column;
+  }
+
+  .practice-generation-recovery-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

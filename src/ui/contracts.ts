@@ -368,6 +368,16 @@ export interface PracticeLabCallbacks {
     request: GenerateRequest,
   ) => Promise<readonly DraftExercisePresentation[]>;
   readonly cancelGeneration?: () => Promise<void> | void;
+  /** Switches the current creation workspace to the multi-set guided mode. */
+  readonly openGuidedLearningPath?: (
+    source: SourcePresentation | null,
+  ) => Promise<void> | void;
+  /** Reattaches to a still-running recoverable provider job. */
+  readonly resumeInterruptedGeneration?: () => Promise<void> | void;
+  /** Starts a fresh local job from the exact payload the learner already approved. */
+  readonly retryInterruptedGeneration?: () => Promise<void> | void;
+  /** Opens the guarded destructive confirmation for the recoverable job. */
+  readonly discardInterruptedGeneration?: () => Promise<void> | void;
   readonly saveDrafts: (
     source: SourcePresentation,
     drafts: readonly EditableDraftExercise[],
@@ -416,4 +426,15 @@ export interface PracticeLabViewOptions {
   readonly providers: readonly ProviderPresentation[];
   readonly initialSource?: SourcePresentation;
   readonly displayPreferences?: PracticeLabDisplayPreferences;
+}
+
+export type GenerationRecoveryState =
+  | "running"
+  | "blocked"
+  | "ready"
+  | "failed";
+
+export interface GenerationRecoveryPresentation {
+  readonly state: GenerationRecoveryState;
+  readonly message: string;
 }

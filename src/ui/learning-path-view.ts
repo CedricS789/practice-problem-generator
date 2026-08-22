@@ -44,6 +44,7 @@ import type {
   Difficulty,
   EditableDraftExercise,
   ExerciseType,
+  GenerationRecoveryPresentation,
   GenerationConfiguration,
   GifFramePosition,
   ProviderId,
@@ -133,6 +134,9 @@ export interface LearningPathViewCallbacks {
     position: GifFramePosition,
   ) => Promise<void> | void;
   readonly openQuickPractice: (source: SourcePresentation) => Promise<void> | void;
+  readonly resumeInterruptedQuickGeneration?: () => Promise<void> | void;
+  readonly retryInterruptedQuickGeneration?: () => Promise<void> | void;
+  readonly discardInterruptedQuickGeneration?: () => Promise<void> | void;
   readonly previewBlueprint: (
     primary: SourcePresentation,
     supporting: readonly SourcePresentation[],
@@ -207,6 +211,7 @@ export interface LearningPathViewOptions {
   };
   readonly initialSource?: SourcePresentation;
   readonly recoverableBatch?: boolean;
+  readonly quickGenerationRecovery?: GenerationRecoveryPresentation | null;
 }
 
 export type LearningSetGenerationStatusV1 =
@@ -345,6 +350,7 @@ export class PracticeLearningPathView extends ItemView {
   private gifFrameDefault: GifFramePosition;
   private visualSelectionBusy = false;
   private visualSelectionMessage: string | null = null;
+  private quickGenerationRecovery: GenerationRecoveryPresentation | null;
   private readonly expandedVisualSources = new Set<string>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
 
@@ -356,6 +362,7 @@ export class PracticeLearningPathView extends ItemView {
     this.navigation = false;
     this.primary = options.initialSource ?? null;
     this.recoveryAvailable = options.recoverableBatch === true;
+    this.quickGenerationRecovery = options.quickGenerationRecovery ?? null;
     this.providers = [...options.providers];
     this.gifFrameDefault = options.defaults.gifFrameDefault ?? "middle";
     this.blueprintConfiguration = {
@@ -373,7 +380,7 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Guided learning path";
+    return "Practice creation - guided path";
   }
 
   getIcon(): string {
@@ -403,6 +410,13 @@ export class PracticeLearningPathView extends ItemView {
 
   public setRecoveryAvailable(available: boolean): void {
     this.recoveryAvailable = available;
+    this.render();
+  }
+
+  public setQuickGenerationRecovery(
+    recovery: GenerationRecoveryPresentation | null,
+  ): void {
+    this.quickGenerationRecovery = recovery;
     this.render();
   }
 
@@ -464,6 +478,8 @@ export class PracticeLearningPathView extends ItemView {
     this.contentEl.addClasses(["practice-lab", "practice-learning-path"]);
     const shell = this.contentEl.createDiv({ cls: "practice-learning-path-shell" });
     this.renderHeader(shell);
+    this.renderCreationModeSwitch(shell);
+    this.renderQuickGenerationRecovery(shell);
     this.renderStageNavigation(shell);
     const body = shell.createDiv({ cls: "practice-learning-path-body" });
     if (this.error !== null) {
@@ -482,10 +498,91 @@ export class PracticeLearningPathView extends ItemView {
     const icon = header.createDiv({ cls: "practice-learning-path-header-icon" });
     setIcon(icon, "route");
     const text = header.createDiv();
-    text.createEl("h2", { text: "Guided learning path" });
+    text.createEl("h2", { text: "Practice Problem Generator" });
     text.createEl("p", {
-      text: "Build connected tutor lessons and distinct practice sets from only the material you approve.",
+      text: "Guided path mode builds connected tutor lessons and distinct practice sets from only the material you approve.",
     });
+  }
+
+  private renderCreationModeSwitch(container: HTMLElement): void {
+    const switcher = container.createDiv({
+      cls: "practice-creation-mode-switch",
+      attr: {
+        role: "group",
+        "aria-label": "Practice creation mode",
+      },
+    });
+    const quick = switcher.createEl("button", {
+      text: "Quick set",
+      attr: {
+        type: "button",
+        "aria-pressed": "false",
+        title: "Create one configurable practice set from the selected source.",
+      },
+    });
+    const switchBlocked = this.busy !== null || this.stage === "review";
+    quick.disabled = switchBlocked || this.primary === null;
+    if (switchBlocked) {
+      quick.title = "Finish the current guided generation or review before changing creation mode.";
+    } else if (this.primary === null) {
+      quick.title = "Choose a primary source before switching to quick set mode.";
+    }
+    quick.addEventListener("click", () => {
+      if (!quick.disabled && this.primary !== null) {
+        void this.options.callbacks.openQuickPractice(this.primary);
+      }
+    });
+    const guided = switcher.createEl("button", {
+      cls: "is-selected",
+      text: "Guided path",
+      attr: {
+        type: "button",
+        "aria-pressed": "true",
+        title: "Create a prerequisite-aware sequence of tutor lessons and practice sets.",
+      },
+    });
+    guided.disabled = true;
+  }
+
+  private renderQuickGenerationRecovery(container: HTMLElement): void {
+    const recovery = this.quickGenerationRecovery;
+    if (recovery === null) return;
+    const panel = container.createEl("section", {
+      cls: `practice-generation-recovery is-${recovery.state}`,
+      attr: { role: "alert", "aria-live": "polite" },
+    });
+    const copy = panel.createDiv({ cls: "practice-generation-recovery-copy" });
+    copy.createEl("strong", { text: "Resolve the saved quick set first" });
+    copy.createEl("p", {
+      text: `${recovery.message} Guided generation is paused so two AI jobs cannot overwrite each other's recoverable state.`,
+    });
+    const actions = panel.createDiv({ cls: "practice-generation-recovery-actions" });
+    if (
+      (recovery.state === "running" || recovery.state === "blocked" || recovery.state === "ready")
+      && this.options.callbacks.resumeInterruptedQuickGeneration !== undefined
+    ) {
+      new ButtonComponent(actions)
+        .setButtonText(recovery.state === "ready" ? "Open recovered Quick set" : "Resume / inspect Quick set")
+        .setIcon("history")
+        .onClick(() => void this.options.callbacks.resumeInterruptedQuickGeneration?.());
+    }
+    if (
+      recovery.state === "failed"
+      && this.options.callbacks.retryInterruptedQuickGeneration !== undefined
+    ) {
+      new ButtonComponent(actions)
+        .setButtonText("Retry approved quick set")
+        .setIcon("refresh-cw")
+        .setCta()
+        .onClick(() => void this.options.callbacks.retryInterruptedQuickGeneration?.());
+    }
+    if (this.options.callbacks.discardInterruptedQuickGeneration !== undefined) {
+      new ButtonComponent(actions)
+        .setButtonText("Discard recovery...")
+        .setIcon("trash-2")
+        .setDestructive()
+        .onClick(() => void this.options.callbacks.discardInterruptedQuickGeneration?.());
+    }
   }
 
   private renderStageNavigation(container: HTMLElement): void {
@@ -568,20 +665,6 @@ export class PracticeLearningPathView extends ItemView {
       .onClick(() => void this.addSupportingSource());
     this.renderVisualBundleControls(section);
 
-    const intent = this.section(container, "Creation mode", "Quick practice remains available unchanged. Guided mode first proposes an editable source-grounded map.");
-    const modes = intent.createDiv({ cls: "practice-learning-path-mode-grid" });
-    const quick = modes.createEl("button", { cls: "practice-learning-path-mode-card", attr: { type: "button" } });
-    setIcon(quick.createSpan(), "zap");
-    quick.createEl("strong", { text: "Quick practice set" });
-    quick.createSpan({ text: "Use the existing one-set workflow." });
-    quick.addEventListener("click", () => {
-      if (this.primary !== null) void this.options.callbacks.openQuickPractice(this.primary);
-    });
-    const guided = modes.createDiv({ cls: "practice-learning-path-mode-card is-selected" });
-    setIcon(guided.createSpan(), "route");
-    guided.createEl("strong", { text: "Guided learning path" });
-    guided.createSpan({ text: "Tutor from supported foundations toward independent transfer." });
-
     const level = this.section(container, "Starting level", "This changes the proposed teaching depth, never the approved source boundary.");
     const levelGrid = level.createDiv({ cls: "practice-learning-path-level-grid" });
     for (const option of STARTING_LEVELS) {
@@ -654,7 +737,11 @@ export class PracticeLearningPathView extends ItemView {
       .setButtonText(this.busy === "blueprint" ? "Planning path…" : "Generate editable map")
       .setIcon("route")
       .setCta()
-      .setDisabled(!this.previewAccepted || this.busy !== null)
+      .setDisabled(
+        !this.previewAccepted
+        || this.busy !== null
+        || this.quickGenerationRecovery !== null,
+      )
       .onClick(() => void this.generateBlueprint());
   }
 
@@ -910,7 +997,11 @@ export class PracticeLearningPathView extends ItemView {
       .setButtonText(this.busy === "batch" ? "Generating sets sequentially…" : "Generate all sets")
       .setIcon("play")
       .setCta()
-      .setDisabled(!this.setPayloadsAccepted || this.busy !== null)
+      .setDisabled(
+        !this.setPayloadsAccepted
+        || this.busy !== null
+        || this.quickGenerationRecovery !== null,
+      )
       .onClick(() => void this.generateAllSets());
   }
 
@@ -1820,6 +1911,11 @@ export class PracticeLearningPathView extends ItemView {
   private async generateBlueprint(): Promise<void> {
     const primary = this.primary;
     if (primary === null || this.busy !== null || !this.previewAccepted) return;
+    if (this.quickGenerationRecovery !== null) {
+      this.error = "Resolve the saved Quick set recovery above before starting Guided path generation.";
+      this.render();
+      return;
+    }
     this.busy = "blueprint";
     this.error = null;
     this.activity.clear();
@@ -1872,6 +1968,11 @@ export class PracticeLearningPathView extends ItemView {
   private async generateAllSets(): Promise<void> {
     const blueprint = this.blueprint;
     if (blueprint === null || this.busy !== null || !this.setPayloadsAccepted) return;
+    if (this.quickGenerationRecovery !== null) {
+      this.error = "Resolve the saved Quick set recovery above before generating the guided sets.";
+      this.render();
+      return;
+    }
     this.busy = "batch";
     this.error = null;
     this.stage = "review";

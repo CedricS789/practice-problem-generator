@@ -133,6 +133,7 @@ import {
   type EditableDraftExercise,
   type ExerciseType,
   type FinishedStudySession,
+  type GenerationRecoveryPresentation,
   type GenerationConfiguration,
   type GifFramePosition,
   type JobPresentation,
@@ -416,6 +417,7 @@ export class PracticeLabView extends ItemView {
   private studyFinishing = false;
   private studyFinishError: string | null = null;
   private regenerationContext: string | null = null;
+  private generationRecovery: GenerationRecoveryPresentation | null = null;
 
   public constructor(
     leaf: WorkspaceLeaf,
@@ -444,7 +446,7 @@ export class PracticeLabView extends ItemView {
   }
 
   public getDisplayText(): string {
-    return "Practice Problem Generator";
+    return "Practice creation - quick set";
   }
 
   public getIcon(): string {
@@ -549,6 +551,12 @@ export class PracticeLabView extends ItemView {
     },
     drafts?: readonly DraftExercisePresentation[],
   ): void {
+    this.generationRecovery = recovery.state === "idle"
+      ? null
+      : {
+          state: recovery.state,
+          message: recovery.message ?? "The approved interrupted generation is still available locally.",
+        };
     this.setSource(source);
     const defaultFocusInstructions = this.defaultFocusInstructions;
     this.setConfigurationDefaults(defaults);
@@ -583,6 +591,13 @@ export class PracticeLabView extends ItemView {
 
   public setJob(job: JobPresentation): void {
     this.job = job;
+    this.render();
+  }
+
+  public setGenerationRecovery(
+    recovery: GenerationRecoveryPresentation | null,
+  ): void {
+    this.generationRecovery = recovery;
     this.render();
   }
 
@@ -1055,6 +1070,8 @@ export class PracticeLabView extends ItemView {
     }
     const icon = header.createDiv({ cls: "practice-lab-header-icon" });
     setIcon(icon, "flask-conical");
+    this.renderCreationModeSwitch(this.contentEl);
+    this.renderGenerationRecovery(this.contentEl);
 
     this.agentActivityHostEl = this.contentEl.createDiv({
       cls: "practice-lab-agent-activity-host",
@@ -1083,6 +1100,101 @@ export class PracticeLabView extends ItemView {
         break;
     }
     applyHoverDescriptions(this.contentEl);
+  }
+
+  private renderCreationModeSwitch(container: HTMLElement): void {
+    if (Platform.isMobileApp || this.options.callbacks.openGuidedLearningPath === undefined) return;
+    const switcher = container.createDiv({
+      cls: "practice-creation-mode-switch",
+      attr: {
+        role: "group",
+        "aria-label": "Practice creation mode",
+      },
+    });
+    const quick = switcher.createEl("button", {
+      cls: "is-selected",
+      text: "Quick set",
+      attr: {
+        type: "button",
+        "aria-pressed": "true",
+        title: "Create one configurable practice set from the selected source.",
+      },
+    });
+    quick.disabled = true;
+    const guided = switcher.createEl("button", {
+      text: "Guided path",
+      attr: {
+        type: "button",
+        "aria-pressed": "false",
+        title: "Create a prerequisite-aware sequence of tutor lessons and practice sets.",
+      },
+    });
+    const switchBlocked = this.stage === "review"
+      || this.stage === "study"
+      || this.job.state === "running"
+      || this.job.state === "cancelling";
+    guided.disabled = switchBlocked;
+    if (switchBlocked) {
+      guided.title = this.stage === "study"
+        ? "Finish or leave the current practice session before changing creation mode."
+        : "Finish the current generation or draft review before changing creation mode.";
+    }
+    guided.addEventListener("click", () => {
+      if (!guided.disabled) {
+        void this.options.callbacks.openGuidedLearningPath?.(this.source);
+      }
+    });
+  }
+
+  private renderGenerationRecovery(container: HTMLElement): void {
+    const recovery = this.generationRecovery;
+    if (recovery === null) return;
+    const panel = container.createEl("section", {
+      cls: `practice-generation-recovery is-${recovery.state}`,
+      attr: {
+        role: recovery.state === "failed" || recovery.state === "blocked" ? "alert" : "status",
+        "aria-live": "polite",
+      },
+    });
+    const copy = panel.createDiv({ cls: "practice-generation-recovery-copy" });
+    const title = recovery.state === "ready"
+      ? "Recovered draft ready"
+      : recovery.state === "running"
+        ? "Generation recovery in progress"
+        : recovery.state === "blocked"
+          ? "Saved generation needs attention"
+          : "Saved generation stopped";
+    copy.createEl("strong", { text: title });
+    copy.createEl("p", { text: recovery.message });
+    const actions = panel.createDiv({ cls: "practice-generation-recovery-actions" });
+    if (
+      (recovery.state === "running" || recovery.state === "blocked" || recovery.state === "ready")
+      && this.options.callbacks.resumeInterruptedGeneration !== undefined
+    ) {
+      new ButtonComponent(actions)
+        .setButtonText(recovery.state === "ready" ? "Open recovered draft" : "Resume / inspect")
+        .setIcon(recovery.state === "ready" ? "file-check-2" : "history")
+        .setDisabled(this.job.state === "running" || this.job.state === "cancelling")
+        .onClick(() => void this.options.callbacks.resumeInterruptedGeneration?.());
+    }
+    if (
+      recovery.state === "failed"
+      && this.options.callbacks.retryInterruptedGeneration !== undefined
+    ) {
+      new ButtonComponent(actions)
+        .setButtonText("Retry approved request")
+        .setIcon("refresh-cw")
+        .setCta()
+        .onClick(() => void this.options.callbacks.retryInterruptedGeneration?.());
+    }
+    if (this.options.callbacks.discardInterruptedGeneration !== undefined) {
+      new ButtonComponent(actions)
+        .setButtonText("Discard recovery...")
+        .setIcon("trash-2")
+        .setDestructive()
+        .setDisabled(this.job.state === "running" || this.job.state === "cancelling")
+        .onClick(() => void this.options.callbacks.discardInterruptedGeneration?.());
+    }
   }
 
   private renderPreservingScroll(): void {
@@ -1998,6 +2110,7 @@ export class PracticeLabView extends ItemView {
     refreshOutput: () => void,
   ): void {
     const capability = this.configurationProblem();
+    const recoveryBlocked = this.generationRecovery !== null;
     if (capability !== null) {
       const warning = container.createDiv({
         cls: "practice-lab-callout is-warning",
@@ -2017,7 +2130,7 @@ export class PracticeLabView extends ItemView {
     }
     this.renderPayloadPreview(
       container,
-      capability !== null,
+      capability !== null || recoveryBlocked,
       refreshOutput,
     );
 
@@ -2052,6 +2165,7 @@ export class PracticeLabView extends ItemView {
       const currentKey = configurationKey(source, this.getConfiguration());
       generate.setDisabled(
         capability !== null ||
+          recoveryBlocked ||
           !this.payloadAccepted ||
           this.previewKey !== currentKey ||
           this.payloadPreview === null,
@@ -4418,6 +4532,10 @@ export class PracticeLabView extends ItemView {
     details: HTMLDetailsElement,
     onStateChanged?: () => void,
   ): Promise<void> {
+    if (this.generationRecovery !== null) {
+      new Notice("Resolve the saved generation above before approving another payload.", 8_000);
+      return;
+    }
     const source = this.source;
     if (source === null) return;
     const problem = this.configurationProblem();
@@ -4451,6 +4569,10 @@ export class PracticeLabView extends ItemView {
   }
 
   private async generate(): Promise<void> {
+    if (this.generationRecovery !== null) {
+      new Notice("Resolve the saved generation above before starting another request.", 8_000);
+      return;
+    }
     const source = this.source;
     if (source === null || !this.payloadAccepted) return;
     const configuration = this.getConfiguration();

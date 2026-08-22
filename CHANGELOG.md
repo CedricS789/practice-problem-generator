@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.4
+
+- Unified quick-set and guided-path creation under one clearly labelled mode switch that reuses the current workspace tab.
+- Added visible resume, exact-approved-request retry, and guarded discard actions wherever an interrupted generation blocks work.
+- Explained and enforced the one-job recovery boundary inside guided-path creation instead of failing behind an unrelated tab.
+
 ## 1.2.3
 
 - Reduced practice-note Properties to the useful source link and a hidden discovery marker.

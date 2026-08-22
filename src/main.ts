@@ -157,6 +157,7 @@ import {
   type AnswerReviewActivityPresentation,
   type AnswerReviewStatus,
   type EditableDraftExercise,
+  type GenerationRecoveryPresentation,
   type GenerationConfiguration,
   type PayloadPreview,
   type PersistedAnswerReviewRetryTarget,
@@ -355,10 +356,16 @@ export default class PracticeLabPlugin extends Plugin {
       providers: () => this.providers,
       timeoutMs: () => this.settings.timeoutMs,
     });
-    this.registerView(PRACTICE_LAB_VIEW_TYPE, (leaf) => new PracticeLabView(leaf, this.createViewOptions()));
+    this.registerView(
+      PRACTICE_LAB_VIEW_TYPE,
+      (leaf) => new PracticeLabView(leaf, this.createViewOptions(leaf)),
+    );
     this.registerView(
       PRACTICE_LEARNING_PATH_VIEW_TYPE,
-      (leaf) => new PracticeLearningPathView(leaf, this.createLearningPathViewOptions()),
+      (leaf) => new PracticeLearningPathView(
+        leaf,
+        this.createLearningPathViewOptions(leaf),
+      ),
     );
     this.registerView(
       PRACTICE_DASHBOARD_VIEW_TYPE,
@@ -867,6 +874,17 @@ export default class PracticeLabPlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: "retry-interrupted-generation",
+      name: "Retry interrupted generation from approved request",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp
+          && this.generationRecoveryHandle !== undefined
+          && this.generationRecoveryState === "failed";
+        if (!checking && available) void this.requestRetryInterruptedGeneration();
+        return available;
+      },
+    });
+    this.addCommand({
       id: "discard-interrupted-generation",
       name: "Discard interrupted generation",
       checkCallback: (checking) => {
@@ -1067,7 +1085,7 @@ export default class PracticeLabPlugin extends Plugin {
     });
   }
 
-  private createViewOptions(): PracticeLabViewOptions {
+  private createViewOptions(leaf: WorkspaceLeaf): PracticeLabViewOptions {
     return {
       providers: this.providers,
       displayPreferences: this.settings.display,
@@ -1111,6 +1129,20 @@ export default class PracticeLabPlugin extends Plugin {
             this.cliLayer?.coordinator.cancel(this.activeGenerationJobId);
           }
         },
+        ...(Platform.isMobileApp ? {} : {
+          openGuidedLearningPath: async (source: SourcePresentation | null) => {
+            await this.switchCreationMode(leaf, "guided", source);
+          },
+          resumeInterruptedGeneration: async () => {
+            await this.requestResumeInterruptedGeneration();
+          },
+          retryInterruptedGeneration: async () => {
+            await this.requestRetryInterruptedGeneration();
+          },
+          discardInterruptedGeneration: async () => {
+            await this.requestDiscardInterruptedGeneration();
+          },
+        }),
         saveDrafts: async (source, drafts) => this.saveDrafts(source, drafts),
         resolveStudySessionOrigin: () => this.activeBank === undefined
           ? null
@@ -1239,10 +1271,11 @@ export default class PracticeLabPlugin extends Plugin {
     };
   }
 
-  private createLearningPathViewOptions(): LearningPathViewOptions {
+  private createLearningPathViewOptions(leaf: WorkspaceLeaf): LearningPathViewOptions {
     return {
       providers: this.providers,
       recoverableBatch: this.learningBatchRecoveryHandle !== undefined,
+      quickGenerationRecovery: this.generationRecoveryPresentation(),
       defaults: {
         provider: this.settings.provider,
         model: modelForProvider(this.settings, this.settings.provider),
@@ -1321,7 +1354,16 @@ export default class PracticeLabPlugin extends Plugin {
           },
         }),
         openQuickPractice: async (source) => {
-          await this.openView(source, true);
+          await this.switchCreationMode(leaf, "quick", source);
+        },
+        resumeInterruptedQuickGeneration: async () => {
+          await this.requestResumeInterruptedGeneration();
+        },
+        retryInterruptedQuickGeneration: async () => {
+          await this.requestRetryInterruptedGeneration();
+        },
+        discardInterruptedQuickGeneration: async () => {
+          await this.requestDiscardInterruptedGeneration();
         },
         previewBlueprint: async (primary, supporting, configuration) =>
           this.learningPathController.previewBlueprint(primary, supporting, configuration),
@@ -1735,6 +1777,7 @@ export default class PracticeLabPlugin extends Plugin {
                 onReady: async (handle: DurableProcessHandle): Promise<void> => {
                   this.generationRecoveryHandle = handle;
                   await this.persistStoredData();
+                  this.updateGenerationRecoveryViews();
                 },
               },
             }),
@@ -1759,8 +1802,9 @@ export default class PracticeLabPlugin extends Plugin {
           const detail = error instanceof Error
             ? error.message
             : "The recoverable generation stopped before producing a valid draft.";
-          this.generationRecoveryMessage = `${detail} The approved source remains available; discard this recovery before retrying it.`;
+          this.generationRecoveryMessage = `${detail} The exact approved request remains available to retry or discard.`;
           await this.persistStoredData();
+          this.updateGenerationRecoveryViews();
         }
       }
       throw error;
@@ -1786,6 +1830,7 @@ export default class PracticeLabPlugin extends Plugin {
       this.generationRecoveryState = "ready";
       this.generationRecoveryMessage = "Recovered draft ready for review and saving.";
       await this.persistStoredData();
+      this.updateGenerationRecoveryViews();
     }
     const visualUrls = new Map(pending.preparedVisuals.map((visual) => [
       visual.source.id,
@@ -2424,6 +2469,7 @@ export default class PracticeLabPlugin extends Plugin {
     if (!(leaf.view instanceof PracticeLabView)) throw new Error("Practice Problem Generator view could not be opened.");
     leaf.view.setProviders(this.providers);
     leaf.view.setDisplayPreferences(this.settings.display);
+    leaf.view.setGenerationRecovery(this.generationRecoveryPresentation());
     leaf.view.setConfigurationDefaults({
       provider: this.settings.provider,
       model: modelForProvider(this.settings, this.settings.provider),
@@ -2475,8 +2521,76 @@ export default class PracticeLabPlugin extends Plugin {
     }
     leaf.view.setProviders(this.providers);
     leaf.view.setRecoveryAvailable(this.learningBatchRecoveryHandle !== undefined);
+    leaf.view.setQuickGenerationRecovery(this.generationRecoveryPresentation());
     if (source !== undefined) leaf.view.setPrimarySource(source);
     return leaf.view;
+  }
+
+  private generationRecoveryPresentation(): GenerationRecoveryPresentation | null {
+    if (this.generationRecoveryHandle === undefined) return null;
+    const state = this.generationRecoveryState === "idle"
+      ? "running"
+      : this.generationRecoveryState;
+    return {
+      state,
+      message: this.generationRecoveryMessage
+        ?? "Inspecting the saved local generation before continuing.",
+    };
+  }
+
+  private updateGenerationRecoveryViews(): void {
+    const presentation = this.generationRecoveryPresentation();
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView) {
+        leaf.view.setGenerationRecovery(presentation);
+      }
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLearningPathView) {
+        leaf.view.setQuickGenerationRecovery(presentation);
+      }
+    }
+  }
+
+  private async switchCreationMode(
+    leaf: WorkspaceLeaf,
+    mode: "quick" | "guided",
+    source: SourcePresentation | null,
+  ): Promise<void> {
+    if (mode === "guided") {
+      let guidedSource: SourcePresentation | undefined;
+      if (source !== null) {
+        if (!isRuntimeCollectedSource(source)) {
+          throw new Error("Choose the source again before switching it to Guided path mode.");
+        }
+        const prepared = await this.prepareGuidedSourceVisuals(source);
+        this.lastSource = prepared;
+        guidedSource = this.learningPathController.registerSource(prepared);
+      }
+      await leaf.setViewState({
+        type: PRACTICE_LEARNING_PATH_VIEW_TYPE,
+        active: true,
+      });
+      await this.app.workspace.revealLeaf(leaf);
+      if (!(leaf.view instanceof PracticeLearningPathView)) {
+        throw new Error("Guided path mode could not be opened.");
+      }
+      leaf.view.setProviders(this.providers);
+      leaf.view.setRecoveryAvailable(this.learningBatchRecoveryHandle !== undefined);
+      leaf.view.setQuickGenerationRecovery(this.generationRecoveryPresentation());
+      if (guidedSource !== undefined) leaf.view.setPrimarySource(guidedSource);
+      return;
+    }
+
+    await leaf.setViewState({ type: PRACTICE_LAB_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    if (!(leaf.view instanceof PracticeLabView)) {
+      throw new Error("Quick set mode could not be opened.");
+    }
+    leaf.view.setProviders(this.providers);
+    leaf.view.setDisplayPreferences(this.settings.display);
+    leaf.view.setGenerationRecovery(this.generationRecoveryPresentation());
+    if (source !== null) leaf.view.setSource(source, { prepareDefaultVisuals: true });
   }
 
   private async resumeLearningPathBatch(): Promise<void> {
@@ -2819,7 +2933,7 @@ export default class PracticeLabPlugin extends Plugin {
         const detail = error instanceof Error
           ? error.message
           : "The interrupted generation could not be recovered.";
-        this.generationRecoveryMessage = `${detail} The approved source remains available; discard this recovery before retrying it.`;
+        this.generationRecoveryMessage = `${detail} The exact approved request remains available to retry or discard.`;
         await this.persistStoredData();
         this.updateInterruptedGenerationViews();
       }
@@ -2919,6 +3033,7 @@ export default class PracticeLabPlugin extends Plugin {
   }
 
   private updateInterruptedGenerationViews(): void {
+    this.updateGenerationRecoveryViews();
     for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
       if (leaf.view instanceof PracticeLabView && this.pendingGeneration !== undefined) {
         this.presentInterruptedGeneration(leaf.view);
@@ -3009,6 +3124,84 @@ export default class PracticeLabPlugin extends Plugin {
     }
   }
 
+  private async requestRetryInterruptedGeneration(): Promise<void> {
+    const handle = this.generationRecoveryHandle;
+    if (handle === undefined) {
+      new Notice("There is no interrupted generation to retry.");
+      return;
+    }
+    if (this.generationRecoveryState === "ready") {
+      new Notice("The recovered draft is already ready for review.", 6_000);
+      await this.openInterruptedGeneration();
+      return;
+    }
+    if (
+      this.generationRecoveryState === "running"
+      || this.generationRecoveryTask !== undefined
+    ) {
+      new Notice("The saved generation is still being inspected. Use resume / inspect first.", 8_000);
+      await this.openInterruptedGeneration();
+      return;
+    }
+    if (this.generationRecoveryState === "blocked") {
+      new Notice("Restore the missing source or visual, then use resume / inspect.", 8_000);
+      await this.openInterruptedGeneration();
+      return;
+    }
+
+    const pending = this.pendingGeneration;
+    if (pending === undefined) {
+      new Notice("The exact approved request could not be reopened. Keep the recovery and use resume / inspect.", 10_000);
+      await this.openInterruptedGeneration();
+      return;
+    }
+    const retryPending: PendingGeneration = {
+      source: pending.source,
+      configuration: pending.configuration,
+      prompt: pending.prompt,
+      preparedVisuals: pending.preparedVisuals,
+    };
+
+    this.discardingGenerationRecovery = true;
+    try {
+      const cli = await import("./cli");
+      try {
+        await cli.cancelDurableRecovery(handle);
+      } catch (error) {
+        if (cliErrorCode(error) !== "workspace-error") throw error;
+      }
+      await this.clearGenerationRecovery(true);
+      this.pendingGeneration = retryPending;
+      this.lastSource = retryPending.source;
+    } finally {
+      this.discardingGenerationRecovery = false;
+    }
+
+    const view = await this.openView();
+    view.prepareRecoveredGeneration(
+      retryPending.source,
+      configurationDefaults(retryPending.configuration),
+      {
+        state: "running",
+        message: "Starting a fresh local job from the exact payload you already approved.",
+      },
+    );
+    try {
+      const drafts = await this.runGeneration(
+        retryPending.source,
+        retryPending.configuration,
+        (event) => view.publishRecoveredGenerationActivity(event),
+      );
+      view.setJob({ state: "idle" });
+      view.setDrafts(drafts);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      view.setJob({ state: "failed", message });
+      this.updateGenerationRecoveryViews();
+      this.showError(error);
+    }
+  }
+
   private async redirectToInterruptedGeneration(): Promise<boolean> {
     if (this.generationRecoveryHandle === undefined) return false;
     new Notice(
@@ -3088,6 +3281,7 @@ export default class PracticeLabPlugin extends Plugin {
     this.generationRecoveryState = "idle";
     this.generationRecoveryMessage = undefined;
     await this.persistStoredData();
+    this.updateGenerationRecoveryViews();
   }
 
   private async initializeDesktopAnswerReviews(): Promise<void> {
