@@ -562,8 +562,8 @@ export class PracticeLearningPathView extends ItemView {
       && this.options.callbacks.resumeInterruptedQuickGeneration !== undefined
     ) {
       new ButtonComponent(actions)
-        .setButtonText(recovery.state === "ready" ? "Open recovered Quick set" : "Resume / inspect Quick set")
         .setIcon("history")
+        .setButtonText(recovery.state === "ready" ? "Open recovered Quick set" : "Resume / inspect Quick set")
         .onClick(() => void this.options.callbacks.resumeInterruptedQuickGeneration?.());
     }
     if (
@@ -571,15 +571,15 @@ export class PracticeLearningPathView extends ItemView {
       && this.options.callbacks.retryInterruptedQuickGeneration !== undefined
     ) {
       new ButtonComponent(actions)
-        .setButtonText("Retry approved quick set")
         .setIcon("refresh-cw")
+        .setButtonText("Retry approved quick set")
         .setCta()
         .onClick(() => void this.options.callbacks.retryInterruptedQuickGeneration?.());
     }
     if (this.options.callbacks.discardInterruptedQuickGeneration !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText("Discard recovery...")
         .setIcon("trash-2")
+        .setButtonText("Discard recovery...")
         .setDestructive()
         .onClick(() => void this.options.callbacks.discardInterruptedQuickGeneration?.());
     }
@@ -619,15 +619,15 @@ export class PracticeLearningPathView extends ItemView {
       text.createEl("p", { text: "Continue the exact approved batch from its next unfinished set. Completed drafts are retained." });
       const actions = recovery.createDiv({ cls: "practice-learning-path-actions" });
       new ButtonComponent(actions)
-        .setButtonText("Resume guided path")
         .setIcon("history")
+        .setButtonText("Resume guided path")
         .setCta()
         .setDisabled(this.busy !== null)
         .onClick(() => void this.resumeRecovery());
       if (this.options.callbacks.discardRecoverableBatch !== undefined) {
         new ButtonComponent(actions)
-          .setButtonText("Discard recovery…")
           .setIcon("trash-2")
+          .setButtonText("Discard recovery…")
           .setDestructive()
           .setDisabled(this.busy !== null)
           .onClick(() => void this.discardRecovery());
@@ -658,8 +658,8 @@ export class PracticeLearningPathView extends ItemView {
       });
     }
     new ButtonComponent(section)
-      .setButtonText(this.busy === "source" ? "Choosing source…" : "Add supporting note or PDF range")
       .setIcon("plus")
+      .setButtonText(this.busy === "source" ? "Choosing source…" : "Add supporting note or PDF range")
       .setTooltip("Add one explicitly selected note or exact PDF page range. Linked material is never added automatically.")
       .setDisabled(this.busy !== null || this.visualSelectionBusy || this.supporting.length >= 4)
       .onClick(() => void this.addSupportingSource());
@@ -797,8 +797,8 @@ export class PracticeLearningPathView extends ItemView {
       if (aspect.status === "source-gap") {
         card.createEl("p", { cls: "practice-learning-path-gap", text: aspect.gapReason ?? "Unsupported prerequisite" });
         new ButtonComponent(card)
-          .setButtonText("Remove from path")
           .setIcon("trash-2")
+          .setButtonText("Remove from path")
           .setTooltip("Remove this unsupported aspect. No AI-generated general knowledge will replace it.")
           .onClick(() => this.removeGap(aspect.id));
       }
@@ -816,16 +816,16 @@ export class PracticeLearningPathView extends ItemView {
       this.renderSetCard(list, state, index);
     }
     new ButtonComponent(sets)
-      .setButtonText("Add focused set")
       .setIcon("plus")
+      .setButtonText("Add focused set")
       .setTooltip(`Add another editable set. A path can contain at most ${MAX_LEARNING_PATH_SETS}.`)
       .setDisabled(this.setStates.length >= MAX_LEARNING_PATH_SETS || this.busy !== null)
       .onClick(() => this.addSet());
 
     const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "payloads" ? "Computing exact payloads…" : "Preview all set payloads")
       .setIcon("scan-eye")
+      .setButtonText(this.busy === "payloads" ? "Computing exact payloads…" : "Preview all set payloads")
       .setDisabled(problem !== null || this.busy !== null)
       .onClick(() => void this.previewSetPayloads());
     if (this.setPayloadPreviews.length > 0) this.renderSetPayloadPreviews(container);
@@ -1013,13 +1013,13 @@ export class PracticeLearningPathView extends ItemView {
     }
     const actions = section.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setButtonText(this.setPayloadsAccepted ? "Complete batch approved" : "Approve complete batch")
       .setIcon(this.setPayloadsAccepted ? "check" : "shield-check")
+      .setButtonText(this.setPayloadsAccepted ? "Complete batch approved" : "Approve complete batch")
       .setDisabled(this.setPayloadsAccepted || this.busy !== null)
       .onClick(() => { this.setPayloadsAccepted = true; this.render(); });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "batch" ? "Generating sets sequentially…" : "Generate all sets")
       .setIcon("play")
+      .setButtonText(this.busy === "batch" ? "Generating sets sequentially…" : "Generate all sets")
       .setCta()
       .setDisabled(
         !this.setPayloadsAccepted
@@ -1051,8 +1051,8 @@ export class PracticeLearningPathView extends ItemView {
     }
     if (this.busy === "batch") {
       new ButtonComponent(navigator)
-        .setButtonText("Cancel current set and stop batch")
         .setIcon("square")
+        .setButtonText("Cancel current set and stop batch")
         .setDestructive()
         .onClick(() => void this.options.callbacks.cancelGeneration?.());
     } else if (
@@ -1061,8 +1061,8 @@ export class PracticeLearningPathView extends ItemView {
       && this.options.callbacks.resumeRecoverableBatch !== undefined
     ) {
       new ButtonComponent(navigator)
-        .setButtonText("Retry remaining sets")
         .setIcon("history")
+        .setButtonText("Retry remaining sets")
         .setCta()
         .onClick(() => void this.resumeRecovery());
     }
@@ -1082,8 +1082,8 @@ export class PracticeLearningPathView extends ItemView {
     const approved = this.approvedBySet.get(active.setId) ?? new Set<string>();
     const toolbar = review.createDiv({ cls: "practice-learning-path-review-toolbar" });
     new ButtonComponent(toolbar)
-      .setButtonText("Approve all valid text exercises")
       .setIcon("list-checks")
+      .setButtonText("Approve all valid text exercises")
       .setTooltip("Approve every kept non-occlusion exercise in this set. Image masks still require explicit acceptance.")
       .onClick(() => {
         for (const exercise of active.exercises) {
@@ -1093,8 +1093,8 @@ export class PracticeLearningPathView extends ItemView {
         this.render();
       });
     new ButtonComponent(toolbar)
-      .setButtonText("Accept valid occlusions")
       .setIcon("scan")
+      .setButtonText("Accept valid occlusions")
       .setTooltip("Accept every kept occlusion whose current masks are valid. Invalid or missing masks remain blocked.")
       .onClick(() => {
         const exercises = active.exercises.map((exercise) => {
@@ -1121,8 +1121,8 @@ export class PracticeLearningPathView extends ItemView {
     }
     const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "save" ? "Saving workspace atomically…" : "Save guided learning path")
       .setIcon("save")
+      .setButtonText(this.busy === "save" ? "Saving workspace atomically…" : "Save guided learning path")
       .setCta()
       .setDisabled(gate !== null || this.busy !== null)
       .onClick(() => void this.saveLearningPath());
@@ -1191,8 +1191,8 @@ export class PracticeLearningPathView extends ItemView {
       }
     } else {
       const approve = new ButtonComponent(card)
-        .setButtonText(approved.has(exercise.id) ? "Approved" : "Approve exercise")
         .setIcon(approved.has(exercise.id) ? "check" : "circle-check")
+        .setButtonText(approved.has(exercise.id) ? "Approved" : "Approve exercise")
         .setDisabled(approved.has(exercise.id));
       approve.onClick(() => {
         approved.add(exercise.id);
@@ -1268,8 +1268,8 @@ export class PracticeLearningPathView extends ItemView {
       });
       if (this.options.callbacks.regenerateSavedSet !== undefined) {
         new ButtonComponent(card)
-          .setButtonText("Regenerate / tweak this set")
           .setIcon("refresh-cw")
+          .setButtonText("Regenerate / tweak this set")
           .setDisabled(this.busy !== null)
           .onClick(() => {
             if (this.savedWorkspaceDirty) {
@@ -1287,8 +1287,8 @@ export class PracticeLearningPathView extends ItemView {
     }
     if (this.options.callbacks.saveManagedWorkspace !== undefined) {
       new ButtonComponent(sets)
-        .setButtonText(this.busy === "save" ? "Saving changes…" : "Save path labels")
         .setIcon("save")
+        .setButtonText(this.busy === "save" ? "Saving changes…" : "Save path labels")
         .setCta()
         .setDisabled(!this.savedWorkspaceDirty || this.busy !== null)
         .onClick(() => void this.saveManagedWorkspace());
@@ -1303,8 +1303,8 @@ export class PracticeLearningPathView extends ItemView {
     cta: boolean,
   ): void {
     const button = new ButtonComponent(container)
-      .setButtonText(label)
       .setIcon(icon)
+      .setButtonText(label)
       .setDisabled(this.busy !== null)
       .onClick(() => {
         if (this.savedWorkspace !== null) {
@@ -1389,8 +1389,8 @@ export class PracticeLearningPathView extends ItemView {
     ];
     choices.forEach(([mode, label, icon], index) => {
       const button = new ButtonComponent(actions)
-        .setButtonText(label)
         .setIcon(icon)
+        .setButtonText(label)
         .setDisabled(this.busy !== null)
         .onClick(() => void this.choosePrimarySource(mode));
       if (cta && index === 0) button.setCta();
@@ -1446,14 +1446,14 @@ export class PracticeLearningPathView extends ItemView {
     });
 
     new ButtonComponent(toolbar)
-      .setButtonText(this.visualSelectionBusy ? "Updating images…" : "Select all images")
       .setIcon("list-checks")
+      .setButtonText(this.visualSelectionBusy ? "Updating images…" : "Select all images")
       .setTooltip("Select every available local image. GIFs without an explicit frame use the configured default; existing overrides are preserved. Videos and remote images still require explicit review.")
       .setDisabled(this.visualSelectionBusy || this.busy !== null)
       .onClick(() => void this.selectAllSourceImages());
     new ButtonComponent(toolbar)
-      .setButtonText("Deselect all")
       .setIcon("square-x")
+      .setButtonText("Deselect all")
       .setTooltip("Remove every visual from the planning and set-generation payloads without changing the source files.")
       .setDisabled(this.visualSelectionBusy || this.busy !== null || selectedCount === 0)
       .onClick(() => void this.deselectAllSourceImages());
@@ -1546,8 +1546,8 @@ export class PracticeLearningPathView extends ItemView {
       if (isGifVisual(visual)) this.renderGifFrameChoice(controls, source, visual);
       else if (visual.frameSourcePath !== undefined) {
         new ButtonComponent(controls)
-          .setButtonText("Choose another still")
           .setIcon("scan-line")
+          .setButtonText("Choose another still")
           .setTooltip("Open the video frame picker. The original video is never modified.")
           .setDisabled(this.visualSelectionBusy || this.busy !== null || this.options.callbacks.chooseMediaFrame === undefined)
           .onClick(() => void this.resolveVisualFrame(source, visual));
@@ -1568,8 +1568,8 @@ export class PracticeLearningPathView extends ItemView {
           text: "Videos are never uploaded directly. Choose one still frame explicitly; the original video remains unchanged.",
         });
         new ButtonComponent(controls)
-          .setButtonText("Choose still frame")
           .setIcon("scan-line")
+          .setButtonText("Choose still frame")
           .setTooltip("Open sampled video frames and select the exact still image to use.")
           .setDisabled(this.visualSelectionBusy || this.busy !== null || this.options.callbacks.chooseMediaFrame === undefined)
           .onClick(() => void this.resolveVisualFrame(source, visual));
@@ -1585,8 +1585,8 @@ export class PracticeLearningPathView extends ItemView {
       });
       if (this.options.callbacks.importRemoteVisual !== undefined) {
         new ButtonComponent(controls)
-          .setButtonText("Preview and import…")
           .setIcon("download")
+          .setButtonText("Preview and import…")
           .setTooltip(`Preview the remote image from ${host}, then choose whether to preserve a local snapshot.`)
           .setDisabled(this.visualSelectionBusy || this.busy !== null)
           .onClick(() => void this.importRemoteSourceVisual(source, visual));

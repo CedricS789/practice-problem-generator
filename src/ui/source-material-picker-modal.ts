@@ -1,4 +1,5 @@
 import { FuzzySuggestModal, type App, type TFile } from "obsidian";
+import { installHoverDescriptions } from "./hover-descriptions";
 
 export function chooseSourceMaterialFile(app: App): Promise<TFile | null> {
   return new Promise((resolve) => {
@@ -30,6 +31,11 @@ class SourceMaterialPickerModal extends FuzzySuggestModal<TFile> {
           && !/(?:^|\/)Practice(?:\/|$)/iu.test(file.path);
       })
       .sort((left, right) => left.path.localeCompare(right.path));
+  }
+
+  override async onOpen(): Promise<void> {
+    await super.onOpen();
+    installHoverDescriptions(this.modalEl);
   }
 
   getItemText(file: TFile): string {

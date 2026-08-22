@@ -45,7 +45,7 @@ export class FramePickerModal extends Modal {
     new Setting(this.contentEl).addButton((button) => button
       .setButtonText("Cancel")
       .onClick(() => this.close()));
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
   }
 
   override onClose(): void {

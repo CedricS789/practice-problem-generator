@@ -67,7 +67,7 @@ class PdfExtractionProgressModal
       attr: { type: "button" },
     });
     this.cancelButton.addEventListener("click", () => this.cancel());
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
   }
 
   override onClose(): void {

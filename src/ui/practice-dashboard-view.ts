@@ -364,8 +364,8 @@ export class PracticeDashboardView extends ItemView {
       });
     }
     new ButtonComponent(headerActions)
-      .setButtonText(this.loading ? "Refreshing…" : "Refresh")
       .setIcon("refresh-cw")
+      .setButtonText(this.loading ? "Refreshing…" : "Refresh")
       .setDisabled(this.loading)
       .onClick(() => void this.refresh());
     const icon = headerActions.createDiv({ cls: "practice-lab-header-icon" });
@@ -485,8 +485,8 @@ export class PracticeDashboardView extends ItemView {
       text: "Audit every bank in the current dashboard scope and every static image required by its occlusion questions.",
     });
     new ButtonComponent(panel)
-      .setButtonText("Prepare for offline practice")
       .setIcon("cloud-off")
+      .setButtonText("Prepare for offline practice")
       .setTooltip("Checks the currently filtered banks without contacting or configuring a sync service.")
       .onClick(() => void this.runAction(
         () => this.options.prepareOffline?.(records),
@@ -972,8 +972,8 @@ export class PracticeDashboardView extends ItemView {
     const actions = card.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
     if (record !== undefined && this.options.continueLearning !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText(recommendation.kind === "lesson" ? "Open recommended lesson" : "Start recommended set")
         .setIcon(recommendation.kind === "lesson" ? "book-open" : "play")
+        .setButtonText(recommendation.kind === "lesson" ? "Open recommended lesson" : "Start recommended set")
         .setTooltip("Open the current locally recommended path step. You remain free to choose any other lesson or set.")
         .onClick(() => void this.runAction(
           () => this.options.continueLearning?.(record),
@@ -981,8 +981,8 @@ export class PracticeDashboardView extends ItemView {
         ));
     }
     new ButtonComponent(actions)
-      .setButtonText("Ignore for now")
       .setIcon("x")
+      .setButtonText("Ignore for now")
       .setTooltip("Hide this suggestion until the dashboard is rendered again. No learning data is changed.")
       .onClick(() => {
         card.empty();
@@ -1579,8 +1579,8 @@ export class PracticeDashboardView extends ItemView {
     const actions = card.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
     if (record.bank.learningPath !== null && this.options.continueLearning !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText("Continue learning")
         .setIcon("route")
+        .setButtonText("Continue learning")
         .setCta()
         .onClick(() => void this.runAction(
           () => this.options.continueLearning?.(record),
@@ -1588,8 +1588,8 @@ export class PracticeDashboardView extends ItemView {
         ));
       if (this.options.chooseSet !== undefined) {
         new ButtonComponent(actions)
-          .setButtonText("Choose a set")
           .setIcon("list")
+          .setButtonText("Choose a set")
           .onClick(() => void this.runAction(
             () => this.options.chooseSet?.(record),
             "Could not open the set chooser.",
@@ -1597,8 +1597,8 @@ export class PracticeDashboardView extends ItemView {
       }
       if (this.options.mixedPractice !== undefined) {
         new ButtonComponent(actions)
-          .setButtonText("Mixed practice")
           .setIcon("shuffle")
+          .setButtonText("Mixed practice")
           .onClick(() => void this.runAction(
             () => this.options.mixedPractice?.(record),
             "Could not start mixed practice.",
@@ -1606,8 +1606,8 @@ export class PracticeDashboardView extends ItemView {
       }
     }
     const start = new ButtonComponent(actions)
-      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Practice all problems")
       .setIcon("play")
+      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Practice all problems")
       .onClick(() => void this.runAction(
         () => this.options.startPractice(record),
         "Could not start this practice bank.",
@@ -1615,8 +1615,8 @@ export class PracticeDashboardView extends ItemView {
     if (record.bank.learningPath === null) start.setCta();
     if (this.options.regenerate !== undefined && record.bank.learningPath === null) {
       const regenerate = new ButtonComponent(actions)
-        .setButtonText("Regenerate / tweak")
         .setIcon("refresh-cw")
+        .setButtonText("Regenerate / tweak")
         .setDisabled(!record.sourceExists);
       regenerate.onClick(() => void this.runAction(
         () => this.options.regenerate?.(record),
@@ -1625,23 +1625,23 @@ export class PracticeDashboardView extends ItemView {
     }
     if (record.bank.learningPath !== null && this.options.manageLearningPath !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText("Manage path")
         .setIcon("settings-2")
+        .setButtonText("Manage path")
         .onClick(() => void this.runAction(
           () => this.options.manageLearningPath?.(record),
           "Could not open the learning-path manager.",
         ));
     }
     new ButtonComponent(actions)
-      .setButtonText("Open bank")
       .setIcon("notebook-tabs")
+      .setButtonText("Open bank")
       .onClick(() => void this.runAction(
         () => this.options.openBank(record),
         "Could not open this practice bank.",
       ));
     const openSource = new ButtonComponent(actions)
-      .setButtonText("Open source")
       .setIcon("file-text")
+      .setButtonText("Open source")
       .setDisabled(!record.sourceExists);
     openSource.onClick(() => void this.runAction(
       () => this.options.openSource(record),
@@ -1656,8 +1656,8 @@ export class PracticeDashboardView extends ItemView {
         text: "Deleting a bank removes its generated problems and full history. The source note and original attachments are never deleted.",
       });
       const remove = new ButtonComponent(dataActions)
-        .setButtonText("Move bank to trash…")
         .setIcon("trash-2")
+        .setButtonText("Move bank to trash…")
         .setDestructive();
       remove.onClick(() => void this.runAction(async () => {
         await this.options.deleteBank?.(record);

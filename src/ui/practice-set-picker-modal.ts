@@ -1,6 +1,7 @@
 import { FuzzySuggestModal, type App } from "obsidian";
 
 import type { PracticeSetV1 } from "../model";
+import { installHoverDescriptions } from "./hover-descriptions";
 
 export function choosePracticeSet(
   app: App,
@@ -34,6 +35,11 @@ class PracticeSetPickerModal extends FuzzySuggestModal<PracticeSetV1> {
     return [...this.sets].sort((left, right) => (
       left.order - right.order || left.title.localeCompare(right.title)
     ));
+  }
+
+  override async onOpen(): Promise<void> {
+    await super.onOpen();
+    installHoverDescriptions(this.modalEl);
   }
 
   getItemText(set: PracticeSetV1): string {

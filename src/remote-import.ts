@@ -36,7 +36,7 @@ export class RemoteImageImportModal extends Modal {
           this.finish(true);
           this.close();
         }));
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
   }
 
   override onClose(): void {

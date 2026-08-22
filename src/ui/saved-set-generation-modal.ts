@@ -49,7 +49,10 @@ import type {
   ReasoningEffort,
 } from "./contracts";
 import { EXERCISE_TYPES } from "./contracts";
-import { installHoverDescriptions } from "./hover-descriptions";
+import {
+  applyHoverDescriptions,
+  installHoverDescriptions,
+} from "./hover-descriptions";
 import { renderDifficultySelector } from "./difficulty-selector";
 import { OcclusionEditor } from "./occlusion-editor";
 import { renderLatexMarkup } from "./latex-renderer";
@@ -127,7 +130,7 @@ export class SavedSetGenerationModal extends Modal {
 
   public override onOpen(): void {
     this.modalEl.addClass("practice-lab-modal", "practice-learning-path-set-modal");
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
     this.render();
   }
 
@@ -162,7 +165,7 @@ export class SavedSetGenerationModal extends Modal {
     }
     if (this.stage === "configure") this.renderConfigure();
     else this.renderReview();
-    installHoverDescriptions(this.contentEl);
+    applyHoverDescriptions(this.modalEl);
   }
 
   private renderConfigure(): void {
@@ -181,22 +184,22 @@ export class SavedSetGenerationModal extends Modal {
     }
     const actions = this.contentEl.createDiv({ cls: "practice-learning-path-actions is-sticky" });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "preview" ? "Preparing preview…" : "Preview exact AI payload")
       .setIcon("scan-search")
+      .setButtonText(this.busy === "preview" ? "Preparing preview…" : "Preview exact AI payload")
       .setDisabled(this.busy !== null || problem !== null)
       .onClick(() => void this.previewPayload());
     if (this.preview !== null) {
       new ButtonComponent(actions)
-        .setButtonText(this.busy === "generate" ? "Agent working…" : "Generate this set")
         .setIcon("sparkles")
+        .setButtonText(this.busy === "generate" ? "Agent working…" : "Generate this set")
         .setCta()
         .setDisabled(this.busy !== null || !this.previewAccepted)
         .onClick(() => void this.generate());
     }
     if (this.busy === "generate" && this.options.callbacks.cancel !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText("Cancel")
         .setIcon("square")
+        .setButtonText("Cancel")
         .onClick(() => this.options.callbacks.cancel?.());
     }
   }
@@ -516,8 +519,8 @@ export class SavedSetGenerationModal extends Modal {
     const intro = this.section(this.contentEl, "Review generated set", "Edit, reject, reorder, and approve every kept exercise. Occlusion masks keep their separate explicit acceptance gate.");
     const actions = intro.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setButtonText("Approve all valid text exercises")
       .setIcon("check-check")
+      .setButtonText("Approve all valid text exercises")
       .onClick(() => {
         for (const exercise of this.exercises) {
           if (!exercise.rejected && exercise.type !== "image-occlusion") this.approved.add(exercise.id);
@@ -525,8 +528,8 @@ export class SavedSetGenerationModal extends Modal {
         this.render();
       });
     new ButtonComponent(actions)
-      .setButtonText("Back to configuration")
       .setIcon("arrow-left")
+      .setButtonText("Back to configuration")
       .setDisabled(this.busy !== null)
       .onClick(() => {
         this.stage = "configure";
@@ -543,10 +546,10 @@ export class SavedSetGenerationModal extends Modal {
     if (problem !== null) this.contentEl.createEl("p", { cls: "practice-lab-callout is-error", text: problem });
     const save = this.contentEl.createDiv({ cls: "practice-learning-path-actions is-sticky" });
     new ButtonComponent(save)
+      .setIcon("save")
       .setButtonText(this.busy === "save"
         ? "Saving…"
         : this.request.addingSet ? "Add approved repair set" : "Replace only this set")
-      .setIcon("save")
       .setCta()
       .setDisabled(this.busy !== null || problem !== null)
       .onClick(() => void this.save());
@@ -619,8 +622,8 @@ export class SavedSetGenerationModal extends Modal {
       }
     } else {
       new ButtonComponent(card)
-        .setButtonText(this.approved.has(exercise.id) ? "Approved" : "Approve exercise")
         .setIcon(this.approved.has(exercise.id) ? "check" : "circle-check")
+        .setButtonText(this.approved.has(exercise.id) ? "Approved" : "Approve exercise")
         .setDisabled(this.approved.has(exercise.id))
         .onClick(() => {
           this.approved.add(exercise.id);

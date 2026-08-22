@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
+import { installHoverDescriptions } from "./hover-descriptions";
 
 export interface DestructiveConfirmationOptions {
   readonly title: string;
@@ -70,6 +71,7 @@ class DestructiveConfirmationModal extends Modal {
         update();
         button.onClick(() => { this.finish(true); });
       });
+    installHoverDescriptions(this.modalEl);
   }
 
   public override onClose(): void {

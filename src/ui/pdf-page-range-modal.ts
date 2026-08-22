@@ -205,7 +205,7 @@ class PdfPageRangeModal extends Modal {
       this.submitRange();
     });
     this.refreshMode();
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
     this.focusActiveInput();
   }
 

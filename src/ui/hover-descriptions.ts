@@ -100,7 +100,15 @@ function settingDescription(control: HTMLElement): string | null {
 
 function actionDescription(control: HTMLElement): string | null {
   const label = controlLabel(control);
-  if (label === null) return null;
+  if (label === null) {
+    if (
+      control.instanceOf(HTMLButtonElement)
+      || control.getAttribute("role") === "button"
+    ) {
+      return "Activate this button.";
+    }
+    return null;
+  }
   if (control.instanceOf(HTMLSelectElement)) return `Choose ${label}.`;
   if (control.instanceOf(HTMLTextAreaElement)) return `Enter ${label}.`;
   if (control.instanceOf(HTMLInputElement)) {

@@ -5,7 +5,10 @@ import {
   type StudyOrderDefault,
   type StudyOrderSelection,
 } from "../preferences";
-import { installHoverDescriptions } from "./hover-descriptions";
+import {
+  applyHoverDescriptions,
+  installHoverDescriptions,
+} from "./hover-descriptions";
 
 export interface StudyOrderDialogOptions {
   readonly itemTypes: readonly StudyExerciseType[];
@@ -138,7 +141,7 @@ class StudyOrderModal extends Modal {
       return false;
     });
     this.refreshMode();
-    installHoverDescriptions(this.contentEl);
+    installHoverDescriptions(this.modalEl);
     window.setTimeout(() => mode.controlEl.querySelector("select")?.focus(), 0);
   }
 
@@ -227,7 +230,7 @@ class StudyOrderModal extends Modal {
     next.splice(to, 0, type);
     this.typeSequence = normalizeStudyTypeSequence(next);
     this.renderSequence();
-    installHoverDescriptions(this.sequenceList ?? this.contentEl);
+    applyHoverDescriptions(this.sequenceList ?? this.modalEl);
   }
 
   private submit(): void {

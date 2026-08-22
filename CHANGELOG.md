@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.7
+
+- Guaranteed hover descriptions across every plugin view, picker, and modal, including disabled and dynamically rendered buttons.
+- Preserved visible action labels on 87 icon-enhanced buttons so Obsidian cannot erase the semantic text used by hover and keyboard descriptions.
+
 ## 1.2.6
 
 - Restored visible labels on the guided planning actions instead of leaving ambiguous icon-only controls.

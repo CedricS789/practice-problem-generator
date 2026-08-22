@@ -1172,8 +1172,8 @@ export class PracticeLabView extends ItemView {
       && this.options.callbacks.resumeInterruptedGeneration !== undefined
     ) {
       new ButtonComponent(actions)
-        .setButtonText(recovery.state === "ready" ? "Open recovered draft" : "Resume / inspect")
         .setIcon(recovery.state === "ready" ? "file-check-2" : "history")
+        .setButtonText(recovery.state === "ready" ? "Open recovered draft" : "Resume / inspect")
         .setDisabled(this.job.state === "running" || this.job.state === "cancelling")
         .onClick(() => void this.options.callbacks.resumeInterruptedGeneration?.());
     }
@@ -1182,15 +1182,15 @@ export class PracticeLabView extends ItemView {
       && this.options.callbacks.retryInterruptedGeneration !== undefined
     ) {
       new ButtonComponent(actions)
-        .setButtonText("Retry approved request")
         .setIcon("refresh-cw")
+        .setButtonText("Retry approved request")
         .setCta()
         .onClick(() => void this.options.callbacks.retryInterruptedGeneration?.());
     }
     if (this.options.callbacks.discardInterruptedGeneration !== undefined) {
       new ButtonComponent(actions)
-        .setButtonText("Discard recovery...")
         .setIcon("trash-2")
+        .setButtonText("Discard recovery...")
         .setDestructive()
         .setDisabled(this.job.state === "running" || this.job.state === "cancelling")
         .onClick(() => void this.options.callbacks.discardInterruptedGeneration?.());
@@ -1241,21 +1241,21 @@ export class PracticeLabView extends ItemView {
     if (this.options.callbacks.requestSource !== undefined) {
       const sourceButtons = container.createDiv({ cls: "practice-lab-button-row" });
       new ButtonComponent(sourceButtons)
+        .setIcon("text-select")
         .setButtonText(
           this.sourceRequestMode === "selection"
             ? "Loading selection…"
             : "Use editor selection",
         )
-        .setIcon("text-select")
         .setDisabled(this.sourceRequestMode !== null)
         .onClick(() => void this.requestSource("selection"));
       new ButtonComponent(sourceButtons)
+        .setIcon("file-text")
         .setButtonText(
           this.sourceRequestMode === "note"
             ? "Loading note…"
             : "Use current note",
         )
-        .setIcon("file-text")
         .setDisabled(this.sourceRequestMode !== null)
         .onClick(() => void this.requestSource("note"));
     }
@@ -1264,12 +1264,12 @@ export class PracticeLabView extends ItemView {
         ".practice-lab-button-row",
       ) ?? container.createDiv({ cls: "practice-lab-button-row" });
       new ButtonComponent(sourceButtons)
+        .setIcon("file-scan")
         .setButtonText(
           this.sourceRequestMode === "pdf"
             ? "Loading PDF…"
             : "Use active PDF",
         )
-        .setIcon("file-scan")
         .setDisabled(this.sourceRequestMode !== null)
         .onClick(() => void this.requestPdfSource());
     }
@@ -1371,13 +1371,13 @@ export class PracticeLabView extends ItemView {
         }
       });
       new ButtonComponent(bulkControls)
-        .setButtonText(this.visualSelectionBusy ? "Selecting…" : "Select all images")
         .setIcon("list-checks")
+        .setButtonText(this.visualSelectionBusy ? "Selecting…" : "Select all images")
         .setDisabled(this.visualSelectionBusy)
         .onClick(() => void this.selectAllImages());
       new ButtonComponent(bulkControls)
-        .setButtonText("Clear selection")
         .setIcon("x")
+        .setButtonText("Clear selection")
         .setDisabled(
           this.visualSelectionBusy
             || !this.source.visuals.some((visual) => visual.selected),
@@ -1393,9 +1393,9 @@ export class PracticeLabView extends ItemView {
 
     const footer = container.createDiv({ cls: "practice-lab-stage-footer" });
     new ButtonComponent(footer)
+      .setIcon("arrow-right")
       .setButtonText("Configure practice")
       .setCta()
-      .setIcon("arrow-right")
       .onClick(() => {
         this.stage = "configure";
         this.render();
@@ -1445,8 +1445,8 @@ export class PracticeLabView extends ItemView {
       if (isGifVisual(visual)) {
         if (visual.framePosition !== this.gifFrameDefault) {
           const useDefault = new ButtonComponent(controls)
-            .setButtonText(`Use ${displayGifFramePosition(this.gifFrameDefault)}`)
             .setIcon("check")
+            .setButtonText(`Use ${displayGifFramePosition(this.gifFrameDefault)}`)
             .setDisabled(
               this.visualSelectionBusy
                 || this.options.callbacks.chooseMediaFrame === undefined,
@@ -1457,8 +1457,8 @@ export class PracticeLabView extends ItemView {
           ));
         }
         const change = new ButtonComponent(controls)
-          .setButtonText("Choose different frame")
           .setIcon("scan-line")
+          .setButtonText("Choose different frame")
           .setDisabled(
             this.visualSelectionBusy
               || this.options.callbacks.chooseMediaFrame === undefined,
@@ -1468,8 +1468,8 @@ export class PracticeLabView extends ItemView {
     } else if (visual.state === "frame-required") {
       if (isGifVisual(visual)) {
         const useDefault = new ButtonComponent(controls)
-          .setButtonText(`Use ${displayGifFramePosition(this.gifFrameDefault)}`)
           .setIcon("check")
+          .setButtonText(`Use ${displayGifFramePosition(this.gifFrameDefault)}`)
           .setDisabled(
             this.visualSelectionBusy
               || this.options.callbacks.chooseMediaFrame === undefined,
@@ -1479,8 +1479,8 @@ export class PracticeLabView extends ItemView {
           this.gifFrameDefault,
         ));
         const choose = new ButtonComponent(controls)
-          .setButtonText("Choose different frame")
           .setIcon("scan-line")
+          .setButtonText("Choose different frame")
           .setDisabled(
             this.visualSelectionBusy
               || this.options.callbacks.chooseMediaFrame === undefined,
@@ -1488,8 +1488,8 @@ export class PracticeLabView extends ItemView {
         choose.onClick(() => void this.resolveFrame(visual));
       } else {
         const button = new ButtonComponent(controls)
-          .setButtonText("Choose still frame")
           .setIcon("scan-line")
+          .setButtonText("Choose still frame")
           .setDisabled(
             this.visualSelectionBusy
               || this.options.callbacks.chooseMediaFrame === undefined,
@@ -1503,8 +1503,8 @@ export class PracticeLabView extends ItemView {
         text: `Importing will download one snapshot from ${host}. The source note will not change.`,
       });
       const button = new ButtonComponent(controls)
-        .setButtonText("Preview and import")
-        .setIcon("download");
+        .setIcon("download")
+        .setButtonText("Preview and import");
       button.setDisabled(
         this.visualSelectionBusy
           || this.options.callbacks.importRemoteVisual === undefined,
@@ -2120,10 +2120,10 @@ export class PracticeLabView extends ItemView {
       warning.createSpan({ text: capability });
       if (this.options.callbacks.refreshProviders !== undefined) {
         new ButtonComponent(warning)
+          .setIcon("refresh-cw")
           .setButtonText(
             this.providerRefreshBusy ? "Checking providers…" : "Check again",
           )
-          .setIcon("refresh-cw")
           .setDisabled(this.providerRefreshBusy)
           .onClick(() => void this.refreshProviders());
       }
@@ -2147,8 +2147,8 @@ export class PracticeLabView extends ItemView {
 
     const footer = container.createDiv({ cls: "practice-lab-stage-footer" });
     new ButtonComponent(footer)
-      .setButtonText("Back")
       .setIcon("arrow-left")
+      .setButtonText("Back")
       .onClick(() => {
         this.stage = "source";
         this.render();
@@ -2157,10 +2157,10 @@ export class PracticeLabView extends ItemView {
       this.renderJob(footer);
     } else {
       const generate = new ButtonComponent(footer)
+        .setIcon("sparkles")
         .setButtonText(
           this.job.state === "failed" ? "Retry generation" : "Generate draft set",
         )
-        .setIcon("sparkles")
         .setCta();
       const currentKey = configurationKey(source, this.getConfiguration());
       generate.setDisabled(
@@ -2196,8 +2196,8 @@ export class PracticeLabView extends ItemView {
         text: "Build the payload preview before generation. No provider is contacted by this preview.",
       });
       const build = new ButtonComponent(body)
-        .setButtonText("Build payload preview")
-        .setIcon("eye");
+        .setIcon("eye")
+        .setButtonText("Build payload preview");
       build.setDisabled(configurationInvalid);
       build.onClick(() => void this.buildPreview(details, onStateChanged));
       return;
@@ -2250,8 +2250,8 @@ export class PracticeLabView extends ItemView {
       onStateChanged();
     });
     new ButtonComponent(body)
-      .setButtonText("Refresh preview")
       .setIcon("refresh-cw")
+      .setButtonText("Refresh preview")
       .onClick(() => void this.buildPreview(details, onStateChanged));
   }
 
@@ -2471,8 +2471,8 @@ export class PracticeLabView extends ItemView {
       )
     ) {
       const acceptAll = new ButtonComponent(reviewToolbar)
-        .setButtonText("Accept all occlusions")
         .setIcon("check-check")
+        .setButtonText("Accept all occlusions")
         .onClick(() => this.acceptAllOcclusions());
       this.reviewAcceptAllButton = acceptAll;
     }
@@ -2500,21 +2500,21 @@ export class PracticeLabView extends ItemView {
 
     const footer = container.createDiv({ cls: "practice-lab-stage-footer" });
     new ButtonComponent(footer)
-      .setButtonText("Back to configure")
       .setIcon("arrow-left")
+      .setButtonText("Back to configure")
       .onClick(() => {
         this.stage = "configure";
         this.render();
       });
     const save = new ButtonComponent(footer)
-      .setButtonText("Approve and save")
       .setIcon("save")
+      .setButtonText("Approve and save")
       .setCta();
     save.onClick(() => void this.saveDrafts());
     this.reviewSaveButton = save;
     const study = new ButtonComponent(footer)
-      .setButtonText("Start practice")
-      .setIcon("play");
+      .setIcon("play")
+      .setButtonText("Start practice");
     study.onClick(() => this.startStudy());
     this.reviewStudyButton = study;
     this.refreshReviewActionState();
@@ -2776,8 +2776,8 @@ export class PracticeLabView extends ItemView {
     if (!this.canSkipCurrentQuestion(exercise)) return;
     const actions = container.createDiv({ cls: "practice-lab-study-question-actions" });
     new ButtonComponent(actions)
-      .setButtonText("Skip question")
       .setIcon("skip-forward")
+      .setButtonText("Skip question")
       .setTooltip(
         "Leave this question unanswered. It will be excluded from scores and recorded as skipped for this session.",
       )
@@ -2826,10 +2826,10 @@ export class PracticeLabView extends ItemView {
         !state.revealedTeachingBlockIds.includes(block.id)
       ));
       new ButtonComponent(tutor)
+        .setIcon("arrow-right")
         .setButtonText(state.revealedTeachingBlockIds.length === 0
           ? "Begin lesson"
           : next === undefined ? "Continue" : `Continue to ${tutorBlockLabel(next.kind).toLowerCase()}`)
-        .setIcon("arrow-right")
         .setCta()
         .onClick(() => void this.updateTutorLesson((current) => ({
           ...current,
@@ -2855,8 +2855,8 @@ export class PracticeLabView extends ItemView {
         this.setTutorCurrentInput(response.value);
       });
       new ButtonComponent(check)
-        .setButtonText("Submit explanation")
         .setIcon("send")
+        .setButtonText("Submit explanation")
         .setCta()
         .onClick(() => void this.updateTutorLesson((current) => ({
           ...current,
@@ -2875,8 +2875,8 @@ export class PracticeLabView extends ItemView {
     renderLatexMarkup(submitted, state.selfExplanationAnswer);
     if (!state.selfExplanationAnswerRevealed) {
       new ButtonComponent(check)
-        .setButtonText("Reveal grounded comparison")
         .setIcon("eye")
+        .setButtonText("Reveal grounded comparison")
         .setCta()
         .onClick(() => void this.updateTutorLesson((current) => ({
           ...current,
@@ -2896,8 +2896,8 @@ export class PracticeLabView extends ItemView {
       }
     }
     new ButtonComponent(check)
-      .setButtonText("Begin guided problem")
       .setIcon("arrow-right")
+      .setButtonText("Begin guided problem")
       .setCta()
       .onClick(() => {
         this.studyTutorProblemStarted = true;
@@ -2935,24 +2935,24 @@ export class PracticeLabView extends ItemView {
     const actions = support.createDiv({ cls: "practice-lab-tutor-actions" });
     if (state.revealedHintIds.length < lesson.hints.length) {
       new ButtonComponent(actions)
-        .setButtonText("Need help")
         .setIcon("life-buoy")
+        .setButtonText("Need help")
         .onClick(() => void this.updateTutorLesson((current) => ({
           ...current,
           state: revealNextTutorHint(current.lesson, current.state),
         })));
     } else if (!state.repairExplanationRevealed) {
       new ButtonComponent(actions)
-        .setButtonText("Show repair explanation")
         .setIcon("book-open-check")
+        .setButtonText("Show repair explanation")
         .onClick(() => void this.updateTutorLesson((current) => ({
           ...current,
           state: revealTutorRepairExplanation(current.lesson, current.state),
         })));
     }
     new ButtonComponent(actions)
-      .setButtonText("Continue without resolving")
       .setIcon("arrow-right")
+      .setButtonText("Continue without resolving")
       .onClick(() => void this.completeUnresolvedTutorLesson());
   }
 
@@ -3257,8 +3257,8 @@ export class PracticeLabView extends ItemView {
       this.renderCurrentFreeResponseActions();
     } else {
       const next = new ButtonComponent(container)
-        .setButtonText(this.studyIndex === this.studyExercises.length - 1 ? "View results" : "Next question")
         .setIcon("arrow-right")
+        .setButtonText(this.studyIndex === this.studyExercises.length - 1 ? "View results" : "Next question")
         .setCta()
         .onClick(() =>
           void this.recordAndContinue({
@@ -3476,10 +3476,10 @@ export class PracticeLabView extends ItemView {
     });
     const buttons = container.createDiv({ cls: "practice-lab-rating-row" });
     const queue = new ButtonComponent(buttons)
+      .setIcon("send")
       .setButtonText(queuesForDesktop
         ? `Queue for desktop ${provider?.label ?? this.answerReviewProvider} review`
         : `Send to ${provider?.label ?? this.answerReviewProvider} and continue`)
-      .setIcon("send")
       .setCta()
       .setDisabled(problem !== null);
     this.markPrimaryStudyAction(queue);
@@ -3648,8 +3648,8 @@ export class PracticeLabView extends ItemView {
         return;
       }
       new ButtonComponent(actions)
-        .setButtonText("Pause review")
         .setIcon("pause")
+        .setButtonText("Pause review")
         .setTooltip(`Pause exact request ${review.request.requestId}; it remains resumable.`)
         .onClick(() => this.pauseAnswerReview(answer));
       actions.createSpan({
@@ -3661,8 +3661,8 @@ export class PracticeLabView extends ItemView {
 
     const problem = this.answerReviewRetryProblem(review.request);
     new ButtonComponent(actions)
-      .setButtonText(`Retry with ${providerLabel}`)
       .setIcon("refresh-cw")
+      .setButtonText(`Retry with ${providerLabel}`)
       .setDisabled(problem !== null)
       .setTooltip(
         problem ??
@@ -3929,17 +3929,17 @@ export class PracticeLabView extends ItemView {
     }
     const actions = summary.createDiv({ cls: "practice-lab-completion-actions" });
     new ButtonComponent(actions)
-      .setButtonText(this.studyFinishing ? "Saving session…" : "Save session")
       .setIcon("save")
+      .setButtonText(this.studyFinishing ? "Saving session…" : "Save session")
       .setCta()
       .setDisabled(this.studyFinishing)
       .onClick(() => void this.finishStudy("save"));
     if (this.studyLearningProgress === null) {
       new ButtonComponent(actions)
+        .setIcon("repeat-2")
         .setButtonText(
           this.studyFinishing ? "Saving session…" : "Save and practice again",
         )
-        .setIcon("repeat-2")
         .setDisabled(this.studyFinishing)
         .onClick(() => void this.finishStudy("repeat"));
     }
@@ -3949,8 +3949,8 @@ export class PracticeLabView extends ItemView {
       && this.studyHasRepairOpportunity()
     ) {
       new ButtonComponent(actions)
-        .setButtonText(this.studyFinishing ? "Saving session…" : "Save and build repair set")
         .setIcon("wrench")
+        .setButtonText(this.studyFinishing ? "Saving session…" : "Save and build repair set")
         .setDisabled(this.studyFinishing)
         .onClick(() => void this.finishStudy("repair"));
     }

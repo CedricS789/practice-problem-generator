@@ -1,6 +1,7 @@
 import { App, Modal, setIcon } from "obsidian";
 
 import type { OfflineReadinessReport } from "../offline-readiness";
+import { installHoverDescriptions } from "./hover-descriptions";
 
 export class OfflineReadinessModal extends Modal {
   public constructor(
@@ -60,6 +61,7 @@ export class OfflineReadinessModal extends Modal {
     const footer = this.contentEl.createDiv({ cls: "modal-button-container" });
     const close = footer.createEl("button", { text: "Close" });
     close.addEventListener("click", () => this.close());
+    installHoverDescriptions(this.modalEl);
   }
 
   public override onClose(): void {
