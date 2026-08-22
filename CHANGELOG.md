@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.9
+
+- Stopped guided batch generation and saved-set regeneration from rebuilding their full UI on every streamed agent event.
+- Kept guided batch status and live activity updating in place, with unavailable set tabs visibly disabled until review is ready.
+- Restored two saved-set image action labels that could be erased by late icon rendering, and strengthened the regression check.
+- Added keyboard activation and focus styling to the guided progress step that returns to source configuration.
+
 ## 1.2.8
 
 - Added explicit Select all and Deselect all controls to the quick-set exercise mix without rebuilding or resetting the configuration window.

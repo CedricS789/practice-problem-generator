@@ -554,3 +554,20 @@ test("saved-set UI exposes regenerate, repair, exact-preview, consent, and narro
   assert.match(modalSource, /Replace only this set/u);
   assert.match(modalSource, /Any later edit invalidates this consent/u);
 });
+
+test("saved-set activity streams in place without rebuilding the modal", async () => {
+  const modalSource = await readFile(
+    new URL("../src/ui/saved-set-generation-modal.ts", import.meta.url),
+    "utf8",
+  );
+  const generateStart = modalSource.indexOf("private async generate()");
+  const generateEnd = modalSource.indexOf("private async save()", generateStart);
+  assert.ok(generateStart >= 0 && generateEnd > generateStart);
+  const generate = modalSource.slice(generateStart, generateEnd);
+  assert.match(generate, /this\.refreshActivity\(\)/u);
+  assert.doesNotMatch(
+    generate,
+    /this\.activity = \[\.\.\.this\.activity, event\]\.slice\(-50\);\s*this\.render\(\)/u,
+  );
+  assert.match(modalSource, /private activityHost: HTMLElement \| null/u);
+});

@@ -55,6 +55,30 @@ test("guided planning labels its actions and publishes live progress in place", 
   assert.match(stylesSource, /\.practice-learning-path-planning-progress/u);
 });
 
+test("guided batch progress streams without rebuilding the complete workspace", () => {
+  const generateStart = guidedViewSource.indexOf("private async generateAllSets()");
+  const generateEnd = guidedViewSource.indexOf("private async saveLearningPath()", generateStart);
+  assert.ok(generateStart >= 0 && generateEnd > generateStart);
+  const generate = guidedViewSource.slice(generateStart, generateEnd);
+  assert.match(generate, /this\.activity\.clear\(\)/u);
+  assert.match(generate, /this\.refreshBatchProgress\(\)/u);
+  assert.match(generate, /this\.refreshBatchActivity\(\)/u);
+  assert.doesNotMatch(
+    generate,
+    /this\.statuses\.set\(setId, status\);\s*this\.render\(\)/u,
+  );
+  assert.match(guidedViewSource, /private batchNavigatorHost: HTMLElement \| null/u);
+  assert.match(guidedViewSource, /private batchActivityHost: HTMLElement \| null/u);
+});
+
+test("guided progress navigation supports keyboard activation and honest disabled sets", () => {
+  assert.match(guidedViewSource, /item\.setAttribute\("role", "button"\)/u);
+  assert.match(guidedViewSource, /event\.key !== "Enter" && event\.key !== " "/u);
+  assert.match(guidedViewSource, /button\.disabled = !available/u);
+  assert.match(guidedViewSource, /Review opens after generation completes/u);
+  assert.match(stylesSource, /\[role="button"\]/u);
+});
+
 test("mode switching reuses the current leaf and carries an approved source", () => {
   assert.match(
     mainSource,

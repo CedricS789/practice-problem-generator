@@ -3498,7 +3498,8 @@ button.practice-lab-heatmap-day.is-future {
   input,
   textarea,
   select,
-  summary
+  summary,
+  [role="button"]
 ):focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
@@ -4345,6 +4346,11 @@ button.practice-learning-path-mode-card {
   border-top: 1px solid var(--practice-lab-border);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+}
+
+.practice-learning-path-batch-activity:not(:empty),
+.practice-learning-path-modal-activity:not(:empty) {
+  margin-top: var(--size-4-3);
 }
 
 .practice-learning-path-planning-progress {

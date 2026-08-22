@@ -354,6 +354,8 @@ export class PracticeLearningPathView extends ItemView {
   private readonly expandedVisualSources = new Set<string>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
   private blueprintActivityHost: HTMLElement | null = null;
+  private batchNavigatorHost: HTMLElement | null = null;
+  private batchActivityHost: HTMLElement | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -437,16 +439,17 @@ export class PracticeLearningPathView extends ItemView {
     this.busy = "batch";
     this.error = null;
     this.stage = "review";
+    this.activity.clear();
     this.render();
     try {
       const result = await this.options.callbacks.resumeRecoverableBatch(
         (setId, status) => {
           this.statuses.set(setId, status);
-          this.render();
+          this.refreshBatchProgress();
         },
         (setId, event) => {
           this.activity.set(setId, [...(this.activity.get(setId) ?? []), event].slice(-40));
-          this.render();
+          this.refreshBatchActivity();
         },
       );
       this.primary = result.primary;
@@ -476,6 +479,8 @@ export class PracticeLearningPathView extends ItemView {
   private render(): void {
     this.clearOcclusionEditors();
     this.blueprintActivityHost = null;
+    this.batchNavigatorHost = null;
+    this.batchActivityHost = null;
     this.contentEl.empty();
     this.contentEl.addClasses(["practice-lab", "practice-learning-path"]);
     const shell = this.contentEl.createDiv({ cls: "practice-learning-path-shell" });
@@ -606,7 +611,19 @@ export class PracticeLearningPathView extends ItemView {
       if (stage === "source" && this.stage !== "source" && this.busy === null) {
         item.addClass("is-clickable");
         item.tabIndex = 0;
-        item.addEventListener("click", () => { this.stage = "source"; this.render(); });
+        item.setAttribute("role", "button");
+        item.setAttribute("aria-label", "Return to source and intent");
+        item.setAttribute("title", "Return to source and intent");
+        const returnToSource = (): void => {
+          this.stage = "source";
+          this.render();
+        };
+        item.addEventListener("click", returnToSource);
+        item.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          returnToSource();
+        });
       }
     });
   }
@@ -1034,21 +1051,14 @@ export class PracticeLearningPathView extends ItemView {
     if (blueprint === null) return;
     const navigator = this.section(container, "Batch navigator", "Sets run sequentially through one provider job coordinator. Completed drafts remain available if a later set fails.");
     const nav = navigator.createDiv({ cls: "practice-learning-path-set-navigator" });
-    for (const state of this.setStates) {
-      const brief = blueprint.draft.sets.find((set) => set.id === state.id);
-      if (brief === undefined) continue;
-      const status = this.statuses.get(state.id) ?? { state: "queued" as const };
-      const button = nav.createEl("button", { cls: `practice-learning-path-nav-item is-${status.state}`, attr: { type: "button" } });
-      setIcon(button.createSpan(), statusIcon(status.state));
-      button.createEl("strong", { text: brief.title });
-      button.createSpan({ text: statusLabel(status) });
-      button.addEventListener("click", () => {
-        if (this.generatedSets.some((set) => set.setId === state.id)) {
-          this.activeReviewSetId = state.id;
-          this.render();
-        }
-      });
-    }
+    this.batchNavigatorHost = nav;
+    this.renderBatchNavigator(nav, blueprint);
+    const activityHost = navigator.createDiv({
+      cls: "practice-learning-path-batch-activity",
+      attr: { "aria-live": "polite" },
+    });
+    this.batchActivityHost = activityHost;
+    this.renderActivity(activityHost);
     if (this.busy === "batch") {
       new ButtonComponent(navigator)
         .setIcon("square")
@@ -1073,7 +1083,6 @@ export class PracticeLearningPathView extends ItemView {
       const empty = container.createDiv({ cls: "practice-lab-empty" });
       empty.createEl("h3", { text: this.busy === "batch" ? "Generation in progress" : "No completed set yet" });
       empty.createEl("p", { text: "Safe agent activity appears in the navigator as each set is generated and validated." });
-      this.renderActivity(empty);
       return;
     }
     this.activeReviewSetId = active.setId;
@@ -1876,6 +1885,52 @@ export class PracticeLearningPathView extends ItemView {
     for (const event of events) list.createEl("li", { text: `${event.phase}: ${event.message}` });
   }
 
+  private renderBatchNavigator(
+    container: HTMLElement,
+    blueprint: LearningBlueprintPresentationV1,
+  ): void {
+    container.replaceChildren();
+    for (const state of this.setStates) {
+      const brief = blueprint.draft.sets.find((set) => set.id === state.id);
+      if (brief === undefined) continue;
+      const status = this.statuses.get(state.id) ?? { state: "queued" as const };
+      const available = this.generatedSets.some((set) => set.setId === state.id);
+      const button = container.createEl("button", {
+        cls: `practice-learning-path-nav-item is-${status.state}`,
+        attr: {
+          type: "button",
+          title: available
+            ? `Review ${brief.title}`
+            : `${brief.title}: ${statusLabel(status)}. Review opens after generation completes.`,
+          "aria-current": this.activeReviewSetId === state.id ? "true" : "false",
+        },
+      });
+      button.disabled = !available;
+      setIcon(button.createSpan(), statusIcon(status.state));
+      button.createEl("strong", { text: brief.title });
+      button.createSpan({ text: statusLabel(status) });
+      button.addEventListener("click", () => {
+        if (!available) return;
+        this.activeReviewSetId = state.id;
+        this.render();
+      });
+    }
+  }
+
+  private refreshBatchProgress(): void {
+    const host = this.batchNavigatorHost;
+    const blueprint = this.blueprint;
+    if (host === null || blueprint === null) return;
+    this.renderBatchNavigator(host, blueprint);
+  }
+
+  private refreshBatchActivity(): void {
+    const host = this.batchActivityHost;
+    if (host === null) return;
+    host.replaceChildren();
+    this.renderActivity(host);
+  }
+
   private refreshBlueprintActivity(): void {
     const host = this.blueprintActivityHost;
     if (host === null) return;
@@ -2009,6 +2064,7 @@ export class PracticeLearningPathView extends ItemView {
     this.error = null;
     this.stage = "review";
     this.statuses = new Map(this.setStates.map((state) => [state.id, { state: "queued" as const }]));
+    this.activity.clear();
     this.generatedSets = [];
     this.render();
     try {
@@ -2017,10 +2073,11 @@ export class PracticeLearningPathView extends ItemView {
         this.setConfigurations(),
         (setId, status) => {
           this.statuses.set(setId, status);
-          this.render();
+          this.refreshBatchProgress();
         },
         (setId, event) => {
           this.activity.set(setId, [...(this.activity.get(setId) ?? []), event].slice(-40));
+          this.refreshBatchActivity();
         },
       );
       this.generatedSets = result.map((set) => ({

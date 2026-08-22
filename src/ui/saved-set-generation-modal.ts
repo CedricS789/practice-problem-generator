@@ -116,6 +116,7 @@ export class SavedSetGenerationModal extends Modal {
     includeReviewFeedback: false,
   };
   private readonly occlusionEditors: OcclusionEditor[] = [];
+  private activityHost: HTMLElement | null = null;
 
   constructor(app: App, private readonly options: SavedSetGenerationModalOptions) {
     super(app);
@@ -140,6 +141,7 @@ export class SavedSetGenerationModal extends Modal {
 
   private render(): void {
     for (const editor of this.occlusionEditors.splice(0)) editor.unload();
+    this.activityHost = null;
     this.contentEl.empty();
     const heading = this.contentEl.createDiv({ cls: "practice-learning-path-set-modal-heading" });
     const icon = heading.createDiv();
@@ -177,7 +179,11 @@ export class SavedSetGenerationModal extends Modal {
     this.renderMix(this.contentEl);
     this.renderVisuals(this.contentEl);
     if (this.preview !== null) this.renderPayloadPreview(this.contentEl);
-    this.renderActivity(this.contentEl);
+    this.activityHost = this.contentEl.createDiv({
+      cls: "practice-learning-path-modal-activity",
+      attr: { "aria-live": "polite" },
+    });
+    this.renderActivity(this.activityHost);
     const problem = this.configurationProblem();
     if (problem !== null) {
       this.contentEl.createEl("p", { cls: "practice-lab-callout is-error", text: problem });
@@ -461,14 +467,20 @@ export class SavedSetGenerationModal extends Modal {
     if (this.options.visuals.length === 0) return;
     const section = this.section(container, "Durable visuals", "Choose which saved local snapshots this one set may send under neutral filenames.");
     const actions = section.createDiv({ cls: "practice-learning-path-actions" });
-    new ButtonComponent(actions).setButtonText("Select all images").setIcon("images").onClick(() => {
-      this.updateConfiguration({ selectedVisualIds: this.options.visuals.map((visual) => visual.id) });
-      this.render();
-    });
-    new ButtonComponent(actions).setButtonText("Clear selection").setIcon("image-off").onClick(() => {
-      this.updateConfiguration({ selectedVisualIds: [] });
-      this.render();
-    });
+    new ButtonComponent(actions)
+      .setIcon("images")
+      .setButtonText("Select all images")
+      .onClick(() => {
+        this.updateConfiguration({ selectedVisualIds: this.options.visuals.map((visual) => visual.id) });
+        this.render();
+      });
+    new ButtonComponent(actions)
+      .setIcon("image-off")
+      .setButtonText("Clear selection")
+      .onClick(() => {
+        this.updateConfiguration({ selectedVisualIds: [] });
+        this.render();
+      });
     const selected = new Set(this.request.configuration.selectedVisualIds);
     for (const visual of this.options.visuals) {
       new Setting(section)
@@ -645,6 +657,13 @@ export class SavedSetGenerationModal extends Modal {
     }
   }
 
+  private refreshActivity(): void {
+    const host = this.activityHost;
+    if (host === null) return;
+    host.replaceChildren();
+    this.renderActivity(host);
+  }
+
   private async previewPayload(): Promise<void> {
     if (this.busy !== null || this.configurationProblem() !== null) return;
     this.busy = "preview";
@@ -670,7 +689,7 @@ export class SavedSetGenerationModal extends Modal {
     try {
       const generated = await this.options.callbacks.generate(this.request, (event) => {
         this.activity = [...this.activity, event].slice(-50);
-        this.render();
+        this.refreshActivity();
       });
       this.generated = generated;
       this.exercises = generated.exercises.map((exercise) => structuredClone(exercise));

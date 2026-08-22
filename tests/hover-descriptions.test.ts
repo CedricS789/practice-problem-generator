@@ -49,7 +49,10 @@ test("even an accidentally unlabeled button receives a safe hover fallback", () 
 
 function lateIconsInButtonChains(source: string): readonly string[] {
   const lines = source.split(/\r?\n/u);
-  const lateIcons: string[] = [];
+  const lateIcons = Array.from(
+    source.matchAll(/\.setButtonText\([^\r\n]*\)\.setIcon\(/gu),
+    (match) => `same-line chain: ${match[0]}`,
+  );
   for (let index = 0; index < lines.length; index += 1) {
     if (!/^\s*\.setIcon\(/u.test(lines[index] ?? "")) continue;
     for (let previous = index - 1; previous >= 0; previous -= 1) {
