@@ -64,9 +64,27 @@ test("the full practice workspace defaults to a main tab with a sidebar opt-in",
   assert.match(mainSource, /this\.settings\.practiceViewLocation === "right-sidebar"/u);
   assert.match(
     mainSource,
-    /\? this\.app\.workspace\.getRightLeaf\(false\) \?\? this\.app\.workspace\.getLeaf\("tab"\)\s*: this\.app\.workspace\.getLeaf\("tab"\)/u,
+    /\? this\.app\.workspace\.getRightLeaf\(false\)\s*\?\? this\.app\.workspace\.getLeaf\("tab"\)\s*: this\.app\.workspace\.getLeaf\("tab"\)/u,
   );
-  assert.match(mainSource, /!Platform\.isMobileApp/u);
+  assert.match(mainSource, /if \(Platform\.isMobileApp\)/u);
+});
+
+test("mobile relocates persisted practice drawer leaves into the root workspace", () => {
+  assert.match(mainSource, /iterateRootLeaves\(\(candidate\) =>/u);
+  assert.match(
+    mainSource,
+    /existingLeaves\.find\(\(candidate\) => rootLeaves\.has\(candidate\)\)/u,
+  );
+  assert.match(
+    mainSource,
+    /await drawerLeaf\.view\.prepareForWorkspaceRelocation\(\)/u,
+  );
+  assert.match(mainSource, /for \(const drawerLeaf of drawerLeaves\) drawerLeaf\.detach\(\)/u);
+  assert.match(mainSource, /this\.app\.workspace\.requestSaveLayout\(\)/u);
+  assert.match(
+    viewSource,
+    /public async prepareForWorkspaceRelocation\(\): Promise<void>[\s\S]*await this\.flushStudyCheckpoint\(\)/u,
+  );
 });
 
 test("practice-bank storage exposes a guarded live path preview without moving existing banks", () => {

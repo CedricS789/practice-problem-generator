@@ -479,6 +479,12 @@ export class PracticeLabView extends ItemView {
     }
   }
 
+  public async prepareForWorkspaceRelocation(): Promise<void> {
+    if (this.stage === "study" && this.studyIndex < this.studyExercises.length) {
+      await this.flushStudyCheckpoint();
+    }
+  }
+
   public setSource(
     source: SourcePresentation,
     options: { readonly prepareDefaultVisuals?: boolean } = {},

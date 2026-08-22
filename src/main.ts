@@ -12,7 +12,8 @@ import {
   TFile,
   TFolder,
   type Editor,
-  type MarkdownPostProcessorContext
+  type MarkdownPostProcessorContext,
+  type WorkspaceLeaf,
 } from "obsidian";
 import {
   canRunAnswerReview,
@@ -2373,13 +2374,47 @@ export default class PracticeLabPlugin extends Plugin {
         void this.refreshProviders();
       }
     }
-    let leaf = this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)[0];
-    if (leaf === undefined) {
-      leaf = !Platform.isMobileApp
-        && this.settings.practiceViewLocation === "right-sidebar"
-        ? this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf("tab")
-        : this.app.workspace.getLeaf("tab");
-      await leaf.setViewState({ type: PRACTICE_LAB_VIEW_TYPE, active: true });
+    const existingLeaves = this.app.workspace.getLeavesOfType(
+      PRACTICE_LAB_VIEW_TYPE,
+    );
+    let leaf: WorkspaceLeaf | undefined;
+    if (Platform.isMobileApp) {
+      const rootLeaves = new Set<WorkspaceLeaf>();
+      this.app.workspace.iterateRootLeaves((candidate) => {
+        rootLeaves.add(candidate);
+      });
+      leaf = existingLeaves.find((candidate) => rootLeaves.has(candidate));
+      const drawerLeaves = existingLeaves.filter(
+        (candidate) => !rootLeaves.has(candidate),
+      );
+      for (const drawerLeaf of drawerLeaves) {
+        if (drawerLeaf.view instanceof PracticeLabView) {
+          await drawerLeaf.view.prepareForWorkspaceRelocation();
+        }
+      }
+      if (leaf === undefined) {
+        leaf = this.app.workspace.getLeaf("tab");
+        await leaf.setViewState({
+          type: PRACTICE_LAB_VIEW_TYPE,
+          active: true,
+        });
+      }
+      for (const drawerLeaf of drawerLeaves) drawerLeaf.detach();
+      if (drawerLeaves.length > 0) {
+        this.app.workspace.requestSaveLayout();
+      }
+    } else {
+      leaf = existingLeaves[0];
+      if (leaf === undefined) {
+        leaf = this.settings.practiceViewLocation === "right-sidebar"
+          ? this.app.workspace.getRightLeaf(false)
+            ?? this.app.workspace.getLeaf("tab")
+          : this.app.workspace.getLeaf("tab");
+        await leaf.setViewState({
+          type: PRACTICE_LAB_VIEW_TYPE,
+          active: true,
+        });
+      }
     }
     await this.app.workspace.revealLeaf(leaf);
     if (!(leaf.view instanceof PracticeLabView)) throw new Error("Practice Problem Generator view could not be opened.");
