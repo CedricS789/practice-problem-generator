@@ -4347,6 +4347,35 @@ button.practice-learning-path-mode-card {
   font-size: var(--font-ui-smaller);
 }
 
+.practice-learning-path-planning-progress {
+  display: grid;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-3);
+  padding: var(--size-4-3);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 42%, var(--practice-lab-border));
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--interactive-accent) 5%, var(--background-secondary));
+}
+
+.practice-learning-path-planning-progress-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+}
+
+.practice-learning-path-planning-progress > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.practice-learning-path-planning-progress > button {
+  justify-self: start;
+}
+
+.practice-learning-path-planning-activity:empty {
+  display: none;
+}
+
 /* Tutor lessons share the standard practice view and remain mobile-safe. */
 
 .practice-lab-tutor-lesson,

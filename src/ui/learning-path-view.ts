@@ -353,6 +353,7 @@ export class PracticeLearningPathView extends ItemView {
   private quickGenerationRecovery: GenerationRecoveryPresentation | null;
   private readonly expandedVisualSources = new Set<string>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
+  private blueprintActivityHost: HTMLElement | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -474,6 +475,7 @@ export class PracticeLearningPathView extends ItemView {
 
   private render(): void {
     this.clearOcclusionEditors();
+    this.blueprintActivityHost = null;
     this.contentEl.empty();
     this.contentEl.addClasses(["practice-lab", "practice-learning-path"]);
     const shell = this.contentEl.createDiv({ cls: "practice-learning-path-shell" });
@@ -705,8 +707,8 @@ export class PracticeLearningPathView extends ItemView {
 
     const actions = container.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "preview" ? "Preparing exact payload…" : "Preview planning payload")
       .setIcon("scan-eye")
+      .setButtonText(this.busy === "preview" ? "Preparing exact payload…" : "Preview planning payload")
       .setCta()
       .setDisabled(this.busy !== null)
       .onClick(() => void this.previewPlanningPayload());
@@ -727,13 +729,13 @@ export class PracticeLearningPathView extends ItemView {
     if (preview.warning !== undefined) section.createEl("p", { cls: "practice-lab-muted", text: preview.warning });
     const actions = section.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setButtonText(this.previewAccepted ? "Payload approved" : "Approve this payload")
       .setIcon(this.previewAccepted ? "check" : "shield-check")
+      .setButtonText(this.previewAccepted ? "Payload approved" : "Approve this payload")
       .setDisabled(this.previewAccepted || this.busy !== null)
       .onClick(() => { this.previewAccepted = true; this.render(); });
     new ButtonComponent(actions)
-      .setButtonText(this.busy === "blueprint" ? "Planning path…" : "Generate editable map")
       .setIcon("route")
+      .setButtonText(this.busy === "blueprint" ? "Planning path…" : "Generate editable map")
       .setCta()
       .setDisabled(
         !this.previewAccepted
@@ -741,6 +743,30 @@ export class PracticeLearningPathView extends ItemView {
         || this.quickGenerationRecovery !== null,
       )
       .onClick(() => void this.generateBlueprint());
+    if (this.busy === "blueprint") {
+      const progress = section.createDiv({
+        cls: "practice-learning-path-planning-progress",
+        attr: { role: "status", "aria-live": "polite" },
+      });
+      const heading = progress.createDiv({ cls: "practice-learning-path-planning-progress-heading" });
+      const spinner = heading.createSpan({ cls: "practice-lab-spinner" });
+      setIcon(spinner, "loader-circle");
+      heading.createEl("strong", { text: "Planner is working" });
+      progress.createEl("p", {
+        text: `${preview.providerLabel} is planning with ${preview.reasoningEffortLabel} reasoning and ${preview.visualNames.length} approved visual ${preview.visualNames.length === 1 ? "copy" : "copies"}. You can continue using Obsidian while this creation tab remains open.`,
+      });
+      this.blueprintActivityHost = progress.createDiv({
+        cls: "practice-learning-path-planning-activity",
+        attr: { "aria-live": "polite" },
+      });
+      this.refreshBlueprintActivity();
+      if (this.options.callbacks.cancelGeneration !== undefined) {
+        new ButtonComponent(progress)
+          .setButtonText("Cancel planning")
+          .setDestructive()
+          .onClick(() => void this.options.callbacks.cancelGeneration?.());
+      }
+    }
   }
 
   private renderMap(container: HTMLElement): void {
@@ -1850,6 +1876,13 @@ export class PracticeLearningPathView extends ItemView {
     for (const event of events) list.createEl("li", { text: `${event.phase}: ${event.message}` });
   }
 
+  private refreshBlueprintActivity(): void {
+    const host = this.blueprintActivityHost;
+    if (host === null) return;
+    host.replaceChildren();
+    this.renderActivity(host);
+  }
+
   private async choosePrimarySource(mode: "note" | "selection" | "pdf"): Promise<void> {
     if (this.busy !== null) return;
     this.busy = "source";
@@ -1925,6 +1958,7 @@ export class PracticeLearningPathView extends ItemView {
         this.blueprintConfiguration,
         (event) => {
           this.activity.set("blueprint", [...(this.activity.get("blueprint") ?? []), event].slice(-40));
+          this.refreshBlueprintActivity();
         },
       );
       this.blueprint = result;

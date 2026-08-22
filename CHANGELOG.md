@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.6
+
+- Restored visible labels on the guided planning actions instead of leaving ambiguous icon-only controls.
+- Added an explicit working panel, live in-place agent activity, and cancellation while the blueprint planner runs.
+
 ## 1.2.5
 
 - Kept Quick set available from Guided path before a primary source is selected, so switching modes cannot trap an empty creation workspace.

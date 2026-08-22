@@ -37,6 +37,24 @@ test("guided creation can always return to an empty quick set", () => {
   );
 });
 
+test("guided planning labels its actions and publishes live progress in place", () => {
+  assert.match(
+    guidedViewSource,
+    /\.setIcon\("scan-eye"\)\s+\.setButtonText\(this\.busy === "preview"/u,
+  );
+  assert.match(
+    guidedViewSource,
+    /\.setIcon\("route"\)\s+\.setButtonText\(this\.busy === "blueprint"/u,
+  );
+  assert.match(guidedViewSource, /text: "Planner is working"/u);
+  assert.match(guidedViewSource, /\.setButtonText\("Cancel planning"\)/u);
+  assert.match(
+    guidedViewSource,
+    /this\.activity\.set\("blueprint"[\s\S]*this\.refreshBlueprintActivity\(\);/u,
+  );
+  assert.match(stylesSource, /\.practice-learning-path-planning-progress/u);
+});
+
 test("mode switching reuses the current leaf and carries an approved source", () => {
   assert.match(
     mainSource,
