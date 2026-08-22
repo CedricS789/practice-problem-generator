@@ -1,4 +1,5 @@
 import {
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   LEGACY_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BLOCK_LANGUAGE,
@@ -8,6 +9,7 @@ import {
   type PracticeBankParseResult,
   type PracticeBankV1,
   type PracticeBankV2,
+  type PracticeBankV3,
   type ReviewedAiReviewStateV2,
   type SessionSummaryV2,
 } from "./model";
@@ -15,10 +17,20 @@ import {
   createAiReviewRequestHash,
   validatePracticeBank,
   validatePracticeBankV1,
+  validatePracticeBankV2,
+  validatePracticeBankV3,
 } from "./schema";
+import {
+  migratePracticeBankV2ToV3,
+  migrateSessionSummaryV2ToV3,
+  type PdfSourceScopeMigrationV1,
+} from "./learning-path";
 import { createSourceHash, sha256Hex } from "./segmenter";
 import {
+  generationRecipeCatalogFromLegacy,
   serializeGenerationRecipeFrontmatter,
+  serializeGenerationRecipeCatalogFrontmatter,
+  type GenerationRecipeCatalogV1,
   type GenerationRecipeV2,
 } from "./regeneration";
 import {
@@ -26,6 +38,7 @@ import {
   type GenerationHistoryV1,
 } from "./generation-history";
 import {
+  parseSourceImportMarkdown,
   serializeSourceImportFrontmatter,
   type SourceImportV1,
 } from "./source-import";
@@ -100,8 +113,8 @@ function yamlString(value: string): string {
   return JSON.stringify(value) ?? "undefined";
 }
 
-function formatValidationErrors(bank: PracticeBankV2): string {
-  const validation = validatePracticeBank(bank);
+function formatValidationErrors(bank: unknown): string {
+  const validation = validatePracticeBankV3(bank);
   if (validation.ok) return "";
   return validation.issues
     .map((issue) => `${issue.path}: ${issue.message}`)
@@ -109,16 +122,12 @@ function formatValidationErrors(bank: PracticeBankV2): string {
 }
 
 export function serializePracticeBank(
-  bank: PracticeBankV2,
+  bank: PracticeBankV1 | PracticeBankV2 | PracticeBankV3,
   generationRecipe?: GenerationRecipeV2,
   generationHistory?: GenerationHistoryV1,
   sourceImport?: SourceImportV1,
+  generationRecipeCatalog?: GenerationRecipeCatalogV1,
 ): string {
-  const errors = formatValidationErrors(bank);
-  if (errors.length > 0) {
-    throw new Error(`Cannot serialize an invalid Practice Problem Generator bank: ${errors}`);
-  }
-  const title = bank.source.title.replace(/[\r\n]+/gu, " ").trim();
   const pdfSource = /\.pdf$/iu.test(bank.source.vaultPath);
   if (pdfSource !== (sourceImport !== undefined)) {
     throw new Error(
@@ -130,26 +139,88 @@ export function serializePracticeBank(
   if (
     sourceImport !== undefined
     && (
-      sourceImport.sourceHash !== bank.source.hash
+      sourceImport.sourceHash !== (
+        bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+          ? (bank as PracticeBankV3).sourceMaterials.find((material) =>
+              material.role === "primary"
+            )?.sourceHash
+          : bank.source.hash
+      )
       || bank.source.scope !== "selection"
     )
   ) {
     throw new Error("The PDF source-import metadata does not match the practice bank.");
   }
-  const json = JSON.stringify(bank, null, 2);
+  const v2 = bank.schemaVersion === LEGACY_PRACTICE_BANK_SCHEMA_VERSION
+    ? migratePracticeBankV1ToV2(bank)
+    : bank;
+  const persisted = v2.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? structuredClone(v2)
+    : migratePracticeBankV2ToV3(v2, sourceImport);
+  const errors = formatValidationErrors(persisted);
+  if (errors.length > 0) {
+    throw new Error(`Cannot serialize an invalid Practice Problem Generator bank: ${errors}`);
+  }
+  const currentBank = persisted as PracticeBankV3;
+  const fallbackSetId = currentBank.practiceSets.some((set) => set.id === "set-general")
+    ? "set-general"
+    : [...currentBank.practiceSets].sort((left, right) => left.order - right.order)[0]?.id;
+  const catalog = generationRecipeCatalog ?? (
+    generationRecipe === undefined || fallbackSetId === undefined
+      ? undefined
+      : generationRecipeCatalogFromLegacy(fallbackSetId, {
+          status: "ok",
+          recipe: generationRecipe,
+          storedSchemaVersion: generationRecipe.schemaVersion,
+        })
+  );
+  const serializedCatalog = catalog === undefined
+    ? undefined
+    : serializeGenerationRecipeCatalogFrontmatter(catalog);
+  if (
+    catalog !== undefined
+    && Object.keys(catalog.recipesBySetId).some((setId) =>
+      !currentBank.practiceSets.some((set) => set.id === setId)
+    )
+  ) {
+    throw new Error("The generation recipe catalog references an unknown practice set.");
+  }
+  const catalogFallback = catalog === undefined
+    ? undefined
+    : [...currentBank.practiceSets]
+        .sort((left, right) => left.order - right.order)
+        .map((set) => catalog.recipesBySetId[set.id])
+        .find((recipe) => recipe !== undefined);
+  if (
+    generationRecipe !== undefined
+    && catalog !== undefined
+    && !Object.values(catalog.recipesBySetId).some((recipe) =>
+      canonicalJson(recipe) === canonicalJson(generationRecipe)
+    )
+  ) {
+    throw new Error("The legacy generation recipe fallback does not match any set-scoped recipe.");
+  }
+  const compatibleRecipe = catalog === undefined
+    ? generationRecipe
+    : generationRecipe ?? catalogFallback;
+  const title = persisted.source.title.replace(/[\r\n]+/gu, " ").trim();
+  const json = JSON.stringify(persisted, null, 2);
   return [
     "---",
     "practice-lab: true",
-    `practice-lab-version: ${PRACTICE_BANK_SCHEMA_VERSION}`,
-    `source: ${yamlString(bank.source.wikilink)}`,
-    `source-scope: ${bank.source.scope}`,
-    `source-hash: ${yamlString(bank.source.hash)}`,
-    `bank-id: ${yamlString(bank.bankId)}`,
-    `revision: ${bank.revision}`,
-    `updated: ${yamlString(bank.updatedAt)}`,
-    ...(generationRecipe === undefined
+    `practice-lab-version: ${CURRENT_PRACTICE_BANK_SCHEMA_VERSION}`,
+    `source: ${yamlString(persisted.source.wikilink)}`,
+    `source-scope: ${persisted.source.scope}`,
+    `source-hash: ${yamlString(persisted.source.hash)}`,
+    `bank-id: ${yamlString(persisted.bankId)}`,
+    `revision: ${persisted.revision}`,
+    `updated: ${yamlString(persisted.updatedAt)}`,
+    ...(compatibleRecipe === undefined
       ? []
-      : serializeGenerationRecipeFrontmatter(generationRecipe)),
+      : serializeGenerationRecipeFrontmatter(compatibleRecipe)),
+    ...(serializedCatalog === undefined
+      ? []
+      : [serializedCatalog]),
     ...(generationHistory === undefined
       ? []
       : [serializeGenerationHistoryFrontmatter(generationHistory)]),
@@ -227,7 +298,8 @@ export function parsePracticeBankMarkdown(
   }
   const version = (parsed as Record<string, unknown>).schemaVersion;
   if (
-    version !== PRACTICE_BANK_SCHEMA_VERSION
+    version !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    && version !== PRACTICE_BANK_SCHEMA_VERSION
     && version !== LEGACY_PRACTICE_BANK_SCHEMA_VERSION
   ) {
     if (version === undefined) {
@@ -247,7 +319,9 @@ export function parsePracticeBankMarkdown(
   }
   const validation = version === LEGACY_PRACTICE_BANK_SCHEMA_VERSION
     ? validatePracticeBankV1(parsed)
-    : validatePracticeBank(parsed);
+    : version === PRACTICE_BANK_SCHEMA_VERSION
+      ? validatePracticeBankV2(parsed)
+      : validatePracticeBankV3(parsed);
   if (!validation.ok) {
     return {
       status: "invalid",
@@ -258,12 +332,40 @@ export function parsePracticeBankMarkdown(
       rawJson,
     };
   }
-  const bank = version === LEGACY_PRACTICE_BANK_SCHEMA_VERSION
-    ? migratePracticeBankV1ToV2(validation.value as PracticeBankV1)
-    : validation.value as PracticeBankV2;
-  const warnings: string[] = version === LEGACY_PRACTICE_BANK_SCHEMA_VERSION
-    ? ["Stored schema version 1 was migrated in memory; the next authorized write will save version 2."]
-    : [];
+  const validated = validation.value;
+  const v2 = version === LEGACY_PRACTICE_BANK_SCHEMA_VERSION
+    ? migratePracticeBankV1ToV2(validated as PracticeBankV1)
+    : validated as PracticeBankV2;
+  let pdfScope: SourceImportV1 | undefined;
+  if (version !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION && /\.pdf$/iu.test(v2.source.vaultPath)) {
+    const sourceImport = parseSourceImportMarkdown(markdown);
+    if (sourceImport.status !== "ok") {
+      return {
+        status: "invalid",
+        errors: [sourceImport.status === "invalid"
+          ? `The legacy PDF provenance is invalid: ${sourceImport.message}`
+          : "The legacy PDF bank has no page-range provenance and cannot be migrated safely."],
+        recoveryMessage: READ_ONLY_RECOVERY,
+        rawJson,
+      };
+    }
+    pdfScope = sourceImport.sourceImport;
+  }
+  const bank = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? validated as PracticeBankV3
+    : migratePracticeBankV2ToV3(v2, pdfScope);
+  const migratedValidation = validatePracticeBankV3(bank);
+  if (!migratedValidation.ok) {
+    return {
+      status: "invalid",
+      errors: migratedValidation.issues.map((issue) => `${issue.path}: ${issue.message}`),
+      recoveryMessage: READ_ONLY_RECOVERY,
+      rawJson,
+    };
+  }
+  const warnings: string[] = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? []
+    : [`Stored schema version ${version} was migrated in memory; the next authorized write will save version 3.`];
   const frontmatterVersion = frontmatterValue(markdown, "practice-lab-version");
   if (
     frontmatterVersion !== undefined &&
@@ -278,7 +380,7 @@ export function parsePracticeBankMarkdown(
   if (frontmatterHash !== undefined && frontmatterHash !== bank.source.hash) {
     warnings.push("Frontmatter source hash does not match the fenced bank.");
   }
-  return { status: "ok", bank, storedSchemaVersion: version, warnings };
+  return { status: "ok", bank: migratedValidation.value, storedSchemaVersion: version, warnings };
 }
 
 /** Lossless structural migration; no history, timestamps, or revisions are changed. */
@@ -291,6 +393,13 @@ export function migratePracticeBankV1ToV2(bank: PracticeBankV1): PracticeBankV2 
       schemaVersion: PRACTICE_BANK_SCHEMA_VERSION,
     })),
   };
+}
+
+export function migratePracticeBankV1ToV3(
+  bank: PracticeBankV1,
+  pdf?: PdfSourceScopeMigrationV1,
+): PracticeBankV3 {
+  return migratePracticeBankV2ToV3(migratePracticeBankV1ToV2(bank), pdf);
 }
 
 export interface StaleSourceState {
@@ -370,16 +479,30 @@ export function mergeSessionSummary(
   session: SessionSummaryV2,
   options: SessionMergeOptions,
 ): SessionMergeResult {
+  if (bank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+    if (/\.pdf$/iu.test(bank.source.vaultPath)) {
+      return {
+        status: "conflict",
+        bank,
+        previousRevision: bank.revision,
+        message: "A legacy PDF bank must be loaded with its page-range provenance before mutation.",
+      };
+    }
+    bank = migratePracticeBankV2ToV3(bank);
+  }
   const previousRevision = bank.revision;
-  const existing = bank.sessions.find((item) => item.id === session.id);
+  const persistedSession = bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? migrateSessionSummaryV2ToV3(bank, session)
+    : session;
+  const existing = bank.sessions.find((item) => item.id === persistedSession.id);
   if (existing !== undefined) {
-    return sameSession(existing, session)
+    return sameSession(existing, persistedSession)
       ? { status: "unchanged", bank, previousRevision }
       : {
           status: "conflict",
           bank,
           previousRevision,
-          message: `Session ID ${session.id} already exists with different content.`,
+          message: `Session ID ${persistedSession.id} already exists with different content.`,
         };
   }
   if (!Number.isInteger(options.expectedRevision) || options.expectedRevision < 0) {
@@ -390,7 +513,7 @@ export function mergeSessionSummary(
       message: "Expected revision must be a non-negative integer.",
     };
   }
-  if (session.bankRevisionAtStart !== options.expectedRevision) {
+  if (persistedSession.bankRevisionAtStart !== options.expectedRevision) {
     return {
       status: "conflict",
       bank,
@@ -407,7 +530,7 @@ export function mergeSessionSummary(
       message: `Expected future revision ${options.expectedRevision}, but the bank is at ${bank.revision}.`,
     };
   }
-  const requestedUpdatedAt = options.updatedAt ?? session.finishedAt;
+  const requestedUpdatedAt = options.updatedAt ?? persistedSession.finishedAt;
   const requestedUpdatedTime = Date.parse(requestedUpdatedAt);
   const currentUpdatedTime = Date.parse(bank.updatedAt);
   const updatedAt =
@@ -420,7 +543,7 @@ export function mergeSessionSummary(
     ...bank,
     revision: bank.revision + 1,
     updatedAt,
-    sessions: [...bank.sessions, session],
+    sessions: [...bank.sessions, persistedSession],
   };
   const validation = validatePracticeBank(merged);
   if (!validation.ok) {
@@ -522,6 +645,17 @@ export function mergeAiReviewStateTransition(
   patch: AiReviewStateTransitionPatchV2,
   options: AiReviewMergeOptions = {},
 ): AiReviewMergeResult {
+  if (bank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+    if (/\.pdf$/iu.test(bank.source.vaultPath)) {
+      return {
+        status: "conflict",
+        bank,
+        previousRevision: bank.revision,
+        message: "A legacy PDF bank must be loaded with its page-range provenance before mutation.",
+      };
+    }
+    bank = migratePracticeBankV2ToV3(bank);
+  }
   const previousRevision = bank.revision;
   if (patch.bankId !== bank.bankId) {
     return {

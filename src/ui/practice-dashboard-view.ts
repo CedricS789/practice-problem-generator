@@ -10,10 +10,13 @@ import {
 
 import {
   aggregatePracticeDashboard,
+  countDashboardBanks,
   getDashboardScopeOptions,
   type DashboardBankRecord,
   type DashboardBankSummary,
   type DashboardFilter,
+  type DashboardLearningEvidenceRow,
+  type DashboardLearningPathSummary,
   type DashboardScope,
   type DashboardScopeOption,
   type PracticeDashboardSummary,
@@ -61,9 +64,16 @@ export interface PracticeDashboardViewOptions {
   };
   readonly load: () => Promise<PracticeDashboardSnapshot>;
   readonly startPractice: (record: DashboardBankRecord) => Promise<void> | void;
+  readonly continueLearning?: (record: DashboardBankRecord) => Promise<void> | void;
+  readonly chooseSet?: (record: DashboardBankRecord) => Promise<void> | void;
+  readonly mixedPractice?: (record: DashboardBankRecord) => Promise<void> | void;
+  readonly manageLearningPath?: (record: DashboardBankRecord) => Promise<void> | void;
   readonly openBank: (record: DashboardBankRecord) => Promise<void> | void;
   readonly openSource: (record: DashboardBankRecord) => Promise<void> | void;
   readonly regenerate?: (record: DashboardBankRecord) => Promise<void> | void;
+  readonly prepareOffline?: (
+    records: readonly DashboardBankRecord[],
+  ) => Promise<void> | void;
   readonly deleteBank?: (record: DashboardBankRecord) => Promise<void> | void;
 }
 
@@ -160,6 +170,22 @@ function folderAncestors(path: string): string[] {
 
 function scopeKind(scope: DashboardScope): PrimaryScopeKind {
   return scope.kind === "tag" ? "all" : scope.kind;
+}
+
+function startingLevelLabel(level: DashboardLearningPathSummary["startingLevel"]): string {
+  if (level === "new-to-topic") return "New to this topic";
+  if (level === "some-familiarity") return "Some familiarity";
+  return "Exam review";
+}
+
+function evidenceStateDescription(row: DashboardLearningEvidenceRow): string {
+  if (row.state === "Unpracticed") {
+    return "No scored independent evidence is available. Guided work does not change this label.";
+  }
+  if (row.state === "Consistent evidence") {
+    return "At least three scored independent attempts across two sessions with at least 80% weighted performance.";
+  }
+  return "Some scored independent evidence exists, but it does not yet meet the Consistent evidence threshold.";
 }
 
 export class PracticeDashboardView extends ItemView {
@@ -405,8 +431,17 @@ export class PracticeDashboardView extends ItemView {
       );
       return;
     }
+    if (this.options.prepareOffline !== undefined) {
+      const selectedPaths = new Set(summary.banks.map((bank) => bank.bankPath));
+      this.renderOfflinePreparation(snapshot.records.filter((record) =>
+        selectedPaths.has(record.bankPath.replace(/\\/gu, "/")),
+      ));
+    }
     const display = this.displayPreferences.dashboard;
     if (hasVisibleDashboardOverview(display)) this.renderMetrics(summary);
+    if (summary.learning.pathBankCount > 0) {
+      this.renderLearningPathAnalytics(summary, snapshot.records);
+    }
     if (
       display.showActivityHeatmap
       || display.showActivityTrend
@@ -427,6 +462,7 @@ export class PracticeDashboardView extends ItemView {
       && !display.showTypeBreakdown
       && !display.showRecentSessions
       && !display.showBankList
+      && summary.learning.pathBankCount === 0
     ) {
       this.contentEl.createEl("p", {
         cls: "practice-lab-muted",
@@ -435,16 +471,37 @@ export class PracticeDashboardView extends ItemView {
     }
   }
 
+  private renderOfflinePreparation(
+    records: readonly DashboardBankRecord[],
+  ): void {
+    const panel = this.contentEl.createDiv({
+      cls: "practice-lab-offline-preparation",
+    });
+    const copy = panel.createDiv();
+    copy.createEl("strong", { text: "Taking this practice offline?" });
+    copy.createEl("p", {
+      text: "Audit every bank in the current dashboard scope and every static image required by its occlusion questions.",
+    });
+    new ButtonComponent(panel)
+      .setButtonText("Prepare for offline practice")
+      .setIcon("cloud-off")
+      .setTooltip("Checks the currently filtered banks without contacting or configuring a sync service.")
+      .onClick(() => void this.runAction(
+        () => this.options.prepareOffline?.(records),
+        "Could not audit the selected practice banks.",
+      ));
+  }
+
   private contextualTagOptions(
     records: readonly DashboardBankRecord[],
     options: readonly DashboardScopeOption[],
   ): readonly DashboardScopeOption[] {
     return options.flatMap((option) => {
       if (option.scope.kind !== "tag") return [];
-      const count = aggregatePracticeDashboard(records, {
+      const count = countDashboardBanks(records, {
         primary: this.primary,
         tagPrefix: option.scope.tag,
-      }).bankCount;
+      });
       return count === 0 ? [] : [{ ...option, count }];
     });
   }
@@ -728,6 +785,273 @@ export class PracticeDashboardView extends ItemView {
     metric.createSpan({ cls: "practice-lab-dashboard-metric-label", text: label });
     metric.createEl("strong", { text: value });
     metric.createSpan({ cls: "practice-lab-dashboard-metric-note", text: note });
+  }
+
+  private renderLearningPathAnalytics(
+    summary: PracticeDashboardSummary,
+    records: readonly DashboardBankRecord[],
+  ): void {
+    const learning = summary.learning;
+    const section = this.dashboardSection(
+      "Guided learning paths",
+      "Independent attempts determine performance and evidence labels. Lessons, hints, and retries are reported separately and never create a schedule or inflate a score.",
+    );
+    const metrics = section.createDiv({ cls: "practice-lab-dashboard-metrics" });
+    this.dashboardMetric(
+      metrics,
+      "Independent performance",
+      percentText(learning.independentPerformancePercent),
+      `${learning.independentAttempts} scored independent ${learning.independentAttempts === 1 ? "attempt" : "attempts"}`,
+    );
+    this.dashboardMetric(
+      metrics,
+      "Guided lessons",
+      percentText(learning.lessonCompletionPercent),
+      `${learning.completedLessonCount} of ${learning.lessonCount} current lessons completed`,
+    );
+    this.dashboardMetric(
+      metrics,
+      "Source coverage",
+      percentText(learning.sourceCoveragePercent),
+      `${learning.coveredSourceSegmentCount} of ${learning.sourceSegmentCount} approved segments mapped to supported aspects`,
+    );
+    this.dashboardMetric(
+      metrics,
+      "Assistance used",
+      percentText(learning.assistanceRatePercent),
+      `${learning.assistedGuidedAttemptCount} of ${learning.guidedAttempts} guided attempts used a hint, retry, or repair`,
+    );
+    this.dashboardMetric(
+      metrics,
+      "Recovery after difficulty",
+      percentText(learning.recoveryRatePercent),
+      `${learning.recoveredCount} recovered · ${learning.unresolvedCount} unresolved`,
+    );
+
+    const evidenceStates = section.createDiv({ cls: "practice-lab-dashboard-bank-stats" });
+    evidenceStates.createSpan({
+      text: `${learning.consistentAspectCount} Consistent evidence`,
+      attr: {
+        title: "Each aspect has at least three scored independent attempts across two sessions and at least 80% weighted performance.",
+      },
+    });
+    evidenceStates.createSpan({
+      text: `${learning.developingAspectCount} Developing`,
+      attr: { title: "These aspects have some independent evidence but have not reached the consistency threshold." },
+    });
+    evidenceStates.createSpan({
+      text: `${learning.unpracticedAspectCount} Unpracticed`,
+      attr: { title: "These aspects have no scored independent evidence. Guided attempts are intentionally excluded." },
+    });
+    if (learning.unresolvedSourceGapCount > 0) {
+      evidenceStates.createSpan({
+        cls: "practice-lab-dashboard-warning",
+        text: `${learning.unresolvedSourceGapCount} unresolved source ${learning.unresolvedSourceGapCount === 1 ? "gap" : "gaps"}`,
+        attr: { title: "A source gap is an aspect the approved source bundle does not support." },
+      });
+    }
+
+    const list = section.createDiv({ cls: "practice-lab-dashboard-bank-list" });
+    for (const bank of summary.banks) {
+      const learningPath = bank.learningPath;
+      if (learningPath === null) continue;
+      const record = records.find((entry) => (
+        entry.bankPath.replace(/\\/gu, "/") === bank.bankPath
+      ));
+      this.renderLearningPathCard(list, bank, learningPath, record);
+    }
+  }
+
+  private renderLearningPathCard(
+    container: HTMLElement,
+    bank: DashboardBankSummary,
+    learning: DashboardLearningPathSummary,
+    record: DashboardBankRecord | undefined,
+  ): void {
+    const card = container.createDiv({ cls: "practice-lab-dashboard-bank" });
+    const heading = card.createDiv({ cls: "practice-lab-dashboard-bank-heading" });
+    const title = heading.createDiv();
+    title.createEl("h4", { text: learning.title });
+    title.createEl("p", { text: bank.sourceTitle });
+    heading.createSpan({
+      cls: "practice-lab-dashboard-tag",
+      text: startingLevelLabel(learning.startingLevel),
+      attr: { title: "The learner starting level selected when this guided path was approved." },
+    });
+
+    const status = card.createDiv({ cls: "practice-lab-dashboard-bank-stats" });
+    status.createSpan({ text: `${learning.setCount} practice ${learning.setCount === 1 ? "set" : "sets"}` });
+    status.createSpan({
+      text: `${learning.completedLessonCount}/${learning.lessonCount} lessons completed`,
+      attr: {
+        title: learning.remainingLessonTitles.length === 0
+          ? "Every current tutor lesson is complete."
+          : `Remaining: ${learning.remainingLessonTitles.join(", ")}`,
+      },
+    });
+    status.createSpan({
+      text: `${learning.sourceMaterialCount} approved source ${learning.sourceMaterialCount === 1 ? "item" : "items"}`,
+      attr: { title: "Only notes or PDF page ranges explicitly approved for this path are counted." },
+    });
+    status.createSpan({ text: `${learning.consistentAspectCount}/${learning.supportedAspectCount} aspects with Consistent evidence` });
+    status.createSpan({ text: `${learning.hintsRevealed} hints · ${learning.retries} retries` });
+
+    const coverageLabel = `${learning.title} source coverage: ${learning.coveredSourceSegmentCount} of ${learning.sourceSegmentCount} approved segments are referenced by supported aspects`;
+    this.performanceBar(card, learning.sourceCoveragePercent, coverageLabel);
+    card.createEl("p", {
+      cls: "practice-lab-dashboard-note",
+      text: `${percentText(learning.sourceCoveragePercent)} source coverage maps supported aspects to the explicitly approved bundle; it is not a claim that every source sentence needs a question.`,
+    });
+
+    if (learning.unresolvedSourceGapCount > 0) {
+      const gaps = card.createEl("details", {
+        cls: "practice-lab-dashboard-diagnostics",
+      });
+      gaps.createEl("summary", {
+        text: `${learning.unresolvedSourceGapCount} unresolved source ${learning.unresolvedSourceGapCount === 1 ? "gap" : "gaps"}`,
+        attr: {
+          "data-practice-lab-description": "Show aspects that the approved source bundle does not currently support.",
+        },
+      });
+      const gapList = gaps.createEl("ul");
+      for (const gap of learning.unresolvedSourceGapTitles) {
+        gapList.createEl("li", { text: gap });
+      }
+      gaps.createEl("p", {
+        text: "Resolve a gap by explicitly adding supporting material or remove it from the path. The plugin does not fill it from general knowledge.",
+      });
+    }
+
+    this.renderLearningRecommendation(card, learning, record);
+
+    const evidence = card.createEl("details", {
+      cls: "practice-lab-analytics-table-details",
+    });
+    evidence.createEl("summary", {
+      text: "View set and aspect evidence",
+      attr: {
+        "data-practice-lab-description": "Expand independent performance, guided assistance, and historical evidence for this path.",
+      },
+    });
+    evidence.createEl("p", {
+      cls: "practice-lab-dashboard-note",
+      text: "Unpracticed means no scored independent evidence. Developing means some evidence. Consistent evidence requires at least three independent attempts across two sessions with at least 80% weighted performance.",
+    });
+    this.renderLearningEvidenceTable(evidence, "Aspect evidence", "Aspect", learning.aspects);
+    this.renderLearningEvidenceTable(evidence, "Practice-set evidence", "Set", learning.sets);
+  }
+
+  private renderLearningRecommendation(
+    container: HTMLElement,
+    learning: DashboardLearningPathSummary,
+    record: DashboardBankRecord | undefined,
+  ): void {
+    const recommendation = learning.recommendation;
+    if (recommendation === null) {
+      container.createEl("p", {
+        cls: "practice-lab-dashboard-note",
+        text: "No next step is currently recommended. Current evidence may already satisfy each available step, or the path may have no supported next target. You can still open any set or lesson.",
+      });
+      return;
+    }
+    const card = container.createDiv({
+      cls: "practice-lab-dashboard-type-card",
+      attr: {
+        role: "note",
+        "aria-label": `Recommended next: ${recommendation.title}`,
+      },
+    });
+    card.createEl("strong", { text: `Recommended next: ${recommendation.title}` });
+    const reasons = card.createEl("ul");
+    for (const reason of recommendation.reasons) reasons.createEl("li", { text: reason });
+    card.createEl("p", {
+      text: "This recommendation is derived locally from prerequisites and independent evidence. It is guidance only: nothing is locked, scheduled, or due.",
+    });
+    const actions = card.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
+    if (record !== undefined && this.options.continueLearning !== undefined) {
+      new ButtonComponent(actions)
+        .setButtonText(recommendation.kind === "lesson" ? "Open recommended lesson" : "Start recommended set")
+        .setIcon(recommendation.kind === "lesson" ? "book-open" : "play")
+        .setTooltip("Open the current locally recommended path step. You remain free to choose any other lesson or set.")
+        .onClick(() => void this.runAction(
+          () => this.options.continueLearning?.(record),
+          "Could not open the recommended learning step.",
+        ));
+    }
+    new ButtonComponent(actions)
+      .setButtonText("Ignore for now")
+      .setIcon("x")
+      .setTooltip("Hide this suggestion until the dashboard is rendered again. No learning data is changed.")
+      .onClick(() => {
+        card.empty();
+        const status = card.createEl("p", {
+          text: "Recommendation hidden for this dashboard view. No learning data was changed.",
+          attr: { role: "status", tabindex: "-1" },
+        });
+        status.focus();
+      });
+  }
+
+  private renderLearningEvidenceTable(
+    container: HTMLElement,
+    caption: string,
+    nameLabel: string,
+    rows: readonly DashboardLearningEvidenceRow[],
+  ): void {
+    const heading = container.createEl("h5", { text: caption });
+    heading.title = `${caption} is calculated only from scored independent attempts; guided support is shown separately.`;
+    if (rows.length === 0) {
+      container.createEl("p", {
+        cls: "practice-lab-dashboard-empty-inline",
+        text: `No ${nameLabel.toLocaleLowerCase()} evidence is available.`,
+      });
+      return;
+    }
+    const scroll = container.createDiv({ cls: "practice-lab-table-scroll" });
+    const table = scroll.createEl("table");
+    table.createEl("caption", { text: caption });
+    const header = table.createTHead().insertRow();
+    for (const [label, description] of [
+      [nameLabel, `Current or historical ${nameLabel.toLocaleLowerCase()} name.`],
+      ["Evidence", "Transparent evidence state based only on scored independent work."],
+      ["Independent performance", "Weighted score from independent attempts; guided attempts are excluded."],
+      ["Independent attempts", "Scored independent attempts and the number of sessions containing them."],
+      ["Guided support", "Guided attempts, hints, retries, and explicit recovery outcomes."],
+    ] as const) {
+      const cell = header.createEl("th", { text: label, attr: { title: description } });
+      cell.scope = "col";
+    }
+    const body = table.createTBody();
+    for (const row of rows) {
+      const tableRow = body.insertRow();
+      const name = tableRow.insertCell();
+      name.createEl("strong", { text: row.title });
+      if (row.historicalOnly) {
+        name.createSpan({
+          text: " Historical",
+          attr: {
+            title: "This saved evidence belongs to a set or aspect that is no longer in the current path.",
+          },
+        });
+      }
+      tableRow.insertCell().createSpan({
+        text: row.state,
+        attr: { title: evidenceStateDescription(row) },
+      });
+      const performance = tableRow.insertCell();
+      performance.appendText(percentText(row.weightedPercent));
+      if (row.pendingReviewCount + row.failedReviewCount > 0) {
+        performance.createEl("small", {
+          text: ` · ${row.pendingReviewCount} pending · ${row.failedReviewCount} failed review`,
+        });
+      }
+      tableRow.insertCell().appendText(
+        `${row.independentAttempts} across ${row.independentSessionCount} ${row.independentSessionCount === 1 ? "session" : "sessions"}`,
+      );
+      tableRow.insertCell().appendText(
+        `${row.guidedAttempts} guided · ${row.hintsRevealed} hints · ${row.retries} retries · ${row.recoveredCount} recovered · ${row.unresolvedCount} unresolved`,
+      );
+    }
   }
 
   private renderActivityAnalytics(summary: PracticeDashboardSummary): void {
@@ -1279,15 +1603,43 @@ export class PracticeDashboardView extends ItemView {
     }
 
     const actions = card.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
-    new ButtonComponent(actions)
-      .setButtonText("Start practice")
+    if (record.bank.learningPath !== null && this.options.continueLearning !== undefined) {
+      new ButtonComponent(actions)
+        .setButtonText("Continue learning")
+        .setIcon("route")
+        .setCta()
+        .onClick(() => void this.runAction(
+          () => this.options.continueLearning?.(record),
+          "Could not continue this learning path.",
+        ));
+      if (this.options.chooseSet !== undefined) {
+        new ButtonComponent(actions)
+          .setButtonText("Choose a set")
+          .setIcon("list")
+          .onClick(() => void this.runAction(
+            () => this.options.chooseSet?.(record),
+            "Could not open the set chooser.",
+          ));
+      }
+      if (this.options.mixedPractice !== undefined) {
+        new ButtonComponent(actions)
+          .setButtonText("Mixed practice")
+          .setIcon("shuffle")
+          .onClick(() => void this.runAction(
+            () => this.options.mixedPractice?.(record),
+            "Could not start mixed practice.",
+          ));
+      }
+    }
+    const start = new ButtonComponent(actions)
+      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Practice all problems")
       .setIcon("play")
-      .setCta()
       .onClick(() => void this.runAction(
         () => this.options.startPractice(record),
         "Could not start this practice bank.",
       ));
-    if (this.options.regenerate !== undefined) {
+    if (record.bank.learningPath === null) start.setCta();
+    if (this.options.regenerate !== undefined && record.bank.learningPath === null) {
       const regenerate = new ButtonComponent(actions)
         .setButtonText("Regenerate / tweak")
         .setIcon("refresh-cw")
@@ -1296,6 +1648,15 @@ export class PracticeDashboardView extends ItemView {
         () => this.options.regenerate?.(record),
         "Could not prepare this bank for regeneration.",
       ));
+    }
+    if (record.bank.learningPath !== null && this.options.manageLearningPath !== undefined) {
+      new ButtonComponent(actions)
+        .setButtonText("Manage path")
+        .setIcon("settings-2")
+        .onClick(() => void this.runAction(
+          () => this.options.manageLearningPath?.(record),
+          "Could not open the learning-path manager.",
+        ));
     }
     new ButtonComponent(actions)
       .setButtonText("Open bank")

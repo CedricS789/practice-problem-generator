@@ -38,3 +38,33 @@ test("slider-driven zero shares retain intent and automatically return when slid
   assert.match(implementation, /preserveSliderIntent/u);
   assert.match(implementation, /will return automatically when you slide back/u);
 });
+
+test("configure uses a provider-aware model picker with an explicit custom fallback", () => {
+  const start = viewSource.indexOf("const modelSetting =");
+  const end = viewSource.indexOf('.setName("Number of exercises")', start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = viewSource.slice(start, end);
+  assert.match(implementation, /AUTOMATIC_MODEL_CHOICE/u);
+  assert.match(implementation, /CUSTOM_MODEL_CHOICE/u);
+  assert.match(implementation, /Custom model id…/u);
+  assert.match(implementation, /customModelInput\.hidden/u);
+  assert.match(implementation, /supportedReasoningEfforts/u);
+  assert.match(implementation, /configurationChanged\(\)/u);
+  assert.doesNotMatch(implementation, /this\.render\s*\(/u);
+});
+
+test("configure remembers model state per provider and records agy Automatic exactly", () => {
+  assert.match(viewSource, /modelsByProvider: Record<ProviderId, string>/u);
+  assert.match(viewSource, /customModelDraftsByProvider/u);
+  assert.match(viewSource, /this\.modelsByProvider\[this\.provider\] = this\.model/u);
+  assert.match(viewSource, /private effectiveModel\(\): string/u);
+  assert.match(viewSource, /automaticModelForProvider\("agy"/u);
+  assert.match(viewSource, /model: this\.effectiveModel\(\)/u);
+});
+
+test("background provider refresh defers a configure rebuild while a control is focused", () => {
+  assert.match(viewSource, /deferProviderUpdateWhileFocused\(providers\)/u);
+  assert.match(viewSource, /this\.contentEl\.ownerDocument\.activeElement/u);
+  assert.match(viewSource, /addEventListener\("focusout"/u);
+  assert.match(viewSource, /this\.renderPreservingScroll\(\)/u);
+});

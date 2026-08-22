@@ -14,6 +14,8 @@ import {
   validateOcclusionMasks,
   type OcclusionMaskCandidate,
 } from "../visuals";
+import { hasLatexMarkup, latexMarkupProblem } from "../latex";
+import { renderLatexMarkup } from "./latex-renderer";
 
 export interface OcclusionEditorOptions {
   readonly imageUrl: string;
@@ -411,6 +413,17 @@ export class OcclusionEditor extends Component {
       });
       setIcon(remove, "trash-2");
       remove.addEventListener("click", () => this.deleteMask(mask.id));
+      if (
+        hasLatexMarkup(mask.label)
+        || hasLatexMarkup(mask.answer)
+        || (mask.label.includes("$") && latexMarkupProblem(mask.label) !== null)
+        || (mask.answer.includes("$") && latexMarkupProblem(mask.answer) !== null)
+      ) {
+        const preview = row.createDiv({
+          cls: "practice-lab-mask-math-preview",
+        });
+        renderLatexMarkup(preview, `${mask.label} → ${mask.answer}`);
+      }
     }
   }
 

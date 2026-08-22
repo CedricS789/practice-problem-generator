@@ -4,6 +4,7 @@ import {
   type NormalizedRect,
 } from "./geometry";
 import type { GifFramePositionV1 } from "./model";
+import { latexMarkupProblem } from "./latex";
 
 export type VisualKind =
   | "static-image"
@@ -412,6 +413,14 @@ export function validateOcclusionMasks(
     ids.add(mask.id);
     if (mask.label.trim().length === 0) errors.push(`${location} has no label.`);
     if (mask.answer.trim().length === 0) errors.push(`${location} has no answer.`);
+    const labelLatexProblem = latexMarkupProblem(mask.label);
+    if (labelLatexProblem !== null) {
+      errors.push(`${location} label LaTeX: ${labelLatexProblem}`);
+    }
+    const answerLatexProblem = latexMarkupProblem(mask.answer);
+    if (answerLatexProblem !== null) {
+      errors.push(`${location} answer LaTeX: ${answerLatexProblem}`);
+    }
     if (!isNormalizedRect(mask, DEFAULT_MIN_MASK_SIZE)) {
       errors.push(`${location} is outside normalized image bounds.`);
     }

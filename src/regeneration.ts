@@ -17,6 +17,9 @@ import { modelIdProblem } from "./model-selection";
 
 export const LEGACY_GENERATION_RECIPE_VERSION = 1 as const;
 export const GENERATION_RECIPE_VERSION = 2 as const;
+export const GENERATION_RECIPE_CATALOG_VERSION = 1 as const;
+export const GENERATION_RECIPE_CATALOG_FRONTMATTER_KEY =
+  "practice-lab-generation-recipe-catalog";
 
 const RECIPE_FIELDS = {
   version: "practice-lab-generation-recipe",
@@ -52,6 +55,16 @@ export interface GenerationRecipeV2 {
   readonly focusInstructions: string;
   readonly exerciseTypePercentages: ExerciseTypePercentages;
 }
+
+export interface GenerationRecipeCatalogV1 {
+  readonly schemaVersion: typeof GENERATION_RECIPE_CATALOG_VERSION;
+  readonly recipesBySetId: Readonly<Record<string, GenerationRecipeV2>>;
+}
+
+export type GenerationRecipeCatalogParseResult =
+  | { readonly status: "missing" }
+  | { readonly status: "invalid"; readonly message: string }
+  | { readonly status: "ok"; readonly catalog: GenerationRecipeCatalogV1 };
 
 export type GenerationRecipeParseResult =
   | { readonly status: "missing" }
@@ -96,6 +109,107 @@ export function createGenerationRecipe(
   const problem = generationRecipeProblem(recipe);
   if (problem !== null) throw new Error(problem);
   return recipe;
+}
+
+export function emptyGenerationRecipeCatalog(): GenerationRecipeCatalogV1 {
+  return {
+    schemaVersion: GENERATION_RECIPE_CATALOG_VERSION,
+    recipesBySetId: {},
+  };
+}
+
+export function setGenerationRecipeForSet(
+  catalog: GenerationRecipeCatalogV1,
+  setId: string,
+  configuration: GenerationConfiguration,
+  sourceBundleHash: string,
+): GenerationRecipeCatalogV1 {
+  assertSetId(setId);
+  const problem = generationRecipeCatalogProblem(catalog);
+  if (problem !== null) throw new Error(problem);
+  const next: GenerationRecipeCatalogV1 = {
+    schemaVersion: GENERATION_RECIPE_CATALOG_VERSION,
+    recipesBySetId: {
+      ...catalog.recipesBySetId,
+      [setId]: createGenerationRecipe(configuration, sourceBundleHash),
+    },
+  };
+  const nextProblem = generationRecipeCatalogProblem(next);
+  if (nextProblem !== null) throw new Error(nextProblem);
+  return cloneRecipeCatalog(next);
+}
+
+export function generationRecipeForSet(
+  catalog: GenerationRecipeCatalogV1,
+  setId: string,
+): GenerationRecipeV2 | undefined {
+  const problem = generationRecipeCatalogProblem(catalog);
+  if (problem !== null) throw new Error(problem);
+  assertSetId(setId);
+  const recipe = catalog.recipesBySetId[setId];
+  return recipe === undefined ? undefined : cloneRecipe(recipe);
+}
+
+export function removeGenerationRecipeForSet(
+  catalog: GenerationRecipeCatalogV1,
+  setId: string,
+): GenerationRecipeCatalogV1 {
+  const problem = generationRecipeCatalogProblem(catalog);
+  if (problem !== null) throw new Error(problem);
+  assertSetId(setId);
+  const entries = Object.entries(catalog.recipesBySetId)
+    .filter(([candidate]) => candidate !== setId);
+  return cloneRecipeCatalog({
+    schemaVersion: GENERATION_RECIPE_CATALOG_VERSION,
+    recipesBySetId: Object.fromEntries(entries),
+  });
+}
+
+export function generationRecipeCatalogFromLegacy(
+  setId: string,
+  recipeResult: GenerationRecipeParseResult,
+): GenerationRecipeCatalogV1 {
+  assertSetId(setId);
+  return recipeResult.status === "ok"
+    ? {
+        schemaVersion: GENERATION_RECIPE_CATALOG_VERSION,
+        recipesBySetId: { [setId]: cloneRecipe(recipeResult.recipe) },
+      }
+    : emptyGenerationRecipeCatalog();
+}
+
+export function serializeGenerationRecipeCatalogFrontmatter(
+  catalog: GenerationRecipeCatalogV1,
+): string {
+  const problem = generationRecipeCatalogProblem(catalog);
+  if (problem !== null) {
+    throw new Error(`Cannot serialize an invalid generation recipe catalog: ${problem}`);
+  }
+  return `${GENERATION_RECIPE_CATALOG_FRONTMATTER_KEY}: ${yamlString(JSON.stringify(cloneRecipeCatalog(catalog)))}`;
+}
+
+export function parseGenerationRecipeCatalogMarkdown(
+  markdown: string,
+): GenerationRecipeCatalogParseResult {
+  const raw = frontmatterValue(markdown, GENERATION_RECIPE_CATALOG_FRONTMATTER_KEY);
+  if (raw === undefined) return { status: "missing" };
+  try {
+    const encoded = JSON.parse(raw) as unknown;
+    if (typeof encoded !== "string") throw new Error("Expected a quoted JSON string.");
+    const value = JSON.parse(encoded) as unknown;
+    const problem = generationRecipeCatalogProblem(value);
+    return problem === null
+      ? {
+          status: "ok",
+          catalog: cloneRecipeCatalog(value as GenerationRecipeCatalogV1),
+        }
+      : { status: "invalid", message: problem };
+  } catch {
+    return {
+      status: "invalid",
+      message: "The saved set-scoped generation recipes are malformed or incomplete.",
+    };
+  }
 }
 
 export function serializeGenerationRecipeFrontmatter(
@@ -337,6 +451,37 @@ function generationRecipeProblem(value: unknown): string | null {
   return exerciseTypeDistributionProblem(percentages);
 }
 
+function generationRecipeCatalogProblem(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "The generation recipe catalog must be an object.";
+  }
+  const catalog = value as Partial<GenerationRecipeCatalogV1>;
+  if (
+    Object.keys(catalog).some(
+      (key) => key !== "schemaVersion" && key !== "recipesBySetId",
+    )
+    || catalog.schemaVersion !== GENERATION_RECIPE_CATALOG_VERSION
+    || typeof catalog.recipesBySetId !== "object"
+    || catalog.recipesBySetId === null
+    || Array.isArray(catalog.recipesBySetId)
+  ) {
+    return "The generation recipe catalog version or shape is unsupported.";
+  }
+  const entries = Object.entries(catalog.recipesBySetId);
+  if (entries.length > 100) return "The generation recipe catalog is too large.";
+  let totalQuantity = 0;
+  for (const [setId, recipe] of entries) {
+    if (!isSetId(setId)) return `The generation recipe set ID ${JSON.stringify(setId)} is invalid.`;
+    const problem = generationRecipeProblem(recipe);
+    if (problem !== null) return `Generation recipe for ${setId}: ${problem}`;
+    totalQuantity += recipe.quantity;
+  }
+  if (totalQuantity > 60) {
+    return "Set-scoped generation recipes may request at most 60 exercises in total.";
+  }
+  return null;
+}
+
 function percentagesFromUnknown(value: unknown): ExerciseTypePercentages | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Readonly<Record<string, unknown>>;
@@ -364,6 +509,27 @@ function cloneRecipe(recipe: GenerationRecipeV2): GenerationRecipeV2 {
     ...recipe,
     exerciseTypePercentages: copyPercentages(recipe.exerciseTypePercentages),
   };
+}
+
+function cloneRecipeCatalog(
+  catalog: GenerationRecipeCatalogV1,
+): GenerationRecipeCatalogV1 {
+  return {
+    schemaVersion: GENERATION_RECIPE_CATALOG_VERSION,
+    recipesBySetId: Object.fromEntries(
+      Object.entries(catalog.recipesBySetId)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([setId, recipe]) => [setId, cloneRecipe(recipe)]),
+    ),
+  };
+}
+
+function assertSetId(value: string): void {
+  if (!isSetId(value)) throw new Error("The practice-set ID is invalid.");
+}
+
+function isSetId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(value);
 }
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {

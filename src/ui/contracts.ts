@@ -1,4 +1,5 @@
 import type { DetectedVisual, OcclusionMaskCandidate } from "../visuals";
+import type { StudySessionLearningProgressV1 } from "../study-checkpoint";
 import type { CliActivityEvent } from "../cli/contracts";
 import type {
   ExerciseV1,
@@ -8,6 +9,7 @@ import type {
 } from "../model";
 import type {
   PracticeLabDisplayPreferences,
+  StudyOrderSelection,
   StudyOrderDefault,
   VisualSelectionDefault,
 } from "../preferences";
@@ -27,6 +29,10 @@ export const EXERCISE_TYPES = [
 
 export type ExerciseType = ExerciseV1["type"];
 export type ProviderId = "codex" | "claude" | "agy";
+export type ProviderExecutionMode =
+  | "execute-now"
+  | "queue-for-desktop"
+  | "unavailable";
 export type Difficulty = "foundational" | "deep-exam" | "challenge";
 export type MarkdownSourceMode = "selection" | "note";
 export type SourceMode = MarkdownSourceMode | "pdf";
@@ -55,11 +61,23 @@ export interface ProviderPresentation {
   readonly id: ProviderId;
   readonly label: string;
   readonly available: boolean;
+  /** Where an AI request using this provider can run on the current device. */
+  readonly executionMode?: ProviderExecutionMode;
   readonly supportsVision: boolean;
   readonly reasoningEfforts: readonly ReasoningEffort[];
+  readonly models: readonly ProviderModelPresentation[];
   readonly version?: string;
   readonly defaultModel: string;
   readonly detail?: string;
+  readonly modelCatalogDetail?: string;
+}
+
+export interface ProviderModelPresentation {
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly defaultReasoningEffort?: ReasoningEffort;
+  readonly supportedReasoningEfforts?: readonly ReasoningEffort[];
 }
 
 export interface GenerationConfiguration {
@@ -82,6 +100,8 @@ export interface PracticeLabConfigurationDefaults {
   readonly gifFrameDefault?: GifFramePosition;
   readonly visualSelectionDefault?: VisualSelectionDefault;
   readonly studyOrderDefault?: StudyOrderDefault;
+  readonly studyTypeSequence?: readonly ExerciseType[];
+  readonly studyShuffleWithinTypesDefault?: boolean;
   readonly quantity?: number;
   readonly difficulty?: Difficulty;
   readonly exerciseTypes?: readonly ExerciseType[];
@@ -264,11 +284,55 @@ export interface StudyAnswerRecord {
   };
 }
 
+/**
+ * The editable state for the current question. Generic keyed fields keep the
+ * checkpoint contract stable across every objective and free-response type.
+ */
+export interface StudyCurrentInputStateV1 {
+  readonly exerciseId: string;
+  readonly fields: Readonly<Record<string, string>>;
+  readonly selectedIds: readonly string[];
+  readonly ordering: readonly string[];
+  readonly submitted: {
+    readonly answer: string;
+    readonly correct?: boolean;
+  } | null;
+}
+
+export interface StudySessionOriginV1 {
+  readonly bankPath: string;
+  readonly bankId: string;
+  readonly bankRevisionAtStart: number;
+  readonly exerciseCountAtStart: number;
+}
+
+/** The device-local, frequently persisted portion of an active study run. */
+export interface StudySessionProgressV1 extends StudySessionOriginV1 {
+  readonly sessionId: string;
+  readonly startedAt: string;
+  readonly orderedExerciseIds: readonly string[];
+  readonly currentQuestionIndex: number;
+  readonly answers: readonly StudyAnswerRecord[];
+  readonly currentInput: StudyCurrentInputStateV1 | null;
+  readonly answerReviewMode: AnswerReviewMode;
+  readonly answerReviewProvider: ProviderId;
+  readonly answerReviewReasoningEffort: ReasoningEffort;
+  readonly learningProgress?: StudySessionLearningProgressV1;
+}
+
 export interface FinishedStudySession {
   readonly id: string;
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly answers: readonly StudyAnswerRecord[];
+  readonly bankRevisionAtStart?: number;
+  readonly exerciseCountAtStart?: number;
+  readonly orderedExerciseIds?: readonly string[];
+  readonly learning?: {
+    readonly scope: StudySessionLearningProgressV1["scope"];
+    readonly evidence: StudySessionLearningProgressV1["evidence"];
+    readonly completedTutorLessons: StudySessionLearningProgressV1["completedTutorLessons"];
+  };
 }
 
 export interface GenerateRequest {
@@ -313,7 +377,17 @@ export interface PracticeLabCallbacks {
   readonly updateGifFrameDefault?: (
     position: GifFramePosition,
   ) => Promise<void> | void;
-  readonly enqueueAnswerReview?: (request: AnswerReviewRequest) => void;
+  readonly updateStudyOrderDefaults?: (
+    selection: StudyOrderSelection,
+  ) => Promise<void> | void;
+  readonly enqueueAnswerReview?: (
+    request: AnswerReviewRequest,
+  ) => Promise<void> | void;
+  /** Saves a device-local checkpoint; it never writes into the practice bank. */
+  readonly persistStudyCheckpoint?: (
+    progress: StudySessionProgressV1,
+  ) => Promise<void> | void;
+  readonly resolveStudySessionOrigin?: () => StudySessionOriginV1 | null;
   readonly retryAnswerReview?: (
     request: AnswerReviewRequest,
   ) => Promise<void> | void;
@@ -325,6 +399,11 @@ export interface PracticeLabCallbacks {
     source: SourcePresentation,
     session: FinishedStudySession,
   ) => Promise<void>;
+  /** Opens an editable, consent-first repair-set brief after the session saves. */
+  readonly buildRepairSet?: (
+    source: SourcePresentation,
+    session: FinishedStudySession,
+  ) => Promise<void> | void;
 }
 
 export interface PracticeLabViewOptions {

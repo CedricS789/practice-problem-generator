@@ -1,6 +1,32 @@
+import type { ExerciseV1 } from "./model";
+
 export type InterfaceDensity = "comfortable" | "compact";
 export type VisualSelectionDefault = "manual" | "all-local";
-export type StudyOrderDefault = "bank" | "shuffle";
+export type StudyOrderDefault =
+  | "bank"
+  | "shuffle"
+  | "shuffle-types"
+  | "type-sequence";
+export type StudyExerciseType = ExerciseV1["type"];
+
+export const DEFAULT_STUDY_TYPE_SEQUENCE: readonly StudyExerciseType[] = [
+  "short-answer",
+  "causal-explanation",
+  "application",
+  "calculation",
+  "cloze",
+  "single-select",
+  "multi-select",
+  "matching",
+  "ordering",
+  "image-occlusion",
+];
+
+export interface StudyOrderSelection {
+  readonly mode: StudyOrderDefault;
+  readonly typeSequence: readonly StudyExerciseType[];
+  readonly shuffleWithinTypes: boolean;
+}
 
 export interface PracticeViewPreferences {
   density: InterfaceDensity;
@@ -345,14 +371,62 @@ export function hasVisibleBankOverview(
     || preferences.showAiReviews;
 }
 
-export function orderStudyItems<T>(
+export function normalizeStudyTypeSequence(
+  value: unknown,
+): StudyExerciseType[] {
+  const allowed = new Set<StudyExerciseType>(DEFAULT_STUDY_TYPE_SEQUENCE);
+  const sequence: StudyExerciseType[] = [];
+  if (Array.isArray(value)) {
+    for (const candidate of value) {
+      if (
+        typeof candidate === "string"
+        && allowed.has(candidate as StudyExerciseType)
+        && !sequence.includes(candidate as StudyExerciseType)
+      ) {
+        sequence.push(candidate as StudyExerciseType);
+      }
+    }
+  }
+  for (const type of DEFAULT_STUDY_TYPE_SEQUENCE) {
+    if (!sequence.includes(type)) sequence.push(type);
+  }
+  return sequence;
+}
+
+export function orderStudyItems<T extends { readonly type: StudyExerciseType }>(
   values: readonly T[],
-  order: StudyOrderDefault,
+  selection: StudyOrderSelection,
   randomUint32: () => number = () =>
     crypto.getRandomValues(new Uint32Array(1))[0] ?? 0,
 ): T[] {
   const result = [...values];
-  if (order === "bank") return result;
+  if (selection.mode === "bank") return result;
+  if (selection.mode === "shuffle") return shuffledCopy(result, randomUint32);
+
+  const groups = new Map<StudyExerciseType, T[]>();
+  for (const item of result) {
+    const group = groups.get(item.type) ?? [];
+    group.push(item);
+    groups.set(item.type, group);
+  }
+  const presentTypes = normalizeStudyTypeSequence(selection.typeSequence)
+    .filter((type) => groups.has(type));
+  const orderedTypes = selection.mode === "shuffle-types"
+    ? shuffledCopy(presentTypes, randomUint32)
+    : presentTypes;
+  return orderedTypes.flatMap((type) => {
+    const group = groups.get(type) ?? [];
+    return selection.shuffleWithinTypes
+      ? shuffledCopy(group, randomUint32)
+      : [...group];
+  });
+}
+
+function shuffledCopy<T>(
+  values: readonly T[],
+  randomUint32: () => number,
+): T[] {
+  const result = [...values];
   for (let index = result.length - 1; index > 0; index -= 1) {
     const target = randomUint32() % (index + 1);
     [result[index], result[target]] = [result[target] as T, result[index] as T];

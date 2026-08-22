@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import test from "node:test";
+import { BaseCliProviderAdapter, type PreparedInvocation } from "../src/cli/base-adapter";
 import {
   AgyCliProviderAdapter,
   ClaudeCliProviderAdapter,
@@ -12,12 +13,15 @@ import {
   DesktopJobFileSystem,
   DesktopProcessRunner,
   appendNeutralMediaManifest,
+  cancelDurableRecovery,
   createCliProviderLayer,
   parseProviderOutput,
+  removeDurableRecovery,
   type CliJobFileSystem,
   type CliJobWorkspace,
   type CliProcessRunner,
   type CliProviderAdapter,
+  type DurableProcessHandle,
   type MediaInput,
   type NeutralMedia,
   type ProcessRunRequest,
@@ -42,6 +46,38 @@ function validateOk(value: unknown): boolean {
     "ok" in value &&
     typeof value.ok === "boolean"
   );
+}
+
+class SyntheticRecoverableAdapter extends BaseCliProviderAdapter {
+  readonly id = "codex" as const;
+  readonly label = "Synthetic";
+  readonly executable = process.execPath;
+  prepareCalls = 0;
+
+  capabilities(): ProviderCapabilities {
+    return {
+      text: true,
+      structuredOutput: true,
+      sandboxed: true,
+      vision: "supported",
+      reasoningEfforts: ["low", "medium", "high", "xhigh"],
+    };
+  }
+
+  protected async discoverModels(): Promise<{ readonly models: readonly [] }> {
+    return await Promise.resolve({ models: [] });
+  }
+
+  protected prepareInvocation(): PreparedInvocation {
+    this.prepareCalls += 1;
+    return {
+      args: [
+        "-e",
+        "setTimeout(()=>process.stdout.write(JSON.stringify({ok:true})),700);",
+      ],
+      stdin: "",
+    };
+  }
 }
 
 class QueueRunner implements CliProcessRunner {
@@ -691,8 +727,10 @@ test("missing executables are detected without throwing", async () => {
 test("provider detection preserves versions and capability state", async () => {
   const runner = new QueueRunner([
     { stdout: "codex-cli 0.146.0\n", stderr: "", exitCode: 0 },
+    { stdout: '{"models":[]}', stderr: "", exitCode: 0 },
     { stdout: "2.1.220\n", stderr: "", exitCode: 0 },
     { stdout: "agy version 1.1.11\n", stderr: "", exitCode: 0 },
+    { stdout: "", stderr: "", exitCode: 0 },
   ]);
   const layer = createCliProviderLayer({
     runner,
@@ -732,6 +770,14 @@ test("provider refresh waits for an active review and never overlaps CLI childre
           reportReviewStarted();
           await reviewReleased;
           return { stdout: '{"ok":true}', stderr: "", exitCode: 0 };
+        }
+        if (request.args[0] === "debug") {
+          assert.deepEqual(request.args, ["debug", "models", "--bundled"]);
+          return { stdout: '{"models":[]}', stderr: "", exitCode: 0 };
+        }
+        if (request.args[0] === "models") {
+          assert.deepEqual(request.args, ["models"]);
+          return { stdout: "", stderr: "", exitCode: 0 };
         }
         assert.deepEqual(request.args, ["--version"]);
         return {
@@ -785,7 +831,7 @@ test("provider refresh waits for an active review and never overlaps CLI childre
   );
   assert.deepEqual(
     runner.requests.slice(1).map((request) => request.executable),
-    ["codex", "claude", "agy"],
+    ["codex", "codex", "claude", "agy", "agy"],
   );
   assert.deepEqual(
     ownedJobs.map((job) => [job.kind, job.provider]),
@@ -968,6 +1014,215 @@ test("DesktopProcessRunner reports stdout and stderr incrementally", async () =>
   assert.ok(output.some((event) => event.stream === "stderr" && event.text.includes("second")));
 });
 
+test("a durable CLI process survives detachment and resumes the exact output", async () => {
+  const fileSystem = new DesktopJobFileSystem();
+  const job = await fileSystem.create();
+  const controller = new AbortController();
+  let handle: DurableProcessHandle | undefined;
+  const firstRunner = new DesktopProcessRunner();
+  const initial = firstRunner.run({
+    executable: process.execPath,
+    args: [
+      "-e",
+      "process.stdout.write('started\\n');setTimeout(()=>{process.stdout.write('finished\\n');},700);",
+    ],
+    cwd: job.absolutePath,
+    stdin: "",
+    timeoutMs: 5_000,
+    signal: controller.signal,
+    durable: {
+      mode: "start",
+      jobId: "generation-00000000-0000-4000-8000-000000000001",
+      attempt: 1,
+      onReady: async (value) => {
+        handle = value;
+        await Promise.resolve();
+      },
+    },
+  });
+  while (handle === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const detach = new Error("Synthetic plugin unload");
+  detach.name = "PracticeLabDetach";
+  controller.abort(detach);
+  await assert.rejects(
+    initial,
+    (error: unknown) =>
+      error instanceof CliProviderError && error.code === "detached",
+  );
+
+  const resumedEvents: string[] = [];
+  const resumed = await new DesktopProcessRunner().run({
+    executable: "unused-after-reattach",
+    args: [],
+    cwd: handle.workspacePath,
+    stdin: "",
+    timeoutMs: 5_000,
+    durable: { mode: "resume", handle },
+    onOutput: (event) => resumedEvents.push(event.text),
+  });
+  assert.equal(resumed.exitCode, 0);
+  assert.equal(resumed.durableAttempt, 1);
+  assert.match(resumed.stdout, /started[\s\S]*finished/u);
+  assert.match(resumedEvents.join(""), /finished/u);
+  await job.cleanup();
+});
+
+test("structured generation reattaches without launching a replacement provider turn", async () => {
+  const fileSystem = new DesktopJobFileSystem();
+  const adapter = new SyntheticRecoverableAdapter(
+    new DesktopProcessRunner(),
+    fileSystem,
+  );
+  const controller = new AbortController();
+  let handle: DurableProcessHandle | undefined;
+  const initial = adapter.generate({
+    prompt: "Synthetic approved prompt",
+    schema: SCHEMA,
+    validate: validateOk,
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    recovery: {
+      mode: "start",
+      jobId: "generation-00000000-0000-4000-8000-000000000003",
+      context: "{\"synthetic\":true}",
+      onReady: async (value) => {
+        handle = value;
+        await Promise.resolve();
+      },
+    },
+  });
+  while (handle === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const detach = new Error("Synthetic plugin unload");
+  detach.name = "PracticeLabDetach";
+  controller.abort(detach);
+  await assert.rejects(
+    initial,
+    (error: unknown) =>
+      error instanceof CliProviderError && error.code === "detached",
+  );
+
+  const resumedAdapter = new SyntheticRecoverableAdapter(
+    new DesktopProcessRunner(),
+    fileSystem,
+  );
+  const recovered = await resumedAdapter.generate({
+    prompt: "Synthetic approved prompt",
+    schema: SCHEMA,
+    validate: validateOk,
+    timeoutMs: 5_000,
+    recovery: { mode: "resume", handle },
+  });
+  assert.deepEqual(recovered.value, { ok: true });
+  assert.equal(recovered.attempts, 1);
+  assert.equal(recovered.recoveryHandle?.jobId, handle.jobId);
+  assert.equal(resumedAdapter.prepareCalls, 0);
+  await removeDurableRecovery(handle);
+});
+
+test("recovery launches an exact prepared request if Obsidian vanished before helper launch", async () => {
+  const job = await new DesktopJobFileSystem().create();
+  let handle: DurableProcessHandle | undefined;
+  await assert.rejects(
+    new DesktopProcessRunner().run({
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write('prepared-request-finished');"],
+      cwd: job.absolutePath,
+      stdin: "",
+      timeoutMs: 10_000,
+      durable: {
+        mode: "start",
+        jobId: "generation-00000000-0000-4000-8000-000000000006",
+        attempt: 1,
+        onReady: async (value) => {
+          handle = value;
+          throw new Error("Synthetic Obsidian exit before helper launch");
+        },
+      },
+    }),
+    /Synthetic Obsidian exit/iu,
+  );
+  if (handle === undefined) throw new Error("The synthetic recovery handle was not created.");
+  const startedAt = new Date(Date.now() - 10_000).toISOString();
+  const activePath = `${handle.workspacePath}/durable-active.json`;
+  const active = JSON.parse(readFileSync(activePath, "utf8")) as Record<string, unknown>;
+  active.startedAt = startedAt;
+  writeFileSync(activePath, `${JSON.stringify(active)}\n`, "utf8");
+  handle = { ...handle, startedAt };
+
+  const resumed = await new DesktopProcessRunner().run({
+    executable: "unused-after-reattach",
+    args: [],
+    cwd: handle.workspacePath,
+    stdin: "",
+    timeoutMs: 10_000,
+    durable: { mode: "resume", handle },
+  });
+  assert.equal(resumed.stdout, "prepared-request-finished");
+  await removeDurableRecovery(handle);
+});
+
+test("explicit durable recovery cancellation stops the helper and cleanup is idempotent", async () => {
+  const fileSystem = new DesktopJobFileSystem();
+  const job = await fileSystem.create();
+  let handle: DurableProcessHandle | undefined;
+  const running = new DesktopProcessRunner().run({
+    executable: process.execPath,
+    args: ["-e", "setInterval(()=>{},1000);"],
+    cwd: job.absolutePath,
+    stdin: "",
+    timeoutMs: 10_000,
+    durable: {
+      mode: "start",
+      jobId: "generation-00000000-0000-4000-8000-000000000004",
+      attempt: 1,
+      onReady: async (value) => {
+        handle = value;
+        await Promise.resolve();
+      },
+    },
+  });
+  while (handle === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  await cancelDurableRecovery(handle);
+  await assert.rejects(
+    running,
+    (error: unknown) =>
+      error instanceof CliProviderError && error.code === "cancelled",
+  );
+  await removeDurableRecovery(handle);
+  await removeDurableRecovery(handle);
+  assert.equal(existsSync(handle.workspacePath), false);
+});
+
+test("the detached helper enforces the durable deadline", async () => {
+  const fileSystem = new DesktopJobFileSystem();
+  const job = await fileSystem.create();
+  let handle: DurableProcessHandle | undefined;
+  await assert.rejects(
+    new DesktopProcessRunner().run({
+      executable: process.execPath,
+      args: ["-e", "setTimeout(()=>{},5000);"],
+      cwd: job.absolutePath,
+      stdin: "",
+      timeoutMs: 250,
+      durable: {
+        mode: "start",
+        jobId: "generation-00000000-0000-4000-8000-000000000005",
+        attempt: 1,
+        onReady: async (value) => {
+          handle = value;
+          await Promise.resolve();
+        },
+      },
+    }),
+    (error: unknown) =>
+      error instanceof CliProviderError && error.code === "timeout",
+  );
+  assert.notEqual(handle, undefined);
+  await removeDurableRecovery(handle!);
+});
+
 test("DesktopJobFileSystem uses an OS job directory and removes it", async () => {
   const fileSystem = new DesktopJobFileSystem();
   const job = await fileSystem.create();
@@ -1036,6 +1291,7 @@ class DeferredAdapter implements CliProviderAdapter {
       id: this.id,
       available: true,
       capabilities: this.capabilities(),
+      models: [],
     };
   }
 

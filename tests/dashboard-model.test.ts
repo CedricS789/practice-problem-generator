@@ -3,16 +3,19 @@ import test from "node:test";
 
 import {
   aggregatePracticeDashboard,
+  countDashboardBanks,
   getDashboardScopeOptions,
   type DashboardBankRecord,
   type DashboardScope,
 } from "../src/dashboard-model";
+import { migratePracticeBankV2ToV3 } from "../src/learning-path";
 import type {
   ExerciseV1,
   PracticeBankV2,
   AiReviewStateV2,
   SessionItemResultV2,
   SessionSummaryV2,
+  SessionSummaryV3,
 } from "../src/model";
 
 function shortAnswer(id: string): ExerciseV1 {
@@ -113,7 +116,7 @@ function record(options: RecordOptions): DashboardBankRecord {
   };
   return {
     bankPath: options.bankPath ?? `Practice/${options.bankId}.md`,
-    bank,
+    bank: migratePracticeBankV2ToV3(bank),
     sourceTags: options.tags ?? [],
     sourceExists: options.sourceExists ?? true,
   };
@@ -241,6 +244,10 @@ test("a tag facet combines with a folder and includes nested tags", () => {
     tagPrefix: "#EXAM/CLOSED-BOOK",
   });
   assert.equal(summary.bankCount, 1);
+  assert.equal(countDashboardBanks(records, {
+    primary: { kind: "folder", path: "Notes/Course" },
+    tagPrefix: "#EXAM/CLOSED-BOOK",
+  }), 1);
   assert.equal(summary.banks[0]?.bankId, "inside-match");
   assert.deepEqual(summary.filter, {
     primary: { kind: "folder", path: "Notes/Course" },
@@ -627,4 +634,224 @@ test("dashboard keeps pending AI reviews completed but outside provisional perfo
   assert.equal(summary.provisional, true);
   assert.equal(summary.typeBreakdown[0]?.answerCount, 1);
   assert.equal(summary.banks[0]?.pendingAiReviewCount, 1);
+});
+
+function guidedLearningRecord(): DashboardBankRecord {
+  const current = record({
+    bankId: "guided-bank",
+    sourcePath: "Notes/Guided source.md",
+    exercises: [
+      singleSelect("independent-1"),
+      singleSelect("guided-1"),
+    ],
+  });
+  current.bank.segments = [
+    {
+      id: "segment-1",
+      kind: "paragraph",
+      ordinal: 1,
+      headingPath: ["Supported"],
+      text: "Synthetic supported evidence.",
+    },
+    {
+      id: "segment-2",
+      kind: "paragraph",
+      ordinal: 2,
+      headingPath: ["Gap"],
+      text: "Synthetic boundary evidence.",
+    },
+  ];
+  current.bank.sourceMaterials = [{
+    id: "source-primary",
+    role: "primary",
+    vaultPath: current.bank.source.vaultPath,
+    wikilink: current.bank.source.wikilink,
+    title: current.bank.source.title,
+    sourceHash: current.bank.source.hash,
+    scope: { kind: "note" },
+    segmentIds: ["segment-1", "segment-2"],
+    visualIds: [],
+  }];
+  current.bank.aspects = [
+    {
+      id: "aspect-supported",
+      title: "Supported mechanism",
+      purpose: "Practice the supported mechanism.",
+      prerequisiteAspectIds: [],
+      sourceSegmentIds: ["segment-1"],
+      status: "supported",
+    },
+    {
+      id: "aspect-gap",
+      title: "Missing boundary condition",
+      purpose: "Requires another source.",
+      prerequisiteAspectIds: [],
+      sourceSegmentIds: ["segment-2"],
+      status: "source-gap",
+    },
+  ];
+  current.bank.practiceSets = [{
+    id: "set-foundations",
+    title: "Foundations",
+    purpose: "Establish the supported mechanism.",
+    instructionalRole: "foundations",
+    order: 0,
+    assignments: [
+      { exerciseId: "independent-1", aspectIds: ["aspect-supported"], role: "independent" },
+      { exerciseId: "guided-1", aspectIds: ["aspect-supported"], role: "guided-check" },
+    ],
+  }];
+  current.bank.tutorLessons = [{
+    id: "lesson-foundations",
+    title: "Build the mechanism",
+    objective: "Explain the mechanism from source evidence.",
+    aspectIds: ["aspect-supported"],
+    prerequisiteAspectIds: [],
+    guidedExerciseId: "guided-1",
+    teachingBlocks: [{
+      id: "block-why",
+      kind: "why",
+      title: "Why it matters",
+      content: "The mechanism connects the premise to the consequence.",
+      sourceSegmentIds: ["segment-1"],
+    }],
+    selfExplanationCheck: {
+      prompt: "Explain the mechanism.",
+      groundedAnswer: "The premise produces the consequence.",
+      keyPoints: ["Premise", "Consequence"],
+      sourceSegmentIds: ["segment-1"],
+    },
+    hints: [{
+      id: "hint-1",
+      level: 1,
+      text: "Start from the premise.",
+      sourceSegmentIds: ["segment-1"],
+    }],
+    repairExplanation: {
+      text: "Reconnect the premise to the consequence.",
+      sourceSegmentIds: ["segment-1"],
+    },
+  }];
+  current.bank.learningPath = {
+    id: "path-guided",
+    title: "Mechanism learning path",
+    startingLevel: "new-to-topic",
+    aspectIds: ["aspect-supported"],
+    steps: [
+      { kind: "lesson", lessonId: "lesson-foundations", order: 0 },
+      { kind: "practice-set", setId: "set-foundations", order: 1 },
+    ],
+  };
+  const learningSession: SessionSummaryV3 = {
+    schemaVersion: 3,
+    id: "session-guided",
+    startedAt: "2026-08-22T10:00:00.000Z",
+    finishedAt: "2026-08-22T10:05:00.000Z",
+    bankRevisionAtStart: 0,
+    exerciseCount: 2,
+    completedCount: 2,
+    score: { correct: 0, total: 2 },
+    ratings: { again: 0, hard: 0, good: 0, easy: 0 },
+    results: [
+      { exerciseId: "independent-1", grading: "objective", correct: false },
+      { exerciseId: "guided-1", grading: "objective", correct: false },
+    ],
+    scope: {
+      mode: "learning-path",
+      learningPath: { id: "path-guided", title: "Mechanism learning path" },
+      sets: [{ id: "set-foundations", title: "Foundations" }],
+    },
+    evidence: [
+      {
+        exerciseId: "independent-1",
+        set: { id: "set-foundations", title: "Foundations" },
+        aspects: [{ id: "aspect-supported", title: "Supported mechanism" }],
+        instructionalRole: "independent",
+        independent: true,
+        hintsRevealed: 0,
+        retries: 0,
+        recoveryOutcome: "not-needed",
+      },
+      {
+        exerciseId: "guided-1",
+        set: { id: "set-foundations", title: "Foundations" },
+        aspects: [{ id: "aspect-supported", title: "Supported mechanism" }],
+        instructionalRole: "guided-check",
+        independent: false,
+        hintsRevealed: 2,
+        retries: 1,
+        recoveryOutcome: "recovered",
+      },
+    ],
+    completedTutorLessons: [{
+      lesson: { id: "lesson-foundations", title: "Build the mechanism" },
+      aspects: [{ id: "aspect-supported", title: "Supported mechanism" }],
+    }],
+  };
+  current.bank.sessions = [learningSession];
+  return current;
+}
+
+test("dashboard reports transparent guided-path evidence, support, gaps, and recommendations", () => {
+  const summary = aggregatePracticeDashboard([guidedLearningRecord()], { kind: "all" });
+  const path = summary.banks[0]?.learningPath;
+  assert.ok(path !== null && path !== undefined);
+  assert.equal(path.independentAttempts, 1);
+  assert.equal(path.independentPerformancePercent, 0);
+  assert.equal(path.guidedAttempts, 1);
+  assert.equal(path.assistedGuidedAttemptCount, 1);
+  assert.equal(path.assistanceRatePercent, 100);
+  assert.equal(path.recoveredCount, 1);
+  assert.equal(path.unresolvedCount, 0);
+  assert.equal(path.recoveryRatePercent, 100);
+  assert.equal(path.lessonCompletionPercent, 100);
+  assert.equal(path.sourceCoveragePercent, 50);
+  assert.equal(path.unresolvedSourceGapCount, 1);
+  assert.deepEqual(path.unresolvedSourceGapTitles, ["Missing boundary condition"]);
+  assert.equal(path.aspects.length, 1, "source gaps are reported separately from evidence");
+  assert.equal(path.aspects[0]?.state, "Developing");
+  assert.equal(path.sets[0]?.weightedPercent, 0);
+  assert.equal(path.recommendation?.canIgnore, true);
+  assert.ok(path.recommendation?.reasonCodes.includes("repair"));
+
+  assert.equal(summary.learning.pathBankCount, 1);
+  assert.equal(summary.learning.developingAspectCount, 1);
+  assert.equal(summary.learning.consistentAspectCount, 0);
+  assert.equal(summary.learning.sourceCoveragePercent, 50);
+  assert.equal(summary.learning.assistanceRatePercent, 100);
+  assert.equal(summary.learning.recoveryRatePercent, 100);
+});
+
+test("migrated General practice banks keep rendering without guided-path analytics", () => {
+  const summary = aggregatePracticeDashboard([
+    record({ bankId: "legacy-general", sourcePath: "Notes/Legacy.md" }),
+  ], { kind: "all" });
+  assert.equal(summary.bankCount, 1);
+  assert.equal(summary.banks[0]?.problemCount, 1);
+  assert.equal(summary.banks[0]?.learningPath, null);
+  assert.deepEqual(summary.learning, {
+    pathBankCount: 0,
+    supportedAspectCount: 0,
+    unresolvedSourceGapCount: 0,
+    unpracticedAspectCount: 0,
+    developingAspectCount: 0,
+    consistentAspectCount: 0,
+    independentAttempts: 0,
+    independentEarnedPoints: 0,
+    independentPerformancePercent: null,
+    lessonCount: 0,
+    completedLessonCount: 0,
+    lessonCompletionPercent: null,
+    sourceSegmentCount: 0,
+    coveredSourceSegmentCount: 0,
+    sourceCoveragePercent: null,
+    guidedAttempts: 0,
+    assistedGuidedAttemptCount: 0,
+    assistanceRatePercent: null,
+    hintsRevealed: 0,
+    retries: 0,
+    recoveredCount: 0,
+    unresolvedCount: 0,
+    recoveryRatePercent: null,
+  });
 });

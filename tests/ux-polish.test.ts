@@ -68,8 +68,16 @@ test("study flow supports keyboard actions, honest completion labels, and instan
   assert.match(view, /Platform\.isMobileApp/u);
   assert.match(view, /"View results" : "Next question"/u);
   assert.match(view, /Save and practice again/u);
-  assert.match(view, /private async finishStudy\(practiceAgain: boolean\)/u);
+  assert.match(
+    view,
+    /private async finishStudy\(action: "save" \| "repeat" \| "repair"\)/u,
+  );
+  assert.match(view, /this\.finishStudy\("save"\)/u);
+  assert.match(view, /this\.finishStudy\("repeat"\)/u);
+  assert.match(view, /this\.finishStudy\("repair"\)/u);
   assert.match(view, /if \(source === null \|\| this\.studyFinishing\) return/u);
+  assert.match(view, /const practiceAgain = action === "repeat"/u);
+  assert.match(view, /const buildRepair = action === "repair"/u);
   assert.match(view, /this\.startStudy\(repeatExercises\)/u);
 });
 

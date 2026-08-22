@@ -2,6 +2,7 @@ import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 
 import type { ExerciseV1, ReasoningEffortV1, SelfRatingV1 } from "./model";
 import type { ProviderId, ValidationResult } from "./cli/contracts";
+import { latexMarkupProblem } from "./latex";
 
 export const ANSWER_REVIEW_SCHEMA_VERSION = 1 as const;
 export const ANSWER_REVIEW_PAYLOAD_DISCLOSURE =
@@ -217,6 +218,7 @@ export function buildAnswerReviewPrompt(input: AnswerReviewInput): string {
     "For every criterion, use only sourceSegmentIds listed below. Mark it met only when the submitted answer states the required idea accurately, partial when it is directionally correct but incomplete or imprecise, and missed when the required idea is absent or materially wrong.",
     "The overall verdict must be correct when every criterion is met, incorrect when every criterion is missed, and partial in every mixed or partly met case.",
     "Feedback must explain the outcome directly and briefly without exposing private reasoning.",
+    "When feedback contains mathematical notation, preserve or write it as valid LaTeX using $...$ inline or $$...$$ for display math. Balance every delimiter and brace, use no \\(...\\) or \\[...\\] delimiters, and JSON-escape LaTeX backslashes correctly.",
     "",
     "LOCKED REVIEW CONTEXT",
     JSON.stringify(lockedContext, null, 2),
@@ -252,6 +254,10 @@ export function validateAnswerReviewOutput(
   }
 
   const errors: string[] = [];
+  const feedbackLatexProblem = latexMarkupProblem(value.feedback);
+  if (feedbackLatexProblem !== null) {
+    errors.push(`/feedback: ${feedbackLatexProblem}`);
+  }
   if (value.requestId !== input.requestId) {
     errors.push("/requestId: must match the submitted request ID exactly");
   }
@@ -280,6 +286,10 @@ export function validateAnswerReviewOutput(
 
   const segmentIds = new Set(input.segments.map((segment) => segment.id));
   for (const [index, result] of value.criterionResults.entries()) {
+    const resultLatexProblem = latexMarkupProblem(result.feedback);
+    if (resultLatexProblem !== null) {
+      errors.push(`/criterionResults/${index}/feedback: ${resultLatexProblem}`);
+    }
     for (const segmentId of result.sourceSegmentIds) {
       if (!segmentIds.has(segmentId)) {
         errors.push(

@@ -1,10 +1,12 @@
 import type { EditableDraftExercise } from "./contracts";
 import { validateOcclusionMasks } from "../visuals";
+import { latexMarkupProblem } from "../latex";
 
 export interface ReviewGateState {
   readonly acceptedCount: number;
   readonly rejectedCount: number;
   readonly invalidContentCount: number;
+  readonly invalidLatexCount: number;
   readonly hasUnreviewedOcclusion: boolean;
   readonly currentFingerprint: string;
   readonly savedCurrent: boolean;
@@ -93,6 +95,12 @@ export function getReviewGateState(
       && (draft.prompt.trim().length === 0
         || draft.groundedAnswer.trim().length === 0),
   ).length;
+  const invalidLatexCount = drafts.filter(
+    (draft) =>
+      !draft.rejected
+      && (latexMarkupProblem(draft.prompt) !== null
+        || latexMarkupProblem(draft.groundedAnswer) !== null),
+  ).length;
   const hasUnreviewedOcclusion = drafts.some(
     (draft) =>
       !draft.rejected &&
@@ -105,11 +113,13 @@ export function getReviewGateState(
   const canSave =
     acceptedCount > 0
     && invalidContentCount === 0
+    && invalidLatexCount === 0
     && !hasUnreviewedOcclusion;
   return {
     acceptedCount,
     rejectedCount: drafts.length - acceptedCount,
     invalidContentCount,
+    invalidLatexCount,
     hasUnreviewedOcclusion,
     currentFingerprint,
     savedCurrent,

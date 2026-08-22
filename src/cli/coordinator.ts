@@ -147,6 +147,18 @@ export class CliJobCoordinator {
     return true;
   }
 
+  /** Stop polling a durable generation without terminating its local helper. */
+  detach(jobId?: string): boolean {
+    if (this.active === undefined) return false;
+    if (jobId !== undefined && this.active.identity.id !== jobId) return false;
+    const reason = new Error(
+      `Practice Problem Generator detached from ${this.active.identity.kind} ${this.active.identity.id}`,
+    );
+    reason.name = "PracticeLabDetach";
+    this.active.controller.abort(reason);
+    return true;
+  }
+
   subscribe(
     listener: (activeJob: CliJobIdentity | undefined) => void,
   ): () => void {

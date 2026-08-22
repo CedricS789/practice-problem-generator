@@ -6,9 +6,16 @@ import { PRACTICE_BANK_SCHEMA_VERSION } from "../src/model";
 import { serializePracticeBank } from "../src/persistence";
 import {
   createGenerationRecipe,
+  emptyGenerationRecipeCatalog,
+  generationRecipeCatalogFromLegacy,
+  generationRecipeForSet,
   inferExerciseTypePercentages,
+  parseGenerationRecipeCatalogMarkdown,
   parseGenerationRecipeMarkdown,
+  removeGenerationRecipeForSet,
   regenerationPreset,
+  serializeGenerationRecipeCatalogFrontmatter,
+  setGenerationRecipeForSet,
 } from "../src/regeneration";
 import { createSourceHash, segmentSource } from "../src/segmenter";
 import {
@@ -252,4 +259,79 @@ test("recipe parsing rejects permissive numeric prefixes instead of guessing", (
     status: "invalid",
     message: "The saved generation recipe is incomplete or malformed.",
   });
+});
+
+test("set-scoped recipe catalog round-trips exact provider, model, reasoning, focus, and mix", () => {
+  const bundleHash = `sha256:${"d".repeat(64)}`;
+  let catalog = setGenerationRecipeForSet(
+    emptyGenerationRecipeCatalog(),
+    "set-foundations",
+    configuration,
+    bundleHash,
+  );
+  catalog = setGenerationRecipeForSet(
+    catalog,
+    "set-transfer",
+    { ...configuration, quantity: 8, focusInstructions: "Focus on transfer." },
+    bundleHash,
+  );
+  const markdown = [
+    "---",
+    serializeGenerationRecipeCatalogFrontmatter(catalog),
+    "---",
+    "",
+  ].join("\n");
+  const parsed = parseGenerationRecipeCatalogMarkdown(markdown);
+  assert.deepEqual(parsed, { status: "ok", catalog });
+  assert.equal(generationRecipeForSet(catalog, "set-foundations")?.model, "gpt-5.6");
+  assert.equal(generationRecipeForSet(catalog, "set-transfer")?.reasoningEffort, "ultra");
+
+  const removed = removeGenerationRecipeForSet(catalog, "set-foundations");
+  assert.equal(generationRecipeForSet(removed, "set-foundations"), undefined);
+  assert.ok(generationRecipeForSet(removed, "set-transfer"));
+});
+
+test("legacy single-bank recipe can migrate into the General practice set catalog", () => {
+  const savedBank = bank();
+  const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
+  const catalog = generationRecipeCatalogFromLegacy("set-general", {
+    status: "ok",
+    recipe,
+    storedSchemaVersion: 2,
+  });
+  assert.deepEqual(generationRecipeForSet(catalog, "set-general"), recipe);
+  assert.deepEqual(
+    generationRecipeCatalogFromLegacy("set-general", { status: "missing" }),
+    emptyGenerationRecipeCatalog(),
+  );
+});
+
+test("recipe catalog rejects partial or oversized set recipes", () => {
+  assert.throws(
+    () => setGenerationRecipeForSet(
+      emptyGenerationRecipeCatalog(),
+      "unsafe set id",
+      configuration,
+      `sha256:${"e".repeat(64)}`,
+    ),
+    /set ID is invalid/iu,
+  );
+  let catalog = emptyGenerationRecipeCatalog();
+  for (const setId of ["set-1", "set-2", "set-3", "set-4", "set-5"]) {
+    catalog = setGenerationRecipeForSet(
+      catalog,
+      setId,
+      { ...configuration, quantity: 12 },
+      `sha256:${"e".repeat(64)}`,
+    );
+  }
+  assert.throws(
+    () => setGenerationRecipeForSet(
+      catalog,
+      "set-6",
+      { ...configuration, quantity: 1 },
+      `sha256:${"e".repeat(64)}`,
+    ),
+    /at most 60 exercises/iu,
+  );
 });

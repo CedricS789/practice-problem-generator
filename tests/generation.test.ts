@@ -68,6 +68,9 @@ test("generation prompt treats note content as untrusted and exposes exact segme
   assert.match(prompt, /Do not reveal reasoning or planning notes/);
   assert.match(prompt, /short-answer: Ask for a concise reconstruction/);
   assert.match(prompt, /short-answer: 100% => exactly 1 exercise/);
+  assert.match(prompt, /Use LaTeX for every learner-visible mathematical/u);
+  assert.match(prompt, /\$\.\.\.\$ for inline math and \$\$\.\.\.\$\$/u);
+  assert.match(prompt, /JSON-escape LaTeX backslashes correctly/u);
   assert.doesNotMatch(prompt, /C:\\|private-vault/);
 });
 
@@ -210,6 +213,17 @@ test("generation validation enforces exact quantity, enabled types, and source r
   });
   assert.equal(wrongCount.valid, false);
   assert.match(wrongCount.errors?.join(" ") ?? "", /exactly 1/);
+
+  const malformedLatex = validateGeneratedDraft({
+    schemaVersion: 1,
+    exercises: [{ ...shortAnswer(3), prompt: "Explain $V=IR." }],
+  }, {
+    source,
+    configuration: foundational,
+    visualIds: [],
+  });
+  assert.equal(malformedLatex.valid, false);
+  assert.match(malformedLatex.errors?.join(" ") ?? "", /Unclosed inline LaTeX/u);
 });
 
 test("generation validation enforces the user's exact percentage-derived counts", () => {

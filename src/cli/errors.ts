@@ -1,6 +1,7 @@
 export type CliErrorCode =
   | "busy"
   | "cancelled"
+  | "detached"
   | "timeout"
   | "missing-executable"
   | "process-failed"

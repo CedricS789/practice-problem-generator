@@ -20,10 +20,18 @@ import {
   reasoningEffortDescription,
 } from "../reasoning";
 import {
+  AUTOMATIC_MODEL_CHOICE,
   agyModelForReasoning,
+  agyReasoningEffortForModel,
   agyModelReasoningProblem,
+  automaticModelForProvider,
+  CUSTOM_MODEL_CHOICE,
   MAX_MODEL_ID_LENGTH,
+  modelPickerChoice,
   modelIdProblem,
+  modelsForProvider,
+  preferredReasoningEffort,
+  reasoningEffortsForModel,
 } from "../model-selection";
 import {
   balanceExerciseTypes,
@@ -44,6 +52,11 @@ import {
   MAX_FOCUS_INSTRUCTIONS_LENGTH,
 } from "../focus-instructions";
 import {
+  hasLatexMarkup,
+  latexMarkupProblem,
+  offsetIsInsideLatexMath,
+} from "../latex";
+import {
   calculatePerformanceScore,
   type PerformanceOutcome,
 } from "../session-statistics";
@@ -53,11 +66,34 @@ import {
   practiceRunRankText,
   type PracticeRunScore,
 } from "../practice-run";
+import type {
+  CompletedTutorLessonSnapshotV3,
+  SessionExerciseEvidenceV3,
+} from "../model";
 import {
+  completeGuidedLesson,
+  guidedAssistanceSummary,
+  recordIndependentAttempt,
+  recordRecoveryAttempt,
+  revealNextTeachingBlock,
+  revealNextTutorHint,
+  revealSelfExplanationAnswer,
+  revealTutorRepairExplanation,
+  submitSelfExplanation,
+  type GuidedAttemptOutcome,
+} from "../learning-study";
+import type {
+  StudyGuidedLessonCheckpointV1,
+  StudySessionLearningProgressV1,
+} from "../study-checkpoint";
+import {
+  DEFAULT_STUDY_TYPE_SEQUENCE,
   normalizeDisplayPreferences,
+  normalizeStudyTypeSequence,
   orderStudyItems,
   type PracticeLabDisplayPreferences,
   type StudyOrderDefault,
+  type StudyOrderSelection,
   type VisualSelectionDefault,
 } from "../preferences";
 import {
@@ -72,6 +108,8 @@ import {
 } from "./review-state";
 import { isGifVisual, selectAllVisuals } from "./visual-selection";
 import { presentStudyOcclusionVisual } from "./study-occlusion";
+import { chooseStudyOrder } from "./study-order-modal";
+import { renderLatexMarkup } from "./latex-renderer";
 import {
   applyAnswerReviewStatus as mergeAnswerReviewStatus,
   answerReviewVerdictRating,
@@ -100,14 +138,23 @@ import {
   type PracticeLabConfigurationDefaults,
   type PracticeLabViewOptions,
   type ProviderId,
+  type ProviderModelPresentation,
   type ProviderPresentation,
   type ReasoningEffort,
   type MarkdownSourceMode,
   type SourcePresentation,
   type StudyAnswerRecord,
+  type StudyCurrentInputStateV1,
+  type StudySessionOriginV1,
+  type StudySessionProgressV1,
 } from "./contracts";
 
 export const PRACTICE_LAB_VIEW_TYPE = "practice-lab-view";
+
+export interface LearningStudyLaunchV1 {
+  readonly progress: StudySessionLearningProgressV1;
+  readonly evidenceByExerciseId: readonly SessionExerciseEvidenceV3[];
+}
 
 type MainStage = "source" | "configure" | "review" | "study";
 
@@ -220,9 +267,12 @@ function studyPrompt(exercise: EditableDraftExercise): string {
   );
   return exercise.prompt.replace(
     /\{\{([^{}]+)\}\}/gu,
-    (_placeholder, id: string) => {
+    (_placeholder, id: string, offset: number) => {
       const number = ordinal.get(id);
-      return number === undefined ? "____" : `____ [blank ${number}]`;
+      if (number === undefined) return "____";
+      return offsetIsInsideLatexMath(exercise.prompt, offset)
+        ? `\\boxed{\\text{blank ${number}}}`
+        : `____ [blank ${number}]`;
     },
   );
 }
@@ -236,18 +286,49 @@ function occlusionGrading(masks: readonly OcclusionMaskCandidate[]) {
   };
 }
 
+function modelReasoningSummary(
+  efforts: readonly ReasoningEffort[] | undefined,
+): string {
+  return efforts === undefined || efforts.length === 0
+    ? "Uses the reasoning levels reported for this provider."
+    : `Reasoning: ${efforts.map(displayReasoningEffort).join(", ")}.`;
+}
+
 export class PracticeLabView extends ItemView {
   private stage: MainStage = "source";
   private source: SourcePresentation | null;
   private providers: readonly ProviderPresentation[];
   private provider: ProviderId;
   private model = "";
+  private readonly modelsByProvider: Record<ProviderId, string> = {
+    codex: "",
+    claude: "",
+    agy: "",
+  };
+  private readonly defaultModelsByProvider: Record<ProviderId, string> = {
+    codex: "",
+    claude: "",
+    agy: "",
+  };
+  private readonly customModelDraftsByProvider: Record<ProviderId, string> = {
+    codex: "",
+    claude: "",
+    agy: "",
+  };
+  private readonly customModelModeByProvider: Record<ProviderId, boolean> = {
+    codex: false,
+    claude: false,
+    agy: false,
+  };
   private reasoningEffort: ReasoningEffort = "medium";
   private focusInstructions = "";
   private defaultFocusInstructions = "";
   private gifFrameDefault: GifFramePosition = "middle";
   private visualSelectionDefault: VisualSelectionDefault = "manual";
   private studyOrderDefault: StudyOrderDefault = "bank";
+  private studyTypeSequence: ExerciseType[] = [...DEFAULT_STUDY_TYPE_SEQUENCE];
+  private studyShuffleWithinTypesDefault = false;
+  private studySetupOpen = false;
   private displayPreferences: PracticeLabDisplayPreferences;
   private payloadPreviewOpen = false;
   private quantity = 10;
@@ -279,6 +360,21 @@ export class PracticeLabView extends ItemView {
   private studyStartedAt = "";
   private studyAnswers: StudyAnswerRecord[] = [];
   private studySubmitted: { readonly correct?: boolean; readonly answer: string } | null = null;
+  private studyOrigin: StudySessionOriginV1 | null = null;
+  private studyLearningProgress: StudySessionLearningProgressV1 | null = null;
+  private readonly studyLearningEvidenceByExerciseId = new Map<
+    string,
+    SessionExerciseEvidenceV3
+  >();
+  private studyTutorProblemStarted = false;
+  private studyCurrentInput: StudyCurrentInputStateV1 | null = null;
+  private studyCheckpointTimer: number | undefined;
+  private studyCheckpointWarningShown = false;
+  private readonly handleDocumentVisibilityChange = (): void => {
+    if (document.visibilityState !== "hidden") return;
+    if (this.stage !== "study" || this.studyIndex >= this.studyExercises.length) return;
+    void this.flushStudyCheckpoint().catch(() => undefined);
+  };
   private answerReviewMode: AnswerReviewMode = "self";
   private answerReviewProvider: ProviderId = "codex";
   private answerReviewReasoningEffort: ReasoningEffort = "medium";
@@ -309,6 +405,9 @@ export class PracticeLabView extends ItemView {
   private sourceRequestMode: SourcePresentation["mode"] | null = null;
   private sourceRequestEpoch = 0;
   private providerRefreshBusy = false;
+  private providerRefreshRenderPending = false;
+  private pendingProviderPresentations: readonly ProviderPresentation[] | null = null;
+  private preserveNextProviderRender = false;
   private reviewSaving = false;
   private reviewSaveError: string | null = null;
   private studyFinishing = false;
@@ -323,6 +422,7 @@ export class PracticeLabView extends ItemView {
     this.navigation = false;
     this.source = options.initialSource ?? null;
     this.providers = [...options.providers];
+    this.updateProviderModelDefaults(this.providers, true);
     this.displayPreferences = normalizeDisplayPreferences(options.displayPreferences);
     this.payloadPreviewOpen = this.displayPreferences.practice.expandPayloadPreview;
     this.provider =
@@ -330,8 +430,8 @@ export class PracticeLabView extends ItemView {
         ?.id ??
       this.providers.find((provider) => provider.available)?.id ??
       "codex";
-    this.model = this.providers.find((provider) => provider.id === this.provider)
-      ?.defaultModel ?? "";
+    this.model = this.modelsByProvider[this.provider];
+    this.syncCustomModelState();
     this.answerReviewProvider = this.answerReviewDefaultProvider;
     this.ensureSupportedReasoningEffort();
   }
@@ -349,13 +449,31 @@ export class PracticeLabView extends ItemView {
   }
 
   public override async onOpen(): Promise<void> {
+    document.addEventListener(
+      "visibilitychange",
+      this.handleDocumentVisibilityChange,
+    );
     installHoverDescriptions(this.contentEl);
     this.render();
   }
 
   public override async onClose(): Promise<void> {
+    document.removeEventListener(
+      "visibilitychange",
+      this.handleDocumentVisibilityChange,
+    );
+    this.providerRefreshRenderPending = false;
+    this.pendingProviderPresentations = null;
     this.clearOcclusionEditors();
     this.clearActivityClock();
+    if (this.stage === "study" && this.studyIndex < this.studyExercises.length) {
+      try {
+        await this.flushStudyCheckpoint();
+      } catch {
+        // flushStudyCheckpoint already displayed the actionable warning.
+        return;
+      }
+    }
   }
 
   public setSource(
@@ -376,6 +494,9 @@ export class PracticeLabView extends ItemView {
     this.studyExercises = [];
     this.studyAnswers = [];
     this.studySubmitted = null;
+    this.studyOrigin = null;
+    this.studyCurrentInput = null;
+    this.clearStudyCheckpointTimer();
     this.pausedAnswerReviewIds.clear();
     this.savedDraftFingerprint = null;
     this.reviewSaving = false;
@@ -409,6 +530,39 @@ export class PracticeLabView extends ItemView {
     this.render();
   }
 
+  public prepareRecoveredGeneration(
+    source: SourcePresentation,
+    defaults: PracticeLabConfigurationDefaults,
+    recovery: {
+      readonly state: "idle" | "running" | "blocked" | "ready" | "failed";
+      readonly message?: string;
+    },
+    drafts?: readonly DraftExercisePresentation[],
+  ): void {
+    this.setSource(source);
+    const defaultFocusInstructions = this.defaultFocusInstructions;
+    this.setConfigurationDefaults(defaults);
+    this.defaultFocusInstructions = defaultFocusInstructions;
+    this.regenerationContext = recovery.state === "running"
+      ? "Resumed the exact detached CLI job after Obsidian restarted. The approved payload is unchanged."
+      : recovery.state === "ready"
+        ? "Recovered the validated draft and its exact approved generation context after an interruption."
+        : recovery.state === "blocked"
+          ? "The exact interrupted-generation context is preserved, but a required local source or visual must be restored before reattachment."
+        : "The approved interrupted-generation context is still available locally.";
+    this.job = recovery.state === "running"
+      ? { state: "running", message: recovery.message ?? "Resuming interrupted generation…" }
+      : recovery.state === "failed" || recovery.state === "blocked"
+        ? { state: "failed", message: recovery.message ?? "Interrupted generation recovery failed." }
+        : { state: "idle" };
+    if (drafts !== undefined) {
+      this.setDrafts(drafts);
+      return;
+    }
+    this.stage = "configure";
+    this.render();
+  }
+
   public setDrafts(drafts: readonly DraftExercisePresentation[]): void {
     this.drafts = drafts.map(editableDraft);
     this.savedDraftFingerprint = null;
@@ -422,9 +576,26 @@ export class PracticeLabView extends ItemView {
     this.render();
   }
 
+  public publishRecoveredGenerationActivity(event: CliActivityEvent): void {
+    if (this.generationActivityStartedAt === null) {
+      const occurredAt = Date.parse(event.occurredAt);
+      this.generationActivityStartedAt = Number.isFinite(occurredAt)
+        ? occurredAt
+        : Date.now();
+    }
+    this.job = { state: "running", message: "Resuming interrupted generation…" };
+    this.publishGenerationActivity(event);
+  }
+
   public setProviders(providers: readonly ProviderPresentation[]): void {
+    if (
+      this.stage === "configure"
+      && this.deferProviderUpdateWhileFocused(providers)
+    ) return;
     const previousProvider = this.provider;
+    this.modelsByProvider[this.provider] = this.model;
     this.providers = [...providers];
+    this.updateProviderModelDefaults(this.providers, false);
     this.provider =
       this.providers.find(
         (provider) => provider.id === this.provider && provider.available,
@@ -435,9 +606,9 @@ export class PracticeLabView extends ItemView {
       this.providers.find((provider) => provider.available)?.id ??
       "codex";
     if (this.provider !== previousProvider) {
-      this.model = this.providers.find((provider) => provider.id === this.provider)
-        ?.defaultModel ?? "";
+      this.model = this.modelsByProvider[this.provider];
     }
+    this.syncCustomModelState();
     this.ensureSupportedReasoningEffort();
     this.invalidatePreview();
     if (this.stage === "study") {
@@ -446,7 +617,43 @@ export class PracticeLabView extends ItemView {
       this.renderStudyCompletionAiFeedback();
       return;
     }
-    this.render();
+    if (this.preserveNextProviderRender) {
+      this.preserveNextProviderRender = false;
+      this.renderPreservingScroll();
+    } else {
+      this.render();
+    }
+  }
+
+  private deferProviderUpdateWhileFocused(
+    providers: readonly ProviderPresentation[],
+  ): boolean {
+    const active = this.contentEl.ownerDocument.activeElement;
+    if (active === null || !this.contentEl.contains(active)) return false;
+    this.pendingProviderPresentations = [...providers];
+    if (this.providerRefreshRenderPending) return true;
+    this.providerRefreshRenderPending = true;
+    const waitForBlur = (): void => {
+      this.contentEl.addEventListener("focusout", () => {
+        window.setTimeout(() => {
+          if (!this.providerRefreshRenderPending) return;
+          const nextActive = this.contentEl.ownerDocument.activeElement;
+          if (nextActive !== null && this.contentEl.contains(nextActive)) {
+            waitForBlur();
+            return;
+          }
+          this.providerRefreshRenderPending = false;
+          const pending = this.pendingProviderPresentations;
+          this.pendingProviderPresentations = null;
+          if (pending !== null) {
+            this.preserveNextProviderRender = true;
+            this.setProviders(pending);
+          }
+        }, 0);
+      }, { once: true });
+    };
+    waitForBlur();
+    return true;
   }
 
   public setDisplayPreferences(preferences: PracticeLabDisplayPreferences): void {
@@ -515,7 +722,13 @@ export class PracticeLabView extends ItemView {
     defaults: PracticeLabConfigurationDefaults,
   ): void {
     if (defaults.provider !== undefined) this.provider = defaults.provider;
-    if (defaults.model !== undefined) this.model = defaults.model;
+    if (defaults.model !== undefined) {
+      this.model = defaults.model;
+      this.modelsByProvider[this.provider] = this.model;
+      this.syncCustomModelState();
+    } else {
+      this.model = this.modelsByProvider[this.provider];
+    }
     if (defaults.reasoningEffort !== undefined) {
       this.reasoningEffort = defaults.reasoningEffort;
     }
@@ -534,6 +747,15 @@ export class PracticeLabView extends ItemView {
     }
     if (defaults.studyOrderDefault !== undefined) {
       this.studyOrderDefault = defaults.studyOrderDefault;
+    }
+    if (defaults.studyTypeSequence !== undefined) {
+      this.studyTypeSequence = normalizeStudyTypeSequence(
+        defaults.studyTypeSequence,
+      );
+    }
+    if (defaults.studyShuffleWithinTypesDefault !== undefined) {
+      this.studyShuffleWithinTypesDefault =
+        defaults.studyShuffleWithinTypesDefault;
     }
     if (defaults.quantity !== undefined && Number.isFinite(defaults.quantity)) {
       this.quantity = Math.min(30, Math.max(1, Math.round(defaults.quantity)));
@@ -576,6 +798,8 @@ export class PracticeLabView extends ItemView {
 
   public startStudy(
     exercises?: readonly DraftExercisePresentation[],
+    origin?: StudySessionOriginV1,
+    learning?: LearningStudyLaunchV1,
   ): void {
     if (this.source === null) {
       new Notice("Load the source note before starting a practice session.");
@@ -593,35 +817,188 @@ export class PracticeLabView extends ItemView {
     }
     const selectedExercises =
       exercises ?? this.drafts.filter((draft) => !draft.rejected);
-    const orderedExercises = this.studyOrderDefault === "shuffle"
-      ? orderStudyItems(selectedExercises, "shuffle")
-      : [...selectedExercises];
-    this.studyExercises = orderedExercises.map((exercise) => ({
+    if (selectedExercises.length === 0) {
+      new Notice("There are no approved exercises to study.");
+      return;
+    }
+    if (this.studySetupOpen) {
+      new Notice("The session setup dialog is already open.");
+      return;
+    }
+    void this.configureAndStartStudy([...selectedExercises], origin, learning);
+  }
+
+  private async configureAndStartStudy(
+    selectedExercises: readonly DraftExercisePresentation[],
+    origin?: StudySessionOriginV1,
+    learning?: LearningStudyLaunchV1,
+  ): Promise<void> {
+    this.studySetupOpen = true;
+    try {
+      const result = await chooseStudyOrder(this.app, {
+        itemTypes: selectedExercises.map((exercise) => exercise.type),
+        defaults: {
+          mode: this.studyOrderDefault,
+          typeSequence: this.studyTypeSequence,
+          shuffleWithinTypes: this.studyShuffleWithinTypesDefault,
+        },
+        labels: EXERCISE_LABELS,
+      });
+      if (result === null) return;
+
+      const selection: StudyOrderSelection = {
+        mode: result.mode,
+        typeSequence: normalizeStudyTypeSequence(result.typeSequence),
+        shuffleWithinTypes: result.shuffleWithinTypes,
+      };
+      if (result.rememberAsDefault) {
+        this.studyOrderDefault = selection.mode;
+        this.studyTypeSequence = [...selection.typeSequence];
+        this.studyShuffleWithinTypesDefault = selection.shuffleWithinTypes;
+        try {
+          await this.options.callbacks.updateStudyOrderDefaults?.(selection);
+        } catch (error) {
+          new Notice(this.errorMessage(
+            error,
+            "Could not save the study-order defaults. This session will still start.",
+          ));
+        }
+      }
+
+      const orderedExercises = orderStudyItems(selectedExercises, selection);
+      this.studyExercises = orderedExercises.map((exercise) => ({
+        ...editableDraft(exercise),
+        rejected: false,
+        occlusionReviewed: true,
+      }));
+      this.studyIndex = 0;
+      this.studySessionId = `session-${crypto.randomUUID()}`;
+      this.studyStartedAt = new Date().toISOString();
+      this.studyAnswers = [];
+      this.studySubmitted = null;
+      this.studyOrigin = origin
+        ?? this.options.callbacks.resolveStudySessionOrigin?.()
+        ?? null;
+      this.studyLearningProgress = learning === undefined
+        ? null
+        : structuredClone(learning.progress);
+      this.studyLearningEvidenceByExerciseId.clear();
+      for (const evidence of learning?.evidenceByExerciseId ?? []) {
+        this.studyLearningEvidenceByExerciseId.set(
+          evidence.exerciseId,
+          structuredClone(evidence),
+        );
+      }
+      this.studyTutorProblemStarted = false;
+      this.studyFinishing = false;
+      this.studyFinishError = null;
+      this.pausedAnswerReviewIds.clear();
+      this.answerReviewActivityLogs.clear();
+      this.answerReviewMode =
+        this.options.callbacks.enqueueAnswerReview === undefined
+          ? "self"
+          : this.answerReviewDefaultMode;
+      this.answerReviewProvider = this.answerReviewDefaultProvider;
+      this.answerReviewReasoningEffort = this.answerReviewDefaultReasoningEffort;
+      this.stage = "study";
+      this.resetOrderingState();
+      this.resetStudyCurrentInput();
+      try {
+        await this.persistStudyCheckpoint();
+      } catch (error) {
+        this.stage = "review";
+        this.studyOrigin = null;
+        this.studyLearningProgress = null;
+        this.studyLearningEvidenceByExerciseId.clear();
+        this.studyCurrentInput = null;
+        new Notice(this.errorMessage(
+          error,
+          "Could not create the crash-safe study checkpoint, so the session was not started.",
+        ));
+        this.render();
+        return;
+      }
+      this.render();
+    } finally {
+      this.studySetupOpen = false;
+    }
+  }
+
+  public restoreStudy(
+    exercises: readonly DraftExercisePresentation[],
+    progress: StudySessionProgressV1,
+    evidenceByExerciseId: readonly SessionExerciseEvidenceV3[] = [],
+  ): void {
+    const orderedIds = exercises.map((exercise) => exercise.id);
+    if (JSON.stringify(orderedIds) !== JSON.stringify(progress.orderedExerciseIds)) {
+      throw new Error("The recovered exercise order does not match its saved checkpoint.");
+    }
+    if (
+      progress.currentQuestionIndex < 0
+      || progress.currentQuestionIndex > exercises.length
+      || progress.answers.length !== progress.currentQuestionIndex
+    ) {
+      throw new Error("The recovered study position is invalid.");
+    }
+    this.clearStudyCheckpointTimer();
+    this.studyExercises = exercises.map((exercise) => ({
       ...editableDraft(exercise),
       rejected: false,
       occlusionReviewed: true,
     }));
-    if (this.studyExercises.length === 0) {
-      new Notice("There are no approved exercises to study.");
-      return;
+    this.studyOrigin = {
+      bankPath: progress.bankPath,
+      bankId: progress.bankId,
+      bankRevisionAtStart: progress.bankRevisionAtStart,
+      exerciseCountAtStart: progress.exerciseCountAtStart,
+    };
+    this.studyLearningProgress = progress.learningProgress === undefined
+      ? null
+      : structuredClone(progress.learningProgress);
+    this.studyLearningEvidenceByExerciseId.clear();
+    for (const evidence of [
+      ...evidenceByExerciseId,
+      ...(progress.learningProgress?.evidence ?? []),
+    ]) {
+      this.studyLearningEvidenceByExerciseId.set(
+        evidence.exerciseId,
+        structuredClone(evidence),
+      );
     }
-    this.studyIndex = 0;
-    this.studySessionId = `session-${crypto.randomUUID()}`;
-    this.studyStartedAt = new Date().toISOString();
-    this.studyAnswers = [];
-    this.studySubmitted = null;
+    this.studyTutorProblemStarted = false;
+    this.studySessionId = progress.sessionId;
+    this.studyStartedAt = progress.startedAt;
+    this.studyIndex = progress.currentQuestionIndex;
+    this.studyAnswers = progress.answers.map((answer) => structuredClone(answer));
+    this.studyCurrentInput = structuredClone(progress.currentInput);
+    this.studySubmitted = structuredClone(progress.currentInput?.submitted ?? null);
+    this.answerReviewMode = progress.answerReviewMode;
+    this.answerReviewProvider = progress.answerReviewProvider;
+    this.answerReviewReasoningEffort = progress.answerReviewReasoningEffort;
+    this.orderingState = progress.currentInput?.ordering !== undefined
+      ? [...progress.currentInput.ordering]
+      : [];
     this.studyFinishing = false;
     this.studyFinishError = null;
-    this.pausedAnswerReviewIds.clear();
-    this.answerReviewActivityLogs.clear();
-    this.answerReviewMode =
-      this.options.callbacks.enqueueAnswerReview === undefined
-        ? "self"
-        : this.answerReviewDefaultMode;
-    this.answerReviewProvider = this.answerReviewDefaultProvider;
-    this.answerReviewReasoningEffort = this.answerReviewDefaultReasoningEffort;
+    this.studyCheckpointWarningShown = false;
     this.stage = "study";
-    this.resetOrderingState();
+    this.render();
+  }
+
+  public discardStudySession(): void {
+    this.clearStudyCheckpointTimer();
+    this.studyExercises = [];
+    this.studyAnswers = [];
+    this.studyIndex = 0;
+    this.studySessionId = "";
+    this.studyStartedAt = "";
+    this.studySubmitted = null;
+    this.studyCurrentInput = null;
+    this.studyOrigin = null;
+    this.studyLearningProgress = null;
+    this.studyLearningEvidenceByExerciseId.clear();
+    this.studyTutorProblemStarted = false;
+    this.stage = this.drafts.length > 0 ? "review" : "source";
     this.render();
   }
 
@@ -1037,6 +1414,8 @@ export class PracticeLabView extends ItemView {
 
     let refreshMix = (): void => undefined;
     let refreshOutput = (): void => undefined;
+    let refreshModelControl = (): void => undefined;
+    let refreshReasoningControl = (): void => undefined;
     const configurationChanged = (): void => {
       this.invalidatePreview();
       refreshOutput();
@@ -1058,9 +1437,10 @@ export class PracticeLabView extends ItemView {
     }
     providerSelect.value = this.provider;
     providerSelect.addEventListener("change", () => {
+      this.modelsByProvider[this.provider] = this.model;
       this.provider = providerSelect.value as ProviderId;
-      this.model = this.providers.find((provider) => provider.id === this.provider)
-        ?.defaultModel ?? "";
+      this.model = this.modelsByProvider[this.provider];
+      this.syncCustomModelState();
       this.ensureSupportedReasoningEffort();
       this.invalidatePreview();
       this.renderPreservingScroll();
@@ -1079,41 +1459,213 @@ export class PracticeLabView extends ItemView {
             "Ready",
             selectedProvider.version,
             selectedProvider.supportsVision ? "vision enabled" : "text only",
+            selectedProvider.models.length > 0
+              ? `${selectedProvider.models.length} models detected`
+              : undefined,
           ].filter((part) => part !== undefined).join(" · ")
         : selectedProvider?.detail ?? "Provider availability has not been confirmed.",
     );
-    let modelInput: HTMLInputElement | null = null;
-    new Setting(form)
+    const modelCatalog = this.modelCatalog(this.provider);
+    const modelSetting = new Setting(form)
       .setName("Model")
-      .setDesc("Optional exact CLI model. Leave blank for the provider default; Practice Problem Generator records that the model was not pinned.")
-      .addText((component) => {
-        modelInput = component.inputEl;
-        component.inputEl.maxLength = MAX_MODEL_ID_LENGTH;
-        component.inputEl.spellcheck = false;
-        component
-          .setPlaceholder("Provider default")
-          .setValue(this.model)
-          .onChange((value) => {
-            this.model = value.trim();
-            configurationChanged();
-          });
+      .setDesc("Choose a model exposed by the selected CLI. Automatic follows the provider default; Custom preserves any safe exact model id.");
+    const modelControls = modelSetting.controlEl.createDiv({
+      cls: "practice-lab-model-controls",
+    });
+    const modelSelect = modelControls.createEl("select", {
+      attr: { "aria-label": "AI model" },
+    });
+    const initialAutomaticModel = automaticModelForProvider(
+      this.provider,
+      this.reasoningEffort,
+      modelCatalog,
+    );
+    const automaticModelOption = modelSelect.createEl("option", {
+      value: AUTOMATIC_MODEL_CHOICE,
+      text: this.provider === "agy"
+        ? initialAutomaticModel.length > 0
+          ? `Automatic (${initialAutomaticModel})`
+          : "Automatic (no compatible catalog model)"
+        : "Automatic (provider default)",
+    });
+    automaticModelOption.disabled = this.provider === "agy"
+      && initialAutomaticModel.length === 0;
+    for (const option of modelCatalog) {
+      const element = modelSelect.createEl("option", {
+        value: option.id,
+        text: option.label,
       });
-    new Setting(form)
-      .setName("Reasoning effort")
-      .setDesc(reasoningEffortDescription(this.provider))
-      .addDropdown((component) => {
-        for (const effort of selectedProvider?.reasoningEfforts ?? []) {
-          component.addOption(effort, displayReasoningEffort(effort));
+      element.title = option.description
+        ?? modelReasoningSummary(option.supportedReasoningEfforts);
+    }
+    modelSelect.createEl("option", {
+      value: CUSTOM_MODEL_CHOICE,
+      text: "Custom model id…",
+    });
+    const customModelInput = modelControls.createEl("input", {
+      type: "text",
+      placeholder: "Exact model id",
+      cls: "practice-lab-custom-model-input",
+      attr: {
+        "aria-label": "Custom model id",
+        maxlength: String(MAX_MODEL_ID_LENGTH),
+        autocomplete: "off",
+      },
+    });
+    customModelInput.spellcheck = false;
+    const modelDetail = modelSetting.descEl.createDiv({
+      cls: "practice-lab-model-detail",
+      attr: { role: "status" },
+    });
+    if (selectedProvider?.modelCatalogDetail !== undefined) {
+      modelSetting.descEl.createDiv({
+        cls: "practice-lab-model-catalog-note",
+        text: selectedProvider.models.length === 0
+          ? `Live model list unavailable; showing conservative built-in choices. ${selectedProvider.modelCatalogDetail}`
+          : `Model catalog note: ${selectedProvider.modelCatalogDetail}`,
+      });
+    }
+    const updateModelDetail = (): void => {
+      const choice = this.customModelModeByProvider[this.provider]
+        ? CUSTOM_MODEL_CHOICE
+        : modelPickerChoice(
+            this.provider,
+            this.model,
+            this.reasoningEffort,
+            modelCatalog,
+          );
+      const known = modelCatalog.find((entry) => entry.id === this.model);
+      if (choice === CUSTOM_MODEL_CHOICE) {
+        modelDetail.setText(
+          this.model.length === 0
+            ? "Enter a safe exact CLI model identifier."
+            : `Custom exact model: ${this.model}`,
+        );
+        return;
+      }
+      if (choice === AUTOMATIC_MODEL_CHOICE) {
+        const automaticModel = automaticModelForProvider(
+          this.provider,
+          this.reasoningEffort,
+          modelCatalog,
+        );
+        modelDetail.setText(
+          this.provider === "agy"
+            ? automaticModel.length > 0
+              ? `Practice Problem Generator will pin and record ${automaticModel} because agy requires an explicit model.`
+              : "No compatible automatic agy model is available for this reasoning level. Choose a listed or custom model."
+            : "The CLI will choose its current provider default; history records that the model was not pinned.",
+        );
+        return;
+      }
+      if (known !== undefined) {
+        modelDetail.setText(
+          known.description ?? modelReasoningSummary(known.supportedReasoningEfforts),
+        );
+        return;
+      }
+      modelDetail.setText(`Exact model: ${this.model}`);
+    };
+    refreshModelControl = (): void => {
+      const automaticModel = automaticModelForProvider(
+        this.provider,
+        this.reasoningEffort,
+        modelCatalog,
+      );
+      automaticModelOption.setText(
+        this.provider === "agy"
+          ? automaticModel.length > 0
+            ? `Automatic (${automaticModel})`
+            : "Automatic (no compatible catalog model)"
+          : "Automatic (provider default)",
+      );
+      automaticModelOption.disabled = this.provider === "agy"
+        && automaticModel.length === 0;
+      const choice = this.customModelModeByProvider[this.provider]
+        ? CUSTOM_MODEL_CHOICE
+        : modelPickerChoice(
+            this.provider,
+            this.model,
+            this.reasoningEffort,
+            modelCatalog,
+          );
+      modelSelect.value = choice;
+      customModelInput.hidden = choice !== CUSTOM_MODEL_CHOICE;
+      if (!customModelInput.hidden) customModelInput.value = this.model;
+      updateModelDetail();
+    };
+    modelSelect.addEventListener("change", () => {
+      const choice = modelSelect.value;
+      if (choice === AUTOMATIC_MODEL_CHOICE) {
+        this.customModelModeByProvider[this.provider] = false;
+        this.model = "";
+      } else if (choice === CUSTOM_MODEL_CHOICE) {
+        this.customModelModeByProvider[this.provider] = true;
+        this.model = this.customModelDraftsByProvider[this.provider];
+      } else {
+        this.customModelModeByProvider[this.provider] = false;
+        this.model = choice;
+        if (this.provider === "agy") {
+          this.reasoningEffort = agyReasoningEffortForModel(choice)
+            ?? this.reasoningEffort;
         }
-        component.setValue(this.reasoningEffort).onChange((value) => {
-          this.reasoningEffort = value as ReasoningEffort;
-          if (this.provider === "agy") {
-            this.model = agyModelForReasoning(this.model, this.reasoningEffort);
-            if (modelInput !== null) modelInput.value = this.model;
-          }
-          configurationChanged();
+      }
+      this.modelsByProvider[this.provider] = this.model;
+      this.ensureSupportedReasoningEffort();
+      refreshModelControl();
+      refreshReasoningControl();
+      configurationChanged();
+      if (choice === CUSTOM_MODEL_CHOICE) customModelInput.focus();
+    });
+    customModelInput.addEventListener("input", () => {
+      this.model = customModelInput.value.trim();
+      this.modelsByProvider[this.provider] = this.model;
+      this.customModelDraftsByProvider[this.provider] = this.model;
+      updateModelDetail();
+      this.ensureSupportedReasoningEffort();
+      refreshReasoningControl();
+      configurationChanged();
+    });
+
+    const reasoningSetting = new Setting(form)
+      .setName("Reasoning effort")
+      .setDesc("Only reasoning levels supported by the selected model are shown.");
+    const reasoningSelect = reasoningSetting.controlEl.createEl("select", {
+      attr: { "aria-label": "Reasoning effort" },
+    });
+    refreshReasoningControl = (): void => {
+      const efforts = this.supportedReasoningEfforts();
+      const selectedModel = modelCatalog.find((entry) => entry.id === this.model);
+      this.reasoningEffort = preferredReasoningEffort(
+        this.reasoningEffort,
+        efforts,
+        selectedModel,
+      );
+      reasoningSelect.empty();
+      for (const effort of efforts) {
+        reasoningSelect.createEl("option", {
+          value: effort,
+          text: displayReasoningEffort(effort),
         });
-      });
+      }
+      reasoningSelect.value = this.reasoningEffort;
+      reasoningSetting.setDesc(
+        `${reasoningEffortDescription(this.provider)} Only levels supported by the selected model are listed.`,
+      );
+    };
+    reasoningSelect.addEventListener("change", () => {
+      this.reasoningEffort = reasoningSelect.value as ReasoningEffort;
+      if (this.provider === "agy") {
+        this.model = this.customModelModeByProvider.agy || this.model.length === 0
+          ? this.model
+          : agyModelForReasoning(this.model, this.reasoningEffort, modelCatalog);
+        this.modelsByProvider.agy = this.model;
+      }
+      refreshModelControl();
+      configurationChanged();
+    });
+    refreshModelControl();
+    refreshReasoningControl();
 
     new Setting(form)
       .setName("Number of exercises")
@@ -1889,7 +2441,16 @@ export class PracticeLabView extends ItemView {
       attr: { role: "alert" },
     });
     const refreshPromptValidity = (): void => {
-      const invalid = !draft.rejected && prompt.value.trim().length === 0;
+      const blank = prompt.value.trim().length === 0;
+      const latexProblem = latexMarkupProblem(prompt.value);
+      const invalid = !draft.rejected && (blank || latexProblem !== null);
+      promptError.setText(
+        blank
+          ? "Prompt is required for a kept exercise."
+          : latexProblem === null
+            ? ""
+            : `Prompt LaTeX: ${latexProblem}`,
+      );
       prompt.setAttribute("aria-invalid", String(invalid));
       promptError.hidden = !invalid;
     };
@@ -1914,7 +2475,16 @@ export class PracticeLabView extends ItemView {
       attr: { role: "alert" },
     });
     const refreshAnswerValidity = (): void => {
-      const invalid = !draft.rejected && answer.value.trim().length === 0;
+      const blank = answer.value.trim().length === 0;
+      const latexProblem = latexMarkupProblem(answer.value);
+      const invalid = !draft.rejected && (blank || latexProblem !== null);
+      answerError.setText(
+        blank
+          ? "Grounded answer is required for a kept exercise."
+          : latexProblem === null
+            ? ""
+            : `Grounded-answer LaTeX: ${latexProblem}`,
+      );
       answer.setAttribute("aria-invalid", String(invalid));
       answerError.hidden = !invalid;
     };
@@ -1928,14 +2498,55 @@ export class PracticeLabView extends ItemView {
       refreshAnswerValidity();
     });
     refreshAnswerValidity();
+    const renderedPreview = card.createEl("details", {
+      cls: "practice-lab-draft-rendered-preview",
+    });
+    renderedPreview.open = hasLatexMarkup(prompt.value)
+      || hasLatexMarkup(answer.value)
+      || latexMarkupProblem(prompt.value) !== null
+      || latexMarkupProblem(answer.value) !== null;
+    renderedPreview.createEl("summary", { text: "Rendered math preview" });
+    const previewGrid = renderedPreview.createDiv({
+      cls: "practice-lab-draft-preview-grid",
+    });
+    const promptPreview = previewGrid.createDiv();
+    promptPreview.createEl("strong", { text: "Prompt" });
+    const promptPreviewContent = promptPreview.createDiv({
+      cls: "practice-lab-draft-preview-content",
+    });
+    const answerPreview = previewGrid.createDiv();
+    answerPreview.createEl("strong", { text: "Grounded answer" });
+    const answerPreviewContent = answerPreview.createDiv({
+      cls: "practice-lab-draft-preview-content",
+    });
+    const previewStatus = renderedPreview.createEl("p", {
+      cls: "practice-lab-field-error",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    const refreshRenderedPreview = (): void => {
+      const promptValid = renderLatexMarkup(promptPreviewContent, prompt.value);
+      const answerValid = renderLatexMarkup(answerPreviewContent, answer.value);
+      previewStatus.hidden = promptValid && answerValid;
+      previewStatus.setText(
+        promptValid && answerValid
+          ? ""
+          : "Fix the highlighted LaTeX before saving this exercise.",
+      );
+      if (!promptValid || !answerValid || hasLatexMarkup(prompt.value) || hasLatexMarkup(answer.value)) {
+        renderedPreview.open = true;
+      }
+    };
+    prompt.addEventListener("input", refreshRenderedPreview);
+    answer.addEventListener("input", refreshRenderedPreview);
+    refreshRenderedPreview();
     if (
       this.displayPreferences.practice.showDraftRationale
       && draft.rationale !== undefined
     ) {
-      card.createEl("p", {
+      const rationale = card.createDiv({
         cls: "practice-lab-rationale",
-        text: draft.rationale,
       });
+      renderLatexMarkup(rationale, draft.rationale);
     }
 
     if (
@@ -1991,13 +2602,29 @@ export class PracticeLabView extends ItemView {
       meter.value = this.studyIndex + 1;
     }
     this.renderPracticeRunHud(container, this.projectedPracticeRun());
+    const activeLesson = this.studyLearningProgress?.activeLesson ?? null;
+    if (
+      activeLesson !== null
+      && (
+        activeLesson.state.phase === "teaching"
+        || activeLesson.state.phase === "self-explanation"
+        || (activeLesson.state.phase === "independent" && !this.studyTutorProblemStarted)
+      )
+    ) {
+      this.renderTutorLesson(container, activeLesson);
+      return;
+    }
+    if (activeLesson?.state.phase === "recovery") {
+      this.renderTutorRecovery(container, activeLesson);
+    }
     if (this.studyExercises.some((candidate) => candidate.grading.kind === "self")) {
       this.renderAnswerReviewControls(container);
     }
 
     const card = container.createDiv({ cls: "practice-lab-study-card" });
     card.createSpan({ cls: "practice-lab-badge", text: EXERCISE_LABELS[exercise.type] });
-    card.createEl("h3", { text: studyPrompt(exercise) });
+    const prompt = card.createEl("h3");
+    renderLatexMarkup(prompt, studyPrompt(exercise));
 
     const answerArea = card.createDiv({ cls: "practice-lab-study-answer" });
     if (this.studySubmitted === null) {
@@ -2006,6 +2633,201 @@ export class PracticeLabView extends ItemView {
       this.renderStudyFeedback(answerArea, exercise);
     }
     this.prepareStudyCard(card, exercise.id);
+  }
+
+  private renderTutorLesson(
+    container: HTMLElement,
+    active: StudyGuidedLessonCheckpointV1,
+  ): void {
+    const { lesson, state } = active;
+    const tutor = container.createEl("section", {
+      cls: "practice-lab-tutor-lesson",
+      attr: { "aria-label": `Tutor lesson: ${lesson.title}` },
+    });
+    const heading = tutor.createDiv({ cls: "practice-lab-tutor-heading" });
+    const icon = heading.createSpan({ attr: { "aria-hidden": "true" } });
+    setIcon(icon, "graduation-cap");
+    const identity = heading.createDiv();
+    identity.createSpan({ cls: "practice-lab-badge", text: "Grounded tutor" });
+    identity.createEl("h3", { text: lesson.title });
+    const objective = identity.createDiv({ cls: "practice-lab-tutor-objective" });
+    renderLatexMarkup(objective, lesson.objective);
+
+    for (const block of lesson.teachingBlocks.filter((candidate) => (
+      state.revealedTeachingBlockIds.includes(candidate.id)
+    ))) {
+      const card = tutor.createEl("article", { cls: "practice-lab-tutor-block" });
+      card.createSpan({ cls: "practice-lab-badge", text: tutorBlockLabel(block.kind) });
+      card.createEl("h4", { text: block.title });
+      const content = card.createDiv();
+      renderLatexMarkup(content, block.content);
+    }
+
+    if (state.phase === "teaching") {
+      const next = lesson.teachingBlocks.find((block) => (
+        !state.revealedTeachingBlockIds.includes(block.id)
+      ));
+      new ButtonComponent(tutor)
+        .setButtonText(state.revealedTeachingBlockIds.length === 0
+          ? "Begin lesson"
+          : next === undefined ? "Continue" : `Continue to ${tutorBlockLabel(next.kind).toLowerCase()}`)
+        .setIcon("arrow-right")
+        .setCta()
+        .onClick(() => void this.updateTutorLesson((current) => ({
+          ...current,
+          state: revealNextTeachingBlock(current.lesson, current.state),
+        })));
+      return;
+    }
+
+    const check = tutor.createEl("article", { cls: "practice-lab-tutor-check" });
+    check.createEl("h4", { text: "Explain it in your own words" });
+    const prompt = check.createDiv();
+    renderLatexMarkup(prompt, lesson.selfExplanationCheck.prompt);
+    if (state.selfExplanationAnswer === null) {
+      const response = check.createEl("textarea", {
+        attr: {
+          rows: "5",
+          placeholder: "Build the explanation from premise to consequence…",
+          "aria-label": "Self-explanation response",
+        },
+      });
+      response.value = active.currentInput;
+      response.addEventListener("input", () => {
+        this.setTutorCurrentInput(response.value);
+      });
+      new ButtonComponent(check)
+        .setButtonText("Submit explanation")
+        .setIcon("send")
+        .setCta()
+        .onClick(() => void this.updateTutorLesson((current) => ({
+          ...current,
+          currentInput: "",
+          state: submitSelfExplanation(
+            current.lesson,
+            current.state,
+            response.value,
+          ),
+        })));
+      return;
+    }
+
+    check.createEl("strong", { text: "Your explanation" });
+    const submitted = check.createEl("blockquote");
+    renderLatexMarkup(submitted, state.selfExplanationAnswer);
+    if (!state.selfExplanationAnswerRevealed) {
+      new ButtonComponent(check)
+        .setButtonText("Reveal grounded comparison")
+        .setIcon("eye")
+        .setCta()
+        .onClick(() => void this.updateTutorLesson((current) => ({
+          ...current,
+          state: revealSelfExplanationAnswer(current.lesson, current.state),
+        })));
+      return;
+    }
+
+    check.createEl("strong", { text: "Grounded comparison" });
+    const grounded = check.createDiv({ cls: "practice-lab-grounded-answer" });
+    renderLatexMarkup(grounded, lesson.selfExplanationCheck.groundedAnswer);
+    if (lesson.selfExplanationCheck.keyPoints.length > 0) {
+      const points = check.createEl("ul");
+      for (const point of lesson.selfExplanationCheck.keyPoints) {
+        const item = points.createEl("li");
+        renderLatexMarkup(item, point);
+      }
+    }
+    new ButtonComponent(check)
+      .setButtonText("Begin guided problem")
+      .setIcon("arrow-right")
+      .setCta()
+      .onClick(() => {
+        this.studyTutorProblemStarted = true;
+        this.render();
+      });
+  }
+
+  private renderTutorRecovery(
+    container: HTMLElement,
+    active: StudyGuidedLessonCheckpointV1,
+  ): void {
+    const { lesson, state } = active;
+    const support = container.createEl("section", {
+      cls: "practice-lab-tutor-recovery",
+      attr: { "aria-label": "Guided recovery support" },
+    });
+    support.createEl("h3", { text: "Work through the difficulty" });
+    support.createEl("p", {
+      text: "Your first attempt is locked as the session result. Hints and retries are tracked separately and never inflate independent performance.",
+    });
+    for (const hint of [...lesson.hints]
+      .sort((left, right) => left.level - right.level)
+      .filter((candidate) => state.revealedHintIds.includes(candidate.id))) {
+      const card = support.createDiv({ cls: "practice-lab-tutor-hint" });
+      card.createEl("strong", { text: `Hint ${hint.level}` });
+      const content = card.createDiv();
+      renderLatexMarkup(content, hint.text);
+    }
+    if (state.repairExplanationRevealed) {
+      const repair = support.createDiv({ cls: "practice-lab-tutor-repair" });
+      repair.createEl("strong", { text: "Repair explanation" });
+      const content = repair.createDiv();
+      renderLatexMarkup(content, lesson.repairExplanation.text);
+    }
+    const actions = support.createDiv({ cls: "practice-lab-tutor-actions" });
+    if (state.revealedHintIds.length < lesson.hints.length) {
+      new ButtonComponent(actions)
+        .setButtonText("Need help")
+        .setIcon("life-buoy")
+        .onClick(() => void this.updateTutorLesson((current) => ({
+          ...current,
+          state: revealNextTutorHint(current.lesson, current.state),
+        })));
+    } else if (!state.repairExplanationRevealed) {
+      new ButtonComponent(actions)
+        .setButtonText("Show repair explanation")
+        .setIcon("book-open-check")
+        .onClick(() => void this.updateTutorLesson((current) => ({
+          ...current,
+          state: revealTutorRepairExplanation(current.lesson, current.state),
+        })));
+    }
+    new ButtonComponent(actions)
+      .setButtonText("Continue without resolving")
+      .setIcon("arrow-right")
+      .onClick(() => void this.completeUnresolvedTutorLesson());
+  }
+
+  private setTutorCurrentInput(value: string): void {
+    const progress = this.studyLearningProgress;
+    if (progress?.activeLesson === null || progress === null) return;
+    this.studyLearningProgress = {
+      ...progress,
+      activeLesson: { ...progress.activeLesson, currentInput: value },
+    };
+    this.scheduleStudyCheckpoint();
+  }
+
+  private async updateTutorLesson(
+    transition: (
+      active: StudyGuidedLessonCheckpointV1,
+    ) => StudyGuidedLessonCheckpointV1,
+  ): Promise<void> {
+    const progress = this.studyLearningProgress;
+    if (progress?.activeLesson === null || progress === null) return;
+    const previous = progress;
+    try {
+      this.studyLearningProgress = {
+        ...progress,
+        activeLesson: transition(progress.activeLesson),
+      };
+      await this.flushStudyCheckpoint();
+      this.studyCheckpointWarningShown = false;
+      this.render();
+    } catch (error) {
+      this.studyLearningProgress = previous;
+      new Notice(this.errorMessage(error, "Could not save the tutor checkpoint."), 10_000);
+    }
   }
 
   private renderStudyInput(
@@ -2030,7 +2852,18 @@ export class PracticeLabView extends ItemView {
             },
           });
           input.dataset.choiceId = choice.id;
-          label.createSpan({ text: choice.text });
+          input.checked = this.studyCurrentInput?.selectedIds.includes(choice.id) ?? false;
+          input.addEventListener("change", () => {
+            const selected = new Set(this.studyCurrentInput?.selectedIds ?? []);
+            if (!multiple && input.checked) selected.clear();
+            if (input.checked) selected.add(choice.id);
+            else selected.delete(choice.id);
+            this.updateStudyCurrentInput({ selectedIds: [...selected] });
+          });
+          const choiceText = label.createDiv({
+            cls: "practice-lab-choice-text",
+          });
+          renderLatexMarkup(choiceText, choice.text);
         }
         this.studySubmitButton(container, () => this.gradeChoice(container, exercise));
         break;
@@ -2038,19 +2871,42 @@ export class PracticeLabView extends ItemView {
       case "matching": {
         const right = exercise.matchingRight ?? [];
         const matching = container.createDiv({ cls: "practice-lab-matching" });
+        const answerKey = matching.createDiv({
+          cls: "practice-lab-matching-key",
+          attr: { "aria-label": "Available matching answers" },
+        });
+        answerKey.id = `matching-key-${exercise.id}`;
+        answerKey.createEl("strong", { text: "Available answers" });
+        const answerKeyList = answerKey.createEl("ol");
+        for (const choice of right) {
+          const item = answerKeyList.createEl("li");
+          const value = item.createDiv();
+          renderLatexMarkup(value, choice.text);
+        }
         for (const left of exercise.matchingLeft ?? []) {
           const row = matching.createDiv({ cls: "practice-lab-matching-row" });
-          row.createSpan({ text: left.text });
+          const leftText = row.createDiv({
+            cls: "practice-lab-matching-left",
+          });
+          renderLatexMarkup(leftText, left.text);
           const select = row.createEl("select", {
             attr: {
               "aria-label": `Match for ${left.text}`,
+              "aria-describedby": answerKey.id,
               "data-left-id": left.id,
             },
           });
           select.createEl("option", { value: "", text: "Choose…" });
-          for (const choice of right) {
-            select.createEl("option", { value: choice.id, text: choice.text });
+          for (const [index, choice] of right.entries()) {
+            select.createEl("option", {
+              value: choice.id,
+              text: `Answer ${index + 1}`,
+            });
           }
+          select.value = this.studyCurrentInput?.fields[`match:${left.id}`] ?? "";
+          select.addEventListener("change", () => {
+            this.updateStudyInputField(`match:${left.id}`, select.value);
+          });
         }
         this.studySubmitButton(container, () => this.gradeMatching(container, exercise));
         break;
@@ -2060,7 +2916,10 @@ export class PracticeLabView extends ItemView {
         const ordering = container.createDiv({ cls: "practice-lab-ordering" });
         for (const [index, id] of this.orderingState.entries()) {
           const row = ordering.createDiv({ cls: "practice-lab-order-row" });
-          row.createSpan({ text: byId.get(id) ?? id });
+          const itemText = row.createDiv({
+            cls: "practice-lab-order-text",
+          });
+          renderLatexMarkup(itemText, byId.get(id) ?? id);
           this.iconButton(row, "arrow-up", "Move item up", index === 0, () => {
             this.moveOrderingItem(index, index - 1);
           });
@@ -2079,11 +2938,19 @@ export class PracticeLabView extends ItemView {
         this.renderStudyOcclusionVisual(container, exercise, false);
         const fields = container.createDiv({ cls: "practice-lab-occlusion-answers" });
         for (const mask of exercise.masks ?? []) {
-          const label = fields.createEl("label", { text: mask.label });
+          const label = fields.createEl("label");
+          const labelText = label.createDiv({
+            cls: "practice-lab-occlusion-label",
+          });
+          renderLatexMarkup(labelText, mask.label);
           const input = label.createEl("input", {
             attr: { type: "text", "data-mask-id": mask.id },
           });
           input.autocomplete = "off";
+          input.value = this.studyCurrentInput?.fields[`mask:${mask.id}`] ?? "";
+          input.addEventListener("input", () => {
+            this.updateStudyInputField(`mask:${mask.id}`, input.value);
+          });
         }
         this.studySubmitButton(container, () => this.gradeOcclusion(container, exercise));
         break;
@@ -2100,8 +2967,13 @@ export class PracticeLabView extends ItemView {
             "aria-label": "Numerical answer",
           },
         });
+        input.value = this.studyCurrentInput?.fields.calculation ?? "";
+        input.addEventListener("input", () => {
+          this.updateStudyInputField("calculation", input.value);
+        });
         if (grading.unit !== undefined) {
-          row.createSpan({ cls: "practice-lab-unit", text: grading.unit });
+          const unit = row.createSpan({ cls: "practice-lab-unit" });
+          renderLatexMarkup(unit, grading.unit);
         }
         this.studySubmitButton(container, () => {
           const value = Number(input.value.trim().replace(",", "."));
@@ -2112,8 +2984,7 @@ export class PracticeLabView extends ItemView {
           const correct =
             Math.abs(value - grading.numericAnswer) <=
             Math.abs(grading.tolerance);
-          this.studySubmitted = { answer: input.value.trim(), correct };
-          this.render();
+          this.setStudySubmitted({ answer: input.value.trim(), correct });
         });
         break;
       }
@@ -2131,6 +3002,10 @@ export class PracticeLabView extends ItemView {
             },
           });
           input.setAttribute("aria-label", `Answer for blank ${index + 1}`);
+          input.value = this.studyCurrentInput?.fields[`blank:${blank.id}`] ?? "";
+          input.addEventListener("input", () => {
+            this.updateStudyInputField(`blank:${blank.id}`, input.value);
+          });
         }
         this.studySubmitButton(container, () => this.gradeCloze(container, exercise));
         break;
@@ -2146,6 +3021,10 @@ export class PracticeLabView extends ItemView {
             "aria-label": "Your answer",
           },
         });
+        textarea.value = this.studyCurrentInput?.fields.response ?? "";
+        textarea.addEventListener("input", () => {
+          this.updateStudyInputField("response", textarea.value);
+        });
         const buttonText = grading.kind === "self" ? "Reveal grounded answer" : "Check answer";
         const reveal = new ButtonComponent(container)
           .setButtonText(buttonText)
@@ -2153,16 +3032,15 @@ export class PracticeLabView extends ItemView {
           .onClick(() => {
             const answer = textarea.value;
             if (grading.kind === "self") {
-              this.studySubmitted = { answer };
+              this.setStudySubmitted({ answer });
             } else {
               const actual = normalizeAnswer(answer, grading.caseSensitive ?? false);
               const correct = grading.acceptedAnswers.some(
                 (accepted) =>
                   normalizeAnswer(accepted, grading.caseSensitive ?? false) === actual,
               );
-              this.studySubmitted = { answer, correct };
+              this.setStudySubmitted({ answer, correct });
             }
-            this.render();
           });
         this.markPrimaryStudyAction(reveal);
         break;
@@ -2195,7 +3073,8 @@ export class PracticeLabView extends ItemView {
     } else {
       container.createEl("h4", { text: "Compare your response" });
       if (submitted.answer.trim().length > 0) {
-        container.createEl("blockquote", { text: submitted.answer });
+        const submittedAnswer = container.createEl("blockquote");
+        renderLatexMarkup(submittedAnswer, submitted.answer);
       }
     }
     if (exercise.grading.kind === "occlusion") {
@@ -2203,12 +3082,14 @@ export class PracticeLabView extends ItemView {
     }
     const answer = container.createDiv({ cls: "practice-lab-grounded-answer" });
     answer.createEl("h4", { text: "Grounded answer" });
-    answer.createEl("p", { text: exercise.groundedAnswer });
+    const groundedAnswer = answer.createDiv();
+    renderLatexMarkup(groundedAnswer, exercise.groundedAnswer);
     if (
       this.displayPreferences.practice.showStudyRationale
       && exercise.rationale !== undefined
     ) {
-      answer.createEl("p", { cls: "practice-lab-rationale", text: exercise.rationale });
+      const rationale = answer.createDiv({ cls: "practice-lab-rationale" });
+      renderLatexMarkup(rationale, exercise.rationale);
     }
 
     if (exercise.grading.kind === "self") {
@@ -2222,7 +3103,7 @@ export class PracticeLabView extends ItemView {
         .setIcon("arrow-right")
         .setCta()
         .onClick(() =>
-          this.recordAndContinue({
+          void this.recordAndContinue({
             exerciseId: exercise.id,
             correct: submitted.correct ?? false,
           }),
@@ -2271,17 +3152,22 @@ export class PracticeLabView extends ItemView {
         attr: { "aria-label": "Answer-review provider" },
       });
       for (const provider of this.providers) {
+        const executionMode = provider.executionMode
+          ?? (provider.available ? "execute-now" : "unavailable");
         const option = providerSelect.createEl("option", {
           value: provider.id,
-          text: provider.available
+          text: executionMode === "execute-now"
             ? provider.label
-            : `${provider.label} (unavailable)`,
+            : executionMode === "queue-for-desktop"
+              ? `${provider.label} (queue for desktop)`
+              : `${provider.label} (unavailable)`,
         });
-        option.disabled = !provider.available;
+        option.disabled = executionMode === "unavailable";
       }
       providerSelect.value = this.answerReviewProvider;
       providerSelect.addEventListener("change", () => {
         this.answerReviewProvider = providerSelect.value as ProviderId;
+        this.scheduleStudyCheckpoint();
         this.refreshAnswerReviewControls();
         this.renderCurrentFreeResponseActions();
       });
@@ -2311,15 +3197,19 @@ export class PracticeLabView extends ItemView {
       reasoningSelect.value = this.answerReviewReasoningEffort;
       reasoningSelect.addEventListener("change", () => {
         this.answerReviewReasoningEffort = reasoningSelect.value as ReasoningEffort;
+        this.scheduleStudyCheckpoint();
         this.refreshAnswerReviewControls();
         this.renderCurrentFreeResponseActions();
       });
 
       const readiness = this.answerReviewProviderProblem();
+      const queuesForDesktop = selectedProvider?.executionMode === "queue-for-desktop";
       controls.createEl("p", {
         cls: `practice-lab-answer-review-note${readiness === null ? "" : " is-warning"}`,
         text: readiness ??
-          `${ANSWER_REVIEW_PAYLOAD_DISCLOSURE} will be sent to ${selectedProvider?.label ?? this.answerReviewProvider}. When you finish this session, the submitted answer and locked review context are also stored in the Practice Markdown so the review can resume after a restart and remain visible in history. Reviews never pause the next question.`,
+          (queuesForDesktop
+            ? `${ANSWER_REVIEW_PAYLOAD_DISCLOSURE} will be locked locally and queued in the Practice Markdown when this session finishes. A desktop with ${selectedProvider?.label ?? this.answerReviewProvider} available will run the exact provider and reasoning after synchronization. You can continue immediately.`
+            : `${ANSWER_REVIEW_PAYLOAD_DISCLOSURE} will be sent to ${selectedProvider?.label ?? this.answerReviewProvider}. When you finish this session, the submitted answer and locked review context are also stored in the Practice Markdown so the review can resume after a restart and remain visible in history. Reviews never pause the next question.`),
       });
     } else if (!hasExecutor) {
       controls.createEl("p", {
@@ -2360,6 +3250,7 @@ export class PracticeLabView extends ItemView {
     input.addEventListener("change", () => {
       if (!input.checked || input.disabled) return;
       this.answerReviewMode = mode;
+      this.scheduleStudyCheckpoint();
       this.refreshAnswerReviewControls();
       this.renderCurrentFreeResponseActions();
     });
@@ -2402,7 +3293,7 @@ export class PracticeLabView extends ItemView {
         .setTooltip(
           `${outcome.description} Adds ${formatPracticeRunPoints(points)} run ${points === 1 ? "point" : "points"}.`,
         )
-        .onClick(() => this.recordAndContinue({
+        .onClick(() => void this.recordAndContinue({
           exerciseId: exercise.id,
           submittedAnswer,
           rating: outcome.rating,
@@ -2416,15 +3307,20 @@ export class PracticeLabView extends ItemView {
     submittedAnswer: string,
   ): void {
     const provider = this.selectedAnswerReviewProvider();
+    const queuesForDesktop = provider?.executionMode === "queue-for-desktop";
     const problem = this.answerReviewActionProblem(exercise, submittedAnswer);
     container.createEl("p", {
       cls: `practice-lab-rating-prompt${problem === null ? "" : " is-warning"}`,
       text: problem ??
-        `${provider?.label ?? this.answerReviewProvider} will assess this response in the background. You can continue immediately.`,
+        (queuesForDesktop
+          ? `The exact ${provider?.label ?? this.answerReviewProvider} request will queue for desktop. You can continue immediately, even while offline.`
+          : `${provider?.label ?? this.answerReviewProvider} will assess this response in the background. You can continue immediately.`),
     });
     const buttons = container.createDiv({ cls: "practice-lab-rating-row" });
     const queue = new ButtonComponent(buttons)
-      .setButtonText(`Send to ${provider?.label ?? this.answerReviewProvider} and continue`)
+      .setButtonText(queuesForDesktop
+        ? `Queue for desktop ${provider?.label ?? this.answerReviewProvider} review`
+        : `Send to ${provider?.label ?? this.answerReviewProvider} and continue`)
       .setIcon("send")
       .setCta()
       .setDisabled(problem !== null);
@@ -2433,7 +3329,7 @@ export class PracticeLabView extends ItemView {
       if (this.answerReviewActionProblem(exercise, submittedAnswer) !== null) {
         return;
       }
-      this.queueAnswerReviewAndContinue(exercise, submittedAnswer);
+      void this.queueAnswerReviewAndContinue(exercise, submittedAnswer);
     });
     new ButtonComponent(buttons)
       .setButtonText("Assess myself instead")
@@ -2443,10 +3339,10 @@ export class PracticeLabView extends ItemView {
       });
   }
 
-  private queueAnswerReviewAndContinue(
+  private async queueAnswerReviewAndContinue(
     exercise: EditableDraftExercise,
     submittedAnswer: string,
-  ): void {
+  ): Promise<void> {
     const context = exercise.answerReviewContext;
     const request = lockAnswerReviewRequest({
       requestId: `review-${crypto.randomUUID()}`,
@@ -2465,12 +3361,12 @@ export class PracticeLabView extends ItemView {
       requestedAt: new Date().toISOString(),
     });
     try {
-      this.options.callbacks.enqueueAnswerReview?.(request);
+      await this.options.callbacks.enqueueAnswerReview?.(request);
     } catch (error) {
       new Notice(this.errorMessage(error, "Could not queue this AI review."));
       return;
     }
-    this.recordAndContinue(createPendingAnswerReviewRecord(request));
+    await this.recordAndContinue(createPendingAnswerReviewRecord(request));
   }
 
   private selectedAnswerReviewProvider(): ProviderPresentation | undefined {
@@ -2484,7 +3380,9 @@ export class PracticeLabView extends ItemView {
       return "AI answer review is unavailable on this device.";
     }
     const provider = this.selectedAnswerReviewProvider();
-    if (provider === undefined || !provider.available) {
+    const executionMode = provider?.executionMode
+      ?? (provider?.available === true ? "execute-now" : "unavailable");
+    if (provider === undefined || executionMode === "unavailable") {
       return `${provider?.label ?? this.answerReviewProvider} is unavailable. Choose an available provider or self-assess; Practice Problem Generator will not switch providers automatically.`;
     }
     if (!provider.reasoningEfforts.includes(this.answerReviewReasoningEffort)) {
@@ -2553,7 +3451,8 @@ export class PracticeLabView extends ItemView {
       const heading = item.createDiv({
         cls: "practice-lab-ai-review-feedback-heading",
       });
-      heading.createEl("strong", { text: review.request.exerciseTitle });
+      const exerciseTitle = heading.createEl("strong");
+      renderLatexMarkup(exerciseTitle, review.request.exerciseTitle);
       heading.createSpan({
         text: review.status.state === "pending" ? "Pending" : "Failed",
       });
@@ -2876,14 +3775,27 @@ export class PracticeLabView extends ItemView {
       .setIcon("save")
       .setCta()
       .setDisabled(this.studyFinishing)
-      .onClick(() => void this.finishStudy(false));
-    new ButtonComponent(actions)
-      .setButtonText(
-        this.studyFinishing ? "Saving session…" : "Save and practice again",
-      )
-      .setIcon("repeat-2")
-      .setDisabled(this.studyFinishing)
-      .onClick(() => void this.finishStudy(true));
+      .onClick(() => void this.finishStudy("save"));
+    if (this.studyLearningProgress === null) {
+      new ButtonComponent(actions)
+        .setButtonText(
+          this.studyFinishing ? "Saving session…" : "Save and practice again",
+        )
+        .setIcon("repeat-2")
+        .setDisabled(this.studyFinishing)
+        .onClick(() => void this.finishStudy("repeat"));
+    }
+    if (
+      this.studyLearningProgress !== null
+      && this.options.callbacks.buildRepairSet !== undefined
+      && this.studyHasRepairOpportunity()
+    ) {
+      new ButtonComponent(actions)
+        .setButtonText(this.studyFinishing ? "Saving session…" : "Save and build repair set")
+        .setIcon("wrench")
+        .setDisabled(this.studyFinishing)
+        .onClick(() => void this.finishStudy("repair"));
+    }
   }
 
   private studyPerformanceOutcomes(): PerformanceOutcome[] {
@@ -2959,9 +3871,15 @@ export class PracticeLabView extends ItemView {
     if (status.sessionId !== this.studySessionId) return false;
     const result = mergeAnswerReviewStatus(this.studyAnswers, status);
     if (!result.updated) return false;
+    if (JSON.stringify(result.answers) === JSON.stringify(this.studyAnswers)) {
+      return false;
+    }
     this.studyAnswers = [...result.answers];
     if (status.state !== "pending") {
       this.pausedAnswerReviewIds.delete(status.requestId);
+    }
+    if (this.studyIndex < this.studyExercises.length) {
+      void this.flushStudyCheckpoint().catch(() => undefined);
     }
     return true;
   }
@@ -3040,9 +3958,11 @@ export class PracticeLabView extends ItemView {
       const heading = item.createDiv({
         cls: "practice-lab-ai-review-feedback-heading",
       });
-      heading.createEl("strong", {
-        text: exercise?.title ?? exercise?.prompt ?? answer.exerciseId,
-      });
+      const exerciseHeading = heading.createEl("strong");
+      renderLatexMarkup(
+        exerciseHeading,
+        exercise?.title ?? exercise?.prompt ?? answer.exerciseId,
+      );
       if (review.status.state === "reviewed") {
         heading.createSpan({
           cls: "practice-lab-ai-review-verdict",
@@ -3052,7 +3972,10 @@ export class PracticeLabView extends ItemView {
               ? "Partially correct"
               : "Incorrect",
         });
-        item.createEl("p", { text: review.status.feedback });
+        const feedback = item.createDiv({
+          cls: "practice-lab-ai-review-feedback",
+        });
+        renderLatexMarkup(feedback, review.status.feedback);
         this.renderAnswerReviewCriteria(
           item,
           review.status.criterionResults,
@@ -3091,7 +4014,8 @@ export class PracticeLabView extends ItemView {
       const heading = item.createDiv({
         cls: "practice-lab-ai-review-criterion-heading",
       });
-      heading.createEl("strong", { text: result.criterion });
+      const criterion = heading.createEl("strong");
+      renderLatexMarkup(criterion, result.criterion);
       heading.createSpan({
         text: result.outcome === "met"
           ? "Met"
@@ -3099,7 +4023,10 @@ export class PracticeLabView extends ItemView {
             ? "Partial"
             : "Missed",
       });
-      item.createEl("p", { text: result.feedback });
+      const feedback = item.createDiv({
+        cls: "practice-lab-ai-review-feedback",
+      });
+      renderLatexMarkup(feedback, result.feedback);
       const evidence = item.createDiv({
         cls: "practice-lab-ai-review-evidence",
       });
@@ -3119,7 +4046,10 @@ export class PracticeLabView extends ItemView {
             const excerpt = segment.text.length <= 180
               ? segment.text
               : `${segment.text.slice(0, 177)}…`;
-            row.createSpan({ text: `${heading}: ${excerpt}` });
+            const sourceExcerpt = row.createDiv({
+              cls: "practice-lab-ai-review-source-excerpt",
+            });
+            renderLatexMarkup(sourceExcerpt, `${heading}: ${excerpt}`);
           }
         }
       }
@@ -3286,7 +4216,7 @@ export class PracticeLabView extends ItemView {
     );
     return {
       provider: this.provider,
-      model: this.model,
+      model: this.effectiveModel(),
       reasoningEffort: this.reasoningEffort,
       focusInstructions: this.focusInstructions,
       quantity: this.quantity,
@@ -3297,13 +4227,76 @@ export class PracticeLabView extends ItemView {
     };
   }
 
+  private effectiveModel(): string {
+    if (this.provider !== "agy" || this.customModelModeByProvider.agy) {
+      return this.model;
+    }
+    const catalog = this.modelCatalog("agy");
+    return modelPickerChoice(
+      "agy",
+      this.model,
+      this.reasoningEffort,
+      catalog,
+    ) === AUTOMATIC_MODEL_CHOICE
+      ? automaticModelForProvider("agy", this.reasoningEffort, catalog)
+      : this.model;
+  }
+
+  private modelCatalog(provider: ProviderId): readonly ProviderModelPresentation[] {
+    const presentation = this.providers.find((entry) => entry.id === provider);
+    return modelsForProvider(provider, presentation?.models ?? []);
+  }
+
+  private updateProviderModelDefaults(
+    providers: readonly ProviderPresentation[],
+    initialize: boolean,
+  ): void {
+    for (const provider of providers) {
+      const previousDefault = this.defaultModelsByProvider[provider.id];
+      if (initialize || this.modelsByProvider[provider.id] === previousDefault) {
+        this.modelsByProvider[provider.id] = provider.defaultModel;
+      }
+      this.defaultModelsByProvider[provider.id] = provider.defaultModel;
+    }
+  }
+
+  private syncCustomModelState(): void {
+    const choice = modelPickerChoice(
+      this.provider,
+      this.model,
+      this.reasoningEffort,
+      this.modelCatalog(this.provider),
+    );
+    this.customModelModeByProvider[this.provider] = choice === CUSTOM_MODEL_CHOICE;
+    if (choice === CUSTOM_MODEL_CHOICE) {
+      this.customModelDraftsByProvider[this.provider] = this.model;
+    }
+  }
+
+  private supportedReasoningEfforts(): readonly ReasoningEffort[] {
+    const provider = this.providers.find((entry) => entry.id === this.provider);
+    return reasoningEffortsForModel(
+      provider?.reasoningEfforts ?? [],
+      this.effectiveModel(),
+      this.modelCatalog(this.provider),
+    );
+  }
+
   private configurationProblem(): string | null {
-    const modelProblem = modelIdProblem(this.model);
+    if (this.customModelModeByProvider[this.provider] && this.model.length === 0) {
+      return "Enter a custom model ID or choose Automatic.";
+    }
+    const effectiveModel = this.effectiveModel();
+    if (this.provider === "agy" && effectiveModel.length === 0) {
+      return "No compatible automatic agy model is available for this reasoning level. Choose a listed or custom model.";
+    }
+    const modelProblem = modelIdProblem(effectiveModel);
     if (modelProblem !== null) return modelProblem;
     if (this.provider === "agy") {
       const reasoningProblem = agyModelReasoningProblem(
-        this.model,
+        effectiveModel,
         this.reasoningEffort,
+        this.modelCatalog("agy"),
       );
       if (reasoningProblem !== null) return reasoningProblem;
     }
@@ -3323,8 +4316,8 @@ export class PracticeLabView extends ItemView {
         ? "The selected provider is not available on this computer."
         : `${provider.label} is unavailable: ${provider.detail}`;
     }
-    if (!provider.reasoningEfforts.includes(this.reasoningEffort)) {
-      return `${provider.label} does not support the selected reasoning effort.`;
+    if (!this.supportedReasoningEfforts().includes(this.reasoningEffort)) {
+      return `${provider.label} does not support the selected reasoning effort for this model.`;
     }
     if (!provider.supportsVision && selectedVisualIds(this.source).length > 0) {
       const capable = this.providers
@@ -3353,11 +4346,21 @@ export class PracticeLabView extends ItemView {
   }
 
   private ensureSupportedReasoningEffort(): void {
-    const provider = this.providers.find((entry) => entry.id === this.provider);
-    if (provider?.reasoningEfforts.includes(this.reasoningEffort) === true) return;
-    this.reasoningEffort = provider?.reasoningEfforts.includes("medium") === true
-      ? "medium"
-      : provider?.reasoningEfforts[0] ?? "medium";
+    const efforts = this.supportedReasoningEfforts();
+    const pinnedAgyEffort = this.provider === "agy" && this.model.length > 0
+      ? agyReasoningEffortForModel(this.model)
+      : undefined;
+    if (pinnedAgyEffort !== undefined && efforts.includes(pinnedAgyEffort)) {
+      this.reasoningEffort = pinnedAgyEffort;
+      return;
+    }
+    const selectedModel = this.modelCatalog(this.provider)
+      .find((entry) => entry.id === this.effectiveModel());
+    this.reasoningEffort = preferredReasoningEffort(
+      this.reasoningEffort,
+      efforts,
+      selectedModel,
+    );
   }
 
   private async buildPreview(
@@ -3458,6 +4461,8 @@ export class PracticeLabView extends ItemView {
       new Notice(
         gate.invalidContentCount > 0
           ? "Every kept exercise needs a prompt and grounded answer before saving."
+          : gate.invalidLatexCount > 0
+            ? "Fix every highlighted LaTeX delimiter or brace before saving."
           : gate.hasUnreviewedOcclusion
           ? "Review and accept every kept occlusion mask before saving."
           : "Keep at least one exercise before saving.",
@@ -3592,6 +4597,11 @@ export class PracticeLabView extends ItemView {
       message?.setText(
         `${gate.invalidContentCount} kept ${gate.invalidContentCount === 1 ? "exercise needs" : "exercises need"} both a prompt and grounded answer.`,
       );
+    } else if (gate.invalidLatexCount > 0) {
+      notice.hidden = false;
+      message?.setText(
+        `${gate.invalidLatexCount} kept ${gate.invalidLatexCount === 1 ? "exercise has" : "exercises have"} malformed LaTeX. Open its rendered preview and fix the highlighted delimiter or brace.`,
+      );
     } else if (gate.hasUnreviewedOcclusion) {
       notice.hidden = false;
       message?.setText(
@@ -3699,8 +4709,7 @@ export class PracticeLabView extends ItemView {
         : exercise.grading.kind === "multi-select"
           ? sameStringSet(chosen, exercise.grading.correctChoiceIds)
           : false;
-    this.studySubmitted = { answer: chosen.join(","), correct };
-    this.render();
+    this.setStudySubmitted({ answer: chosen.join(","), correct });
   }
 
   private gradeMatching(
@@ -3723,8 +4732,7 @@ export class PracticeLabView extends ItemView {
     const correct = Object.entries(exercise.grading.correctPairs).every(
       ([left, right]) => answer[left] === right,
     );
-    this.studySubmitted = { answer: JSON.stringify(answer), correct };
-    this.render();
+    this.setStudySubmitted({ answer: JSON.stringify(answer), correct });
   }
 
   private gradeOrdering(exercise: EditableDraftExercise): void {
@@ -3735,8 +4743,7 @@ export class PracticeLabView extends ItemView {
       this.orderingState.every(
         (id, index) => id === correctOrder[index],
       );
-    this.studySubmitted = { answer: this.orderingState.join(","), correct };
-    this.render();
+    this.setStudySubmitted({ answer: this.orderingState.join(","), correct });
   }
 
   private gradeOcclusion(
@@ -3760,11 +4767,10 @@ export class PracticeLabView extends ItemView {
         (answer) => normalizeAnswer(answer) === normalizeAnswer(input.value),
       );
     });
-    this.studySubmitted = {
+    this.setStudySubmitted({
       answer: inputs.map((input) => input.value).join(" | "),
       correct,
-    };
-    this.render();
+    });
   }
 
   private gradeCloze(
@@ -3793,8 +4799,7 @@ export class PracticeLabView extends ItemView {
           normalizeAnswer(actual, blank.caseSensitive),
       );
     });
-    this.studySubmitted = { answer: JSON.stringify(values), correct };
-    this.render();
+    this.setStudySubmitted({ answer: JSON.stringify(values), correct });
   }
 
   private moveOrderingItem(from: number, to: number): void {
@@ -3804,14 +4809,174 @@ export class PracticeLabView extends ItemView {
     if (removed === undefined) return;
     next.splice(to, 0, removed);
     this.orderingState = next;
+    this.updateStudyCurrentInput({ ordering: [...next] });
     this.render();
   }
 
-  private recordAndContinue(answer: StudyAnswerRecord): void {
+  private async recordAndContinue(answer: StudyAnswerRecord): Promise<void> {
+    const activeLesson = this.studyLearningProgress?.activeLesson ?? null;
+    if (activeLesson?.lesson.guidedExerciseId === answer.exerciseId) {
+      await this.recordGuidedTutorAttempt(answer);
+      return;
+    }
+    const previousAnswers = this.studyAnswers;
+    const previousIndex = this.studyIndex;
+    const previousSubmitted = this.studySubmitted;
+    const previousInput = this.studyCurrentInput;
+    const previousLearningProgress = this.studyLearningProgress;
+    let nextLearningProgress = previousLearningProgress;
+    if (previousLearningProgress !== null) {
+      const evidence = this.studyLearningEvidenceByExerciseId.get(answer.exerciseId);
+      if (evidence === undefined) {
+        new Notice("This learning-path exercise has no locked evidence assignment, so the session did not advance.", 10_000);
+        return;
+      }
+      nextLearningProgress = {
+        ...previousLearningProgress,
+        evidence: [
+          ...previousLearningProgress.evidence,
+          structuredClone(evidence),
+        ],
+      };
+    }
     this.studyAnswers = [...this.studyAnswers, answer];
+    this.studyLearningProgress = nextLearningProgress;
     this.studyIndex += 1;
     this.studySubmitted = null;
     this.resetOrderingState();
+    this.resetStudyCurrentInput();
+    try {
+      await this.persistStudyCheckpoint();
+      this.studyCheckpointWarningShown = false;
+    } catch (error) {
+      this.studyAnswers = previousAnswers;
+      this.studyIndex = previousIndex;
+      this.studySubmitted = previousSubmitted;
+      this.studyCurrentInput = previousInput;
+      this.studyLearningProgress = previousLearningProgress;
+      this.orderingState = previousInput?.ordering !== undefined
+        ? [...previousInput.ordering]
+        : [];
+      new Notice(this.errorMessage(
+        error,
+        "Could not save this answer checkpoint. The session did not advance.",
+      ));
+    }
+    this.render();
+  }
+
+  private async recordGuidedTutorAttempt(answer: StudyAnswerRecord): Promise<void> {
+    const progress = this.studyLearningProgress;
+    const active = progress?.activeLesson ?? null;
+    if (progress === null || active === null) return;
+    const previousProgress = structuredClone(progress);
+    const previousSubmitted = this.studySubmitted;
+    const previousInput = this.studyCurrentInput;
+    const outcome = guidedOutcome(answer);
+    const submittedAnswer = answer.submittedAnswer
+      ?? this.studySubmitted?.answer
+      ?? "";
+    try {
+      const firstAttempt = active.state.originalIndependentAttempt === null;
+      const state = firstAttempt
+        ? recordIndependentAttempt(active.state, {
+            exerciseId: answer.exerciseId,
+            outcome,
+            submittedAnswer,
+          })
+        : recordRecoveryAttempt(active.state, {
+            exerciseId: answer.exerciseId,
+            outcome,
+            submittedAnswer,
+          });
+      const originalAnswer = firstAttempt
+        ? answer
+        : parseLockedTutorAnswer(active.currentInput, answer.exerciseId);
+      this.studyLearningProgress = {
+        ...progress,
+        activeLesson: {
+          ...active,
+          state,
+          currentInput: serializeLockedTutorAnswer(originalAnswer),
+        },
+      };
+      this.studySubmitted = null;
+      this.resetOrderingState();
+      this.resetStudyCurrentInput();
+      await this.flushStudyCheckpoint();
+      if (state.phase === "complete") {
+        await this.finalizeTutorLesson(originalAnswer);
+      } else {
+        this.studyTutorProblemStarted = true;
+        this.render();
+      }
+    } catch (error) {
+      this.studyLearningProgress = previousProgress;
+      this.studySubmitted = previousSubmitted;
+      this.studyCurrentInput = previousInput;
+      new Notice(this.errorMessage(error, "Could not save the guided attempt."), 10_000);
+    }
+  }
+
+  private async completeUnresolvedTutorLesson(): Promise<void> {
+    const progress = this.studyLearningProgress;
+    const active = progress?.activeLesson ?? null;
+    if (progress === null || active === null || active.state.originalIndependentAttempt === null) {
+      return;
+    }
+    const previous = structuredClone(progress);
+    try {
+      const state = completeGuidedLesson(active.state);
+      this.studyLearningProgress = {
+        ...progress,
+        activeLesson: { ...active, state },
+      };
+      await this.flushStudyCheckpoint();
+      await this.finalizeTutorLesson(
+        parseLockedTutorAnswer(active.currentInput, active.lesson.guidedExerciseId),
+      );
+    } catch (error) {
+      this.studyLearningProgress = previous;
+      new Notice(this.errorMessage(error, "Could not finish the guided recovery."), 10_000);
+    }
+  }
+
+  private async finalizeTutorLesson(originalAnswer: StudyAnswerRecord): Promise<void> {
+    const progress = this.studyLearningProgress;
+    const active = progress?.activeLesson ?? null;
+    if (progress === null || active === null || active.state.phase !== "complete") return;
+    const evidence = this.studyLearningEvidenceByExerciseId.get(originalAnswer.exerciseId);
+    if (evidence === undefined) {
+      throw new Error("The guided problem has no locked learning-evidence assignment.");
+    }
+    const assistance = guidedAssistanceSummary(active.state);
+    const completed: CompletedTutorLessonSnapshotV3 = {
+      lesson: { id: active.lesson.id, title: active.lesson.title },
+      aspects: evidence.aspects
+        .filter((aspect) => active.lesson.aspectIds.includes(aspect.id))
+        .map((aspect) => structuredClone(aspect)),
+    };
+    this.studyAnswers = [...this.studyAnswers, structuredClone(originalAnswer)];
+    this.studyLearningProgress = {
+      ...progress,
+      activeLesson: null,
+      evidence: [
+        ...progress.evidence,
+        {
+          ...structuredClone(evidence),
+          hintsRevealed: assistance.hintsRevealed,
+          retries: assistance.retries,
+          recoveryOutcome: assistance.recoveryOutcome,
+        },
+      ],
+      completedTutorLessons: [...progress.completedTutorLessons, completed],
+    };
+    this.studyIndex += 1;
+    this.studySubmitted = null;
+    this.studyTutorProblemStarted = false;
+    this.resetOrderingState();
+    this.resetStudyCurrentInput();
+    await this.flushStudyCheckpoint();
     this.render();
   }
 
@@ -3820,7 +4985,144 @@ export class PracticeLabView extends ItemView {
     this.orderingState = exercise?.orderingItems?.map((item) => item.id) ?? [];
   }
 
-  private async finishStudy(practiceAgain: boolean): Promise<void> {
+  private resetStudyCurrentInput(): void {
+    const exercise = this.studyExercises[this.studyIndex];
+    this.studyCurrentInput = exercise === undefined
+      ? null
+      : {
+          exerciseId: exercise.id,
+          fields: {},
+          selectedIds: [],
+          ordering: [...this.orderingState],
+          submitted: null,
+        };
+  }
+
+  private updateStudyInputField(key: string, value: string): void {
+    const current = this.studyCurrentInput;
+    if (current === null) return;
+    this.updateStudyCurrentInput({
+      fields: { ...current.fields, [key]: value },
+    });
+  }
+
+  private updateStudyCurrentInput(
+    patch: Partial<Omit<StudyCurrentInputStateV1, "exerciseId">>,
+  ): void {
+    const current = this.studyCurrentInput;
+    if (current === null) return;
+    this.studyCurrentInput = {
+      ...current,
+      ...patch,
+      fields: patch.fields === undefined
+        ? current.fields
+        : { ...patch.fields },
+      selectedIds: patch.selectedIds === undefined
+        ? current.selectedIds
+        : [...patch.selectedIds],
+      ordering: patch.ordering === undefined
+        ? current.ordering
+        : [...patch.ordering],
+    };
+    this.scheduleStudyCheckpoint();
+  }
+
+  private setStudySubmitted(
+    submitted: { readonly correct?: boolean; readonly answer: string },
+  ): void {
+    this.studySubmitted = submitted;
+    if (this.studyCurrentInput !== null) {
+      this.studyCurrentInput = {
+        ...this.studyCurrentInput,
+        ordering: [...this.orderingState],
+        submitted: structuredClone(submitted),
+      };
+    }
+    void this.flushStudyCheckpoint().catch(() => undefined);
+    this.render();
+  }
+
+  private studyProgress(): StudySessionProgressV1 | null {
+    const origin = this.studyOrigin;
+    if (origin === null || this.studySessionId.length === 0) return null;
+    return {
+      ...origin,
+      sessionId: this.studySessionId,
+      startedAt: this.studyStartedAt,
+      orderedExerciseIds: this.studyExercises.map((exercise) => exercise.id),
+      currentQuestionIndex: this.studyIndex,
+      answers: structuredClone(this.studyAnswers),
+      currentInput: structuredClone(this.studyCurrentInput),
+      answerReviewMode: this.answerReviewMode,
+      answerReviewProvider: this.answerReviewProvider,
+      answerReviewReasoningEffort: this.answerReviewReasoningEffort,
+      ...(this.studyLearningProgress === null
+        ? {}
+        : { learningProgress: structuredClone(this.studyLearningProgress) }),
+    };
+  }
+
+  private scheduleStudyCheckpoint(): void {
+    if (this.options.callbacks.persistStudyCheckpoint === undefined) return;
+    this.clearStudyCheckpointTimer();
+    this.studyCheckpointTimer = window.setTimeout(() => {
+      this.studyCheckpointTimer = undefined;
+      void this.persistStudyCheckpoint().catch((error: unknown) => {
+        if (this.studyCheckpointWarningShown) return;
+        this.studyCheckpointWarningShown = true;
+        new Notice(this.errorMessage(
+          error,
+          "Current input could not be checkpointed. Keep this view open and retry typing before leaving Obsidian.",
+        ), 10_000);
+      });
+    }, 400);
+  }
+
+  private clearStudyCheckpointTimer(): void {
+    if (this.studyCheckpointTimer === undefined) return;
+    window.clearTimeout(this.studyCheckpointTimer);
+    this.studyCheckpointTimer = undefined;
+  }
+
+  private async flushStudyCheckpoint(): Promise<void> {
+    this.clearStudyCheckpointTimer();
+    try {
+      await this.persistStudyCheckpoint();
+      this.studyCheckpointWarningShown = false;
+    } catch (error) {
+      if (!this.studyCheckpointWarningShown) {
+        this.studyCheckpointWarningShown = true;
+        new Notice(this.errorMessage(
+          error,
+          "The active study checkpoint could not be saved.",
+        ), 10_000);
+      }
+      throw error;
+    }
+  }
+
+  private async persistStudyCheckpoint(): Promise<void> {
+    const callback = this.options.callbacks.persistStudyCheckpoint;
+    const progress = this.studyProgress();
+    if (callback === undefined || progress === null) return;
+    await callback(progress);
+  }
+
+  private studyHasRepairOpportunity(): boolean {
+    return this.studyAnswers.some((answer) => (
+      answer.correct === false
+      || answer.rating === "again"
+      || answer.rating === "hard"
+      || (
+        answer.aiReview?.status.state === "reviewed"
+        && answer.aiReview.status.verdict !== "correct"
+      )
+    )) || this.studyLearningProgress?.evidence.some((entry) => (
+      entry.independent && entry.recoveryOutcome === "unresolved"
+    )) === true;
+  }
+
+  private async finishStudy(action: "save" | "repeat" | "repair"): Promise<void> {
     const source = this.source;
     if (source === null || this.studyFinishing) return;
     const session: FinishedStudySession = {
@@ -3828,7 +5130,25 @@ export class PracticeLabView extends ItemView {
       startedAt: this.studyStartedAt,
       finishedAt: new Date().toISOString(),
       answers: this.studyAnswers,
+      ...(this.studyOrigin === null
+        ? {}
+        : {
+            bankRevisionAtStart: this.studyOrigin.bankRevisionAtStart,
+            exerciseCountAtStart: this.studyOrigin.exerciseCountAtStart,
+            orderedExerciseIds: this.studyExercises.map((exercise) => exercise.id),
+          }),
+      ...(this.studyLearningProgress === null
+        ? {}
+        : {
+            learning: {
+              scope: structuredClone(this.studyLearningProgress.scope),
+              evidence: this.studyLearningProgress.evidence.map((entry) => structuredClone(entry)),
+              completedTutorLessons: this.studyLearningProgress.completedTutorLessons.map((entry) => structuredClone(entry)),
+            },
+          }),
     };
+    const practiceAgain = action === "repeat";
+    const buildRepair = action === "repair";
     const repeatExercises = [...this.studyExercises];
     const repeatReview = {
       mode: this.answerReviewMode,
@@ -3841,6 +5161,22 @@ export class PracticeLabView extends ItemView {
     try {
       await this.options.callbacks.finishSession(source, session);
       this.studyFinishing = false;
+      this.clearStudyCheckpointTimer();
+      this.studyOrigin = null;
+      this.studyLearningProgress = null;
+      this.studyLearningEvidenceByExerciseId.clear();
+      this.studyTutorProblemStarted = false;
+      this.studyCurrentInput = null;
+      if (buildRepair) {
+        try {
+          await this.options.callbacks.buildRepairSet?.(source, session);
+        } catch (error) {
+          new Notice(this.errorMessage(
+            error,
+            "The session was saved, but the repair-set editor could not be opened.",
+          ), 10_000);
+        }
+      }
       new Notice(
         practiceAgain
           ? "Session history saved. Starting a new run."
@@ -3917,6 +5253,53 @@ export class PracticeLabView extends ItemView {
       ? error.message
       : fallback;
   }
+}
+
+function tutorBlockLabel(
+  kind: "why" | "prerequisite" | "explanation" | "worked-example" | "causal-walkthrough",
+): string {
+  if (kind === "why") return "Why it matters";
+  if (kind === "prerequisite") return "Required prerequisite";
+  if (kind === "worked-example") return "Worked example";
+  if (kind === "causal-walkthrough") return "Causal walkthrough";
+  return "Connected explanation";
+}
+
+function guidedOutcome(answer: StudyAnswerRecord): GuidedAttemptOutcome {
+  if (answer.correct !== undefined) return answer.correct ? "correct" : "incorrect";
+  if (answer.rating === "easy" || answer.rating === "good") return "correct";
+  if (answer.rating === "hard") return "partial";
+  return answer.rating === "again" ? "incorrect" : "partial";
+}
+
+function serializeLockedTutorAnswer(answer: StudyAnswerRecord): string {
+  return JSON.stringify({ schemaVersion: 1, answer });
+}
+
+function parseLockedTutorAnswer(
+  serialized: string,
+  exerciseId: string,
+): StudyAnswerRecord {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new Error("The locked first guided attempt is unreadable.");
+  }
+  if (
+    typeof value !== "object"
+    || value === null
+    || !("schemaVersion" in value)
+    || value.schemaVersion !== 1
+    || !("answer" in value)
+    || typeof value.answer !== "object"
+    || value.answer === null
+    || !("exerciseId" in value.answer)
+    || value.answer.exerciseId !== exerciseId
+  ) {
+    throw new Error("The locked first guided attempt does not match this exercise.");
+  }
+  return structuredClone(value.answer) as StudyAnswerRecord;
 }
 
 function appendActivityEvent(

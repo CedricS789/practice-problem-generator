@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [settingsSource, settingsValuesSource, mainSource, viewSource, dashboardSource, bankSource, hoverSource] = await Promise.all([
+const [settingsSource, settingsValuesSource, mainSource, viewSource, dashboardSource, bankSource, hoverSource, studyOrderSource] = await Promise.all([
   readFile(new URL("../src/settings.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/settings-values.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
@@ -10,6 +10,7 @@ const [settingsSource, settingsValuesSource, mainSource, viewSource, dashboardSo
   readFile(new URL("../src/ui/practice-dashboard-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/bank-statistics-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/hover-descriptions.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/ui/study-order-modal.ts", import.meta.url), "utf8"),
 ]);
 
 test("settings expose generation, study, view, bank, and dashboard control groups", () => {
@@ -36,6 +37,8 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "pdfinfoExecutable",
     "pdftotextExecutable",
     "studyOrderDefault",
+    "studyTypeSequence",
+    "studyShuffleWithinTypesDefault",
     "exerciseTypePercentages",
     "dashboardActivityRangeWeeks",
     "dashboardActivityMetric",
@@ -59,10 +62,48 @@ test("all major surfaces provide native hover descriptions for interactive contr
 });
 
 test("generation and answer review expose every provider-supported reasoning choice", () => {
-  assert.match(settingsSource, /reasoningEffortDescription\(this\.owner\.settings\.provider\)/u);
+  assert.match(settingsSource, /defaultModelReasoningEfforts\(\)/u);
   assert.match(settingsSource, /reasoningEffortsForProvider\(this\.owner\.settings\.answerReviewProvider\)/u);
-  assert.match(viewSource, /selectedProvider\?\.reasoningEfforts \?\? \[\]/u);
+  assert.match(viewSource, /supportedReasoningEfforts\(\)/u);
+  assert.match(viewSource, /reasoningEffortsForModel/u);
   assert.match(viewSource, /reasoningEffortDescription\(this\.answerReviewProvider\)/u);
+});
+
+test("generation defaults expose detected-model dropdowns and preserve custom ids", () => {
+  for (const source of [settingsSource, viewSource]) {
+    assert.match(source, /AUTOMATIC_MODEL_CHOICE/u);
+    assert.match(source, /CUSTOM_MODEL_CHOICE/u);
+    assert.match(source, /modelsForProvider/u);
+    assert.match(source, /Custom model id…/u);
+  }
+  assert.match(settingsSource, /this\.owner\.providerPresentation\(provider\)/u);
+  assert.match(viewSource, /modelCatalogDetail/u);
+  assert.match(viewSource, /Only levels supported by the selected model are listed/u);
+  assert.match(settingsSource, /normalizeDefaultModelReasoning\(\)/u);
+  assert.match(settingsSource, /reasoningWasAdjusted/u);
+  assert.match(settingsSource, /modelSettingsSaveChain/u);
+  assert.match(settingsSource, /input\.addEventListener\("change"/u);
+});
+
+test("custom model ids commit atomically instead of persisting partial input", () => {
+  const inputStart = settingsSource.indexOf('input.addEventListener("input"');
+  const changeStart = settingsSource.indexOf(
+    'input.addEventListener("change"',
+    inputStart,
+  );
+  const changeEnd = settingsSource.indexOf(
+    "private queueModelSettingsSave",
+    changeStart,
+  );
+  assert.ok(inputStart >= 0 && changeStart > inputStart && changeEnd > changeStart);
+
+  const inputHandler = settingsSource.slice(inputStart, changeStart);
+  assert.doesNotMatch(inputHandler, /this\.owner\.settings\[key\] = value/u);
+  assert.doesNotMatch(inputHandler, /queueModelSettingsSave/u);
+
+  const changeHandler = settingsSource.slice(changeStart, changeEnd);
+  assert.match(changeHandler, /this\.owner\.settings\[key\] = value/u);
+  assert.match(changeHandler, /this\.queueModelSettingsSave\(\)/u);
 });
 
 test("ordinary preference saves do not restart provider detection", () => {
@@ -82,10 +123,13 @@ test("defaults reach new work without changing persisted banks", () => {
     "focusInstructions: this.settings.defaultFocusInstructions",
     "visualSelectionDefault: this.settings.visualSelectionDefault",
     "studyOrderDefault: this.settings.studyOrderDefault",
+    "studyTypeSequence: [...this.settings.studyTypeSequence]",
+    "studyShuffleWithinTypesDefault:",
   ]) {
     assert.ok(mainSource.includes(property), `Missing default wiring: ${property}`);
   }
-  assert.match(viewSource, /orderStudyItems\(selectedExercises, "shuffle"\)/u);
+  assert.match(viewSource, /chooseStudyOrder\(this\.app/u);
+  assert.match(viewSource, /orderStudyItems\(selectedExercises, selection\)/u);
   assert.match(viewSource, /prepareDefaultVisuals === true/u);
   assert.match(viewSource, /this\.selectAllImages\(false\)/u);
   assert.match(mainSource, /model: modelForProvider\(this\.settings, this\.settings\.provider\)/u);
@@ -121,6 +165,25 @@ test("optional presentation never hides consent or repair controls", () => {
   }
 });
 
+test("every study launch offers whole-question and type-aware ordering", () => {
+  for (const mode of [
+    "Use saved bank order",
+    "Shuffle every question",
+    "Shuffle type blocks",
+    "Follow custom type sequence",
+  ]) {
+    assert.ok(studyOrderSource.includes(mode), `Missing session order mode: ${mode}`);
+  }
+  assert.match(studyOrderSource, /Shuffle within each type/u);
+  assert.match(studyOrderSource, /Remember these defaults/u);
+  assert.match(studyOrderSource, /this\.moveType\(index, index - 1\)/u);
+  assert.match(studyOrderSource, /this\.moveType\(index, index \+ 1\)/u);
+  assert.match(studyOrderSource, /the saved bank is never reordered/u);
+  assert.match(viewSource, /updateStudyOrderDefaults\?\.\(selection\)/u);
+  assert.match(settingsSource, /Default type sequence/u);
+  assert.match(settingsSource, /Restore recommended sequence/u);
+});
+
 test("three-hour AI defaults migrate durably and live activity stays optional", () => {
   assert.match(settingsValuesSource, /DEFAULT_AI_TIMEOUT_MS = 3 \* 60 \* 60 \* 1_000/u);
   assert.match(settingsSource, /setPlaceholder\("180"\)/u);
@@ -128,8 +191,9 @@ test("three-hour AI defaults migrate durably and live activity stays optional", 
   assert.match(settingsSource, /LEGACY_DEFAULT_AGY_MODEL/u);
   assert.match(settingsSource, /agyModelForReasoning/u);
   assert.match(settingsSource, /Private chain-of-thought is never exposed or saved/u);
-  assert.match(mainSource, /JSON\.stringify\(storedSettings\) !== JSON\.stringify\(this\.settings\)/u);
-  assert.match(mainSource, /await this\.saveData\(this\.settings\)/u);
+  assert.match(mainSource, /JSON\.stringify\(storedData\) !== JSON\.stringify\(this\.storedDataSnapshot\(\)\)/u);
+  assert.match(mainSource, /await this\.persistStoredData\(\)/u);
+  assert.doesNotMatch(mainSource, /await this\.saveData\(this\.settings\)/u);
   assert.match(viewSource, /onActivity: \(event\) => this\.publishGenerationActivity\(event\)/u);
   assert.match(viewSource, /publishAnswerReviewActivity/u);
   assert.match(viewSource, /this activity log is capped and is not saved to your vault/u);

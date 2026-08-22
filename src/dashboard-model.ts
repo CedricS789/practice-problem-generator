@@ -1,7 +1,15 @@
 import type {
   ExerciseV1,
-  PracticeBankV2,
+  LearningPathStartingLevelV1,
+  PracticeBankV3,
 } from "./model";
+import {
+  deriveLearningAnalytics,
+  recommendNextLearningStep,
+  type LearningEvidenceMetrics,
+  type LearningEvidenceState,
+  type RecommendedNextLearningStep,
+} from "./learning-analytics";
 import {
   calculatePerformanceScore,
   calculatePracticeBankStatistics,
@@ -13,7 +21,7 @@ import {
 
 export interface DashboardBankRecord {
   readonly bankPath: string;
-  readonly bank: PracticeBankV2;
+  readonly bank: PracticeBankV3;
   readonly sourceTags: readonly string[];
   readonly sourceExists: boolean;
 }
@@ -88,6 +96,74 @@ export interface DashboardBankSummary {
   readonly pendingAiReviewCount: number;
   readonly failedAiReviewCount: number;
   readonly provisional: boolean;
+  readonly learningPath: DashboardLearningPathSummary | null;
+}
+
+export interface DashboardLearningEvidenceRow extends LearningEvidenceMetrics {
+  readonly id: string;
+  readonly title: string;
+  readonly historicalOnly: boolean;
+}
+
+export interface DashboardLearningPathSummary {
+  readonly pathId: string;
+  readonly title: string;
+  readonly startingLevel: LearningPathStartingLevelV1;
+  readonly setCount: number;
+  readonly lessonCount: number;
+  readonly completedLessonCount: number;
+  readonly lessonCompletionPercent: number | null;
+  readonly remainingLessonTitles: readonly string[];
+  readonly sourceMaterialCount: number;
+  readonly sourceSegmentCount: number;
+  readonly coveredSourceSegmentCount: number;
+  readonly sourceCoveragePercent: number | null;
+  readonly supportedAspectCount: number;
+  readonly unresolvedSourceGapCount: number;
+  readonly unresolvedSourceGapTitles: readonly string[];
+  readonly unpracticedAspectCount: number;
+  readonly developingAspectCount: number;
+  readonly consistentAspectCount: number;
+  readonly independentAttempts: number;
+  readonly independentEarnedPoints: number;
+  readonly independentPerformancePercent: number | null;
+  readonly guidedAttempts: number;
+  readonly assistedGuidedAttemptCount: number;
+  readonly assistanceRatePercent: number | null;
+  readonly hintsRevealed: number;
+  readonly retries: number;
+  readonly recoveredCount: number;
+  readonly unresolvedCount: number;
+  readonly recoveryRatePercent: number | null;
+  readonly aspects: readonly DashboardLearningEvidenceRow[];
+  readonly sets: readonly DashboardLearningEvidenceRow[];
+  readonly recommendation: RecommendedNextLearningStep | null;
+}
+
+export interface DashboardLearningOverview {
+  readonly pathBankCount: number;
+  readonly supportedAspectCount: number;
+  readonly unresolvedSourceGapCount: number;
+  readonly unpracticedAspectCount: number;
+  readonly developingAspectCount: number;
+  readonly consistentAspectCount: number;
+  readonly independentAttempts: number;
+  readonly independentEarnedPoints: number;
+  readonly independentPerformancePercent: number | null;
+  readonly lessonCount: number;
+  readonly completedLessonCount: number;
+  readonly lessonCompletionPercent: number | null;
+  readonly sourceSegmentCount: number;
+  readonly coveredSourceSegmentCount: number;
+  readonly sourceCoveragePercent: number | null;
+  readonly guidedAttempts: number;
+  readonly assistedGuidedAttemptCount: number;
+  readonly assistanceRatePercent: number | null;
+  readonly hintsRevealed: number;
+  readonly retries: number;
+  readonly recoveredCount: number;
+  readonly unresolvedCount: number;
+  readonly recoveryRatePercent: number | null;
 }
 
 /**
@@ -138,6 +214,7 @@ export interface PracticeDashboardSummary {
   readonly typeBreakdown: readonly DashboardExerciseTypeSummary[];
   readonly recentSessions: readonly DashboardRecentSession[];
   readonly banks: readonly DashboardBankSummary[];
+  readonly learning: DashboardLearningOverview;
 }
 
 const EXERCISE_TYPE_ORDER = [
@@ -261,6 +338,17 @@ function safeRecords(records: readonly DashboardBankRecord[]): DashboardBankReco
   return records.filter((record) => !duplicates.has(record.bank.bankId));
 }
 
+export function countDashboardBanks(
+  records: readonly DashboardBankRecord[],
+  scopeOrFilter: DashboardScope | DashboardFilter,
+): number {
+  const filter = normalizeFilter(scopeOrFilter);
+  const duplicateIds = duplicateBankIds(records);
+  return records.filter((record) => (
+    !duplicateIds.has(record.bank.bankId) && matchesFilter(record, filter)
+  )).length;
+}
+
 function percentage(numerator: number, denominator: number): number | null {
   return denominator === 0 ? null : Math.round(numerator / denominator * 100);
 }
@@ -329,6 +417,227 @@ interface BankAggregation {
   readonly totalAvailableAnswers: number;
 }
 
+interface GuidedAttemptSummary {
+  readonly guidedAttempts: number;
+  readonly assistedGuidedAttemptCount: number;
+  readonly hintsRevealed: number;
+  readonly retries: number;
+  readonly recoveredCount: number;
+  readonly unresolvedCount: number;
+}
+
+function guidedAttemptSummary(bank: PracticeBankV3): GuidedAttemptSummary {
+  let guidedAttempts = 0;
+  let assistedGuidedAttemptCount = 0;
+  let hintsRevealed = 0;
+  let retries = 0;
+  let recoveredCount = 0;
+  let unresolvedCount = 0;
+  for (const session of bank.sessions) {
+    const resultIds = new Set(session.results.map((result) => result.exerciseId));
+    const seen = new Set<string>();
+    for (const evidence of session.evidence) {
+      if (
+        evidence.independent
+        || seen.has(evidence.exerciseId)
+        || !resultIds.has(evidence.exerciseId)
+      ) continue;
+      seen.add(evidence.exerciseId);
+      guidedAttempts += 1;
+      hintsRevealed += evidence.hintsRevealed;
+      retries += evidence.retries;
+      if (evidence.recoveryOutcome === "recovered") recoveredCount += 1;
+      if (evidence.recoveryOutcome === "unresolved") unresolvedCount += 1;
+      if (
+        evidence.hintsRevealed > 0
+        || evidence.retries > 0
+        || evidence.recoveryOutcome === "recovered"
+        || evidence.recoveryOutcome === "unresolved"
+      ) assistedGuidedAttemptCount += 1;
+    }
+  }
+  return {
+    guidedAttempts,
+    assistedGuidedAttemptCount,
+    hintsRevealed,
+    retries,
+    recoveredCount,
+    unresolvedCount,
+  };
+}
+
+function learningEvidenceRow(
+  entry: {
+    readonly title: string;
+    readonly historicalOnly: boolean;
+  } & LearningEvidenceMetrics,
+  id: string,
+): DashboardLearningEvidenceRow {
+  return {
+    id,
+    title: entry.title,
+    historicalOnly: entry.historicalOnly,
+    state: entry.state,
+    independentAttempts: entry.independentAttempts,
+    independentSessionCount: entry.independentSessionCount,
+    guidedAttempts: entry.guidedAttempts,
+    earnedPoints: entry.earnedPoints,
+    weightedPercent: entry.weightedPercent,
+    latestOutcome: entry.latestOutcome,
+    hintsRevealed: entry.hintsRevealed,
+    retries: entry.retries,
+    recoveredCount: entry.recoveredCount,
+    unresolvedCount: entry.unresolvedCount,
+    pendingReviewCount: entry.pendingReviewCount,
+    failedReviewCount: entry.failedReviewCount,
+  };
+}
+
+function learningPathSummary(bank: PracticeBankV3): DashboardLearningPathSummary | null {
+  const path = bank.learningPath;
+  if (path === null) return null;
+  const analytics = deriveLearningAnalytics(bank);
+  const supportedAspects = bank.aspects.filter((aspect) => aspect.status === "supported");
+  const supportedAspectIds = new Set(supportedAspects.map((aspect) => aspect.id));
+  const unresolvedGaps = bank.aspects.filter((aspect) => aspect.status === "source-gap");
+  const currentAspectEvidence = analytics.aspects.filter(
+    (aspect) => !aspect.historicalOnly && supportedAspectIds.has(aspect.aspectId),
+  );
+  const currentLessonIds = new Set(path.steps.flatMap((step) => (
+    step.kind === "lesson" ? [step.lessonId] : []
+  )));
+  const currentLessons = bank.tutorLessons.filter((lesson) => currentLessonIds.has(lesson.id));
+  const completedLessonIds = new Set(bank.sessions.flatMap((session) => (
+    session.completedTutorLessons.map((entry) => entry.lesson.id)
+  )));
+  const completedLessonCount = currentLessons.filter(
+    (lesson) => completedLessonIds.has(lesson.id),
+  ).length;
+  const sourceSegmentIds = new Set(bank.sourceMaterials.flatMap(
+    (material) => material.segmentIds,
+  ));
+  const coveredSourceSegmentIds = new Set(supportedAspects.flatMap(
+    (aspect) => aspect.sourceSegmentIds.filter((id) => sourceSegmentIds.has(id)),
+  ));
+  const independentAttempts = analytics.sets.reduce(
+    (total, set) => total + set.independentAttempts,
+    0,
+  );
+  const independentEarnedPoints = analytics.sets.reduce(
+    (total, set) => total + set.earnedPoints,
+    0,
+  );
+  const guided = guidedAttemptSummary(bank);
+  const pathSetIds = new Set(path.steps.flatMap((step) => (
+    step.kind === "practice-set" ? [step.setId] : []
+  )));
+
+  return {
+    pathId: path.id,
+    title: path.title,
+    startingLevel: path.startingLevel,
+    setCount: pathSetIds.size,
+    lessonCount: currentLessons.length,
+    completedLessonCount,
+    lessonCompletionPercent: percentage(completedLessonCount, currentLessons.length),
+    remainingLessonTitles: currentLessons
+      .filter((lesson) => !completedLessonIds.has(lesson.id))
+      .map((lesson) => lesson.title),
+    sourceMaterialCount: bank.sourceMaterials.length,
+    sourceSegmentCount: sourceSegmentIds.size,
+    coveredSourceSegmentCount: coveredSourceSegmentIds.size,
+    sourceCoveragePercent: percentage(coveredSourceSegmentIds.size, sourceSegmentIds.size),
+    supportedAspectCount: supportedAspects.length,
+    unresolvedSourceGapCount: unresolvedGaps.length,
+    unresolvedSourceGapTitles: unresolvedGaps.map((aspect) => aspect.title),
+    unpracticedAspectCount: currentAspectEvidence.filter(
+      (aspect) => aspect.state === "Unpracticed",
+    ).length,
+    developingAspectCount: currentAspectEvidence.filter(
+      (aspect) => aspect.state === "Developing",
+    ).length,
+    consistentAspectCount: currentAspectEvidence.filter(
+      (aspect) => aspect.state === "Consistent evidence",
+    ).length,
+    independentAttempts,
+    independentEarnedPoints,
+    independentPerformancePercent: percentage(independentEarnedPoints, independentAttempts),
+    ...guided,
+    assistanceRatePercent: percentage(
+      guided.assistedGuidedAttemptCount,
+      guided.guidedAttempts,
+    ),
+    recoveryRatePercent: percentage(
+      guided.recoveredCount,
+      guided.recoveredCount + guided.unresolvedCount,
+    ),
+    aspects: analytics.aspects
+      .filter((aspect) => aspect.historicalOnly || supportedAspectIds.has(aspect.aspectId))
+      .map((aspect) => learningEvidenceRow(aspect, aspect.aspectId)),
+    sets: analytics.sets.map((set) => learningEvidenceRow(set, set.setId)),
+    recommendation: recommendNextLearningStep(bank, analytics),
+  };
+}
+
+function countEvidenceState(
+  paths: readonly DashboardLearningPathSummary[],
+  state: LearningEvidenceState,
+): number {
+  if (state === "Unpracticed") {
+    return paths.reduce((total, path) => total + path.unpracticedAspectCount, 0);
+  }
+  if (state === "Developing") {
+    return paths.reduce((total, path) => total + path.developingAspectCount, 0);
+  }
+  return paths.reduce((total, path) => total + path.consistentAspectCount, 0);
+}
+
+function aggregateLearningOverview(
+  banks: readonly DashboardBankSummary[],
+): DashboardLearningOverview {
+  const paths = banks.flatMap((bank) => (
+    bank.learningPath === null ? [] : [bank.learningPath]
+  ));
+  const sum = (select: (path: DashboardLearningPathSummary) => number): number => (
+    paths.reduce((total, path) => total + select(path), 0)
+  );
+  const independentAttempts = sum((path) => path.independentAttempts);
+  const independentEarnedPoints = sum((path) => path.independentEarnedPoints);
+  const lessonCount = sum((path) => path.lessonCount);
+  const completedLessonCount = sum((path) => path.completedLessonCount);
+  const sourceSegmentCount = sum((path) => path.sourceSegmentCount);
+  const coveredSourceSegmentCount = sum((path) => path.coveredSourceSegmentCount);
+  const guidedAttempts = sum((path) => path.guidedAttempts);
+  const assistedGuidedAttemptCount = sum((path) => path.assistedGuidedAttemptCount);
+  const recoveredCount = sum((path) => path.recoveredCount);
+  const unresolvedCount = sum((path) => path.unresolvedCount);
+  return {
+    pathBankCount: paths.length,
+    supportedAspectCount: sum((path) => path.supportedAspectCount),
+    unresolvedSourceGapCount: sum((path) => path.unresolvedSourceGapCount),
+    unpracticedAspectCount: countEvidenceState(paths, "Unpracticed"),
+    developingAspectCount: countEvidenceState(paths, "Developing"),
+    consistentAspectCount: countEvidenceState(paths, "Consistent evidence"),
+    independentAttempts,
+    independentEarnedPoints,
+    independentPerformancePercent: percentage(independentEarnedPoints, independentAttempts),
+    lessonCount,
+    completedLessonCount,
+    lessonCompletionPercent: percentage(completedLessonCount, lessonCount),
+    sourceSegmentCount,
+    coveredSourceSegmentCount,
+    sourceCoveragePercent: percentage(coveredSourceSegmentCount, sourceSegmentCount),
+    guidedAttempts,
+    assistedGuidedAttemptCount,
+    assistanceRatePercent: percentage(assistedGuidedAttemptCount, guidedAttempts),
+    hintsRevealed: sum((path) => path.hintsRevealed),
+    retries: sum((path) => path.retries),
+    recoveredCount,
+    unresolvedCount,
+    recoveryRatePercent: percentage(recoveredCount, recoveredCount + unresolvedCount),
+  };
+}
+
 function aggregateBank(record: DashboardBankRecord): BankAggregation {
   const statistics = calculatePracticeBankStatistics(record.bank);
   const typeByExerciseId = new Map(
@@ -383,6 +692,7 @@ function aggregateBank(record: DashboardBankRecord): BankAggregation {
       pendingAiReviewCount: statistics.pendingAiReviewCount,
       failedAiReviewCount: statistics.failedAiReviewCount,
       provisional: statistics.provisional,
+      learningPath: learningPathSummary(record.bank),
     },
     outcomesByType,
     attemptedIdsByType,
@@ -552,5 +862,6 @@ export function aggregatePracticeDashboard(
       .flatMap((aggregation) => aggregation.recentSessions)
       .sort(compareRecentSessions),
     banks,
+    learning: aggregateLearningOverview(banks),
   };
 }

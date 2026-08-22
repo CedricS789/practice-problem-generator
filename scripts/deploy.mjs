@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -121,7 +121,31 @@ export function mergeCommunityPlugins(current) {
   return current.includes(PLUGIN_ID) ? [...current] : [...current, PLUGIN_ID];
 }
 
-export async function deploy({ vault = resolveVault(), env = process.env, root = projectRoot } = {}) {
+export function assertPluginEnabled(current) {
+  if (!Array.isArray(current) || current.some((value) => typeof value !== "string")) {
+    throw new Error("community-plugins.json must be an array of plugin IDs.");
+  }
+  if (!current.includes(PLUGIN_ID)) {
+    throw new Error(
+      `Refusing runtime-only deployment because ${PLUGIN_ID} is not enabled in community-plugins.json.`
+    );
+  }
+}
+
+export function parseDeployArguments(argumentsList = process.argv.slice(2)) {
+  const unknown = argumentsList.filter((argument) => argument !== "--runtime-only");
+  if (unknown.length > 0) {
+    throw new Error(`Unknown deployment option: ${unknown.join(", ")}`);
+  }
+  return { runtimeOnly: argumentsList.includes("--runtime-only") };
+}
+
+export async function deploy({
+  vault = resolveVault(),
+  env = process.env,
+  root = projectRoot,
+  runtimeOnly = false
+} = {}) {
   assertAllowedVault(vault, env);
   await assertRegisteredOpenVault(vault, resolveObsidianRegistry(env));
   const obsidianRoot = path.join(vault, ".obsidian");
@@ -142,7 +166,8 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
 
   let currentCommunity = [];
   if (await isFile(communityFile)) currentCommunity = JSON.parse(await readFile(communityFile, "utf8"));
-  const mergedCommunity = mergeCommunityPlugins(currentCommunity);
+  if (runtimeOnly) assertPluginEnabled(currentCommunity);
+  const mergedCommunity = runtimeOnly ? null : mergeCommunityPlugins(currentCommunity);
   const originalCommunityHash = await digest(communityFile);
   const pluginRootExisted = await isDirectory(pluginRoot);
   const operationRoot = path.join(vault, ".tmp", `practice-lab-deploy-${timestamp()}`);
@@ -156,7 +181,7 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
     await copyFile(source, path.join(stageRoot, artifact));
     sourceHashes[artifact] = await digest(source);
   }
-  await writeJson(path.join(stageRoot, "community-plugins.json"), mergedCommunity);
+  if (!runtimeOnly) await writeJson(path.join(stageRoot, "community-plugins.json"), mergedCommunity);
 
   const originalArtifacts = {};
   if (pluginRootExisted) {
@@ -166,15 +191,19 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
       if (await isFile(existing)) await copyFile(existing, path.join(backupRoot, artifact));
     }
   }
-  if (await isFile(communityFile)) await copyFile(communityFile, path.join(backupRoot, "community-plugins.json"));
+  if (!runtimeOnly && await isFile(communityFile)) {
+    await copyFile(communityFile, path.join(backupRoot, "community-plugins.json"));
+  }
 
   const rollbackManifest = path.join(operationRoot, "rollback-manifest.json");
   await writeJson(rollbackManifest, {
     version: 1,
     createdAt: new Date().toISOString(),
+    mode: runtimeOnly ? "runtime-only" : "full",
     vault,
     pluginRoot,
     pluginRootExisted,
+    communityFileTouched: !runtimeOnly,
     originalCommunityHash,
     originalArtifacts,
     sourceHashes,
@@ -184,7 +213,15 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
   await mkdir(pluginRoot, { recursive: true });
   try {
     if (await digest(communityFile) !== originalCommunityHash) {
-      throw new Error("Obsidian configuration changed during deployment staging; retry after closing Obsidian.");
+      throw new Error(
+        runtimeOnly
+          ? "Obsidian configuration changed during deployment staging; retry when that file is stable."
+          : "Obsidian configuration changed during deployment staging; retry after closing Obsidian."
+      );
+    }
+    if (runtimeOnly) {
+      const enabledPlugins = JSON.parse(await readFile(communityFile, "utf8"));
+      assertPluginEnabled(enabledPlugins);
     }
     for (const artifact of RUNTIME_ARTIFACTS) {
       const destination = path.join(pluginRoot, artifact);
@@ -192,9 +229,22 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
       await copyFile(path.join(stageRoot, artifact), pending);
       await rename(pending, destination);
     }
-    const pendingCommunity = `${communityFile}.practice-lab-new`;
-    await copyFile(path.join(stageRoot, "community-plugins.json"), pendingCommunity);
-    await rename(pendingCommunity, communityFile);
+    if (!runtimeOnly) {
+      const pendingCommunity = `${communityFile}.practice-lab-new`;
+      await copyFile(path.join(stageRoot, "community-plugins.json"), pendingCommunity);
+      await rename(pendingCommunity, communityFile);
+    }
+
+    const installedHashes = {};
+    for (const artifact of RUNTIME_ARTIFACTS) {
+      installedHashes[artifact] = await digest(path.join(pluginRoot, artifact));
+    }
+    if (JSON.stringify(installedHashes) !== JSON.stringify(sourceHashes)) {
+      throw new Error("Installed runtime hashes do not match the built artifacts.");
+    }
+    if (runtimeOnly && await digest(communityFile) !== originalCommunityHash) {
+      throw new Error("Obsidian configuration changed during runtime-only deployment.");
+    }
   } catch (error) {
     for (const artifact of RUNTIME_ARTIFACTS) {
       const destination = path.join(pluginRoot, artifact);
@@ -203,29 +253,45 @@ export async function deploy({ vault = resolveVault(), env = process.env, root =
       else await rm(destination, { force: true });
       await rm(`${destination}.practice-lab-new`, { force: true });
     }
-    const savedCommunity = path.join(backupRoot, "community-plugins.json");
-    if (await isFile(savedCommunity)) await copyFile(savedCommunity, communityFile);
-    else await rm(communityFile, { force: true });
-    await rm(`${communityFile}.practice-lab-new`, { force: true });
-    if (!pluginRootExisted) await rm(pluginRoot, { recursive: true, force: true });
+    if (!runtimeOnly) {
+      const savedCommunity = path.join(backupRoot, "community-plugins.json");
+      if (await isFile(savedCommunity)) await copyFile(savedCommunity, communityFile);
+      else await rm(communityFile, { force: true });
+      await rm(`${communityFile}.practice-lab-new`, { force: true });
+    }
+    if (!pluginRootExisted) {
+      try {
+        await rmdir(pluginRoot);
+      } catch {
+        // Preserve any concurrently created, non-runtime files in the plugin directory.
+      }
+    }
     throw error;
   } finally {
     await rm(stageRoot, { recursive: true, force: true });
   }
 
   const installedHashes = {};
-  for (const artifact of RUNTIME_ARTIFACTS) installedHashes[artifact] = await digest(path.join(pluginRoot, artifact));
-  if (JSON.stringify(installedHashes) !== JSON.stringify(sourceHashes)) {
-    throw new Error("Installed runtime hashes do not match the built artifacts.");
+  for (const artifact of RUNTIME_ARTIFACTS) {
+    installedHashes[artifact] = await digest(path.join(pluginRoot, artifact));
   }
 
-  return { vault, pluginRoot, backupRoot, rollbackManifest, sourceHashes, installedHashes };
+  return {
+    vault,
+    pluginRoot,
+    backupRoot,
+    rollbackManifest,
+    sourceHashes,
+    installedHashes,
+    communityFileTouched: !runtimeOnly,
+    runtimeOnly
+  };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await deploy();
+  const result = await deploy(parseDeployArguments());
   process.stdout.write(
-    `Deployed ${PLUGIN_ID} to ${result.pluginRoot}\n`
+    `Deployed ${PLUGIN_ID} ${result.runtimeOnly ? "runtime artifacts" : "and enabled it"} at ${result.pluginRoot}\n`
     + `Backup: ${result.backupRoot}\n`
     + `Rollback manifest: ${result.rollbackManifest}\n`
   );

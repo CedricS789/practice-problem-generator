@@ -1,6 +1,7 @@
 import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 
 import {
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   GENERATION_DRAFT_SCHEMA_VERSION,
   LEGACY_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
@@ -10,12 +11,14 @@ import {
   type GenerationDraftV1,
   type PracticeBankV1,
   type PracticeBankV2,
+  type PracticeBankV3,
   type SessionSummaryV1,
   type SessionSummaryV2,
   type ValidationIssue,
   type ValidationResult,
   type VisualSourceV1,
 } from "./model";
+import { learningPathBankIssues } from "./learning-path";
 import { sha256Hex } from "./segmenter";
 
 type JsonSchema = Record<string, unknown>;
@@ -462,7 +465,69 @@ const currentSessionResultSchema: JsonSchema = {
   ],
 };
 
+const historicalNamedReferenceSchema = objectSchema(
+  { id: ID_STRING, title: NON_EMPTY_STRING },
+  ["id", "title"],
+);
+
+const sessionLearningScopeSchema = objectSchema(
+  {
+    mode: { enum: ["quick", "set", "mixed", "learning-path"] },
+    learningPath: historicalNamedReferenceSchema,
+    sets: { type: "array", minItems: 1, items: historicalNamedReferenceSchema },
+  },
+  ["mode", "sets"],
+);
+
+const sessionExerciseEvidenceSchema = objectSchema(
+  {
+    exerciseId: ID_STRING,
+    set: historicalNamedReferenceSchema,
+    aspects: { type: "array", minItems: 1, items: historicalNamedReferenceSchema },
+    instructionalRole: {
+      enum: ["guided-check", "independent", "transfer", "diagnostic"],
+    },
+    independent: { type: "boolean" },
+    hintsRevealed: { type: "integer", minimum: 0 },
+    retries: { type: "integer", minimum: 0 },
+    recoveryOutcome: {
+      enum: ["not-recorded", "not-needed", "recovered", "unresolved"],
+    },
+  },
+  [
+    "exerciseId",
+    "set",
+    "aspects",
+    "instructionalRole",
+    "independent",
+    "hintsRevealed",
+    "retries",
+    "recoveryOutcome",
+  ],
+);
+
+const completedTutorLessonSnapshotSchema = objectSchema(
+  {
+    lesson: historicalNamedReferenceSchema,
+    aspects: { type: "array", minItems: 1, items: historicalNamedReferenceSchema },
+  },
+  ["lesson", "aspects"],
+);
+
 function sessionSchema(version: number): JsonSchema {
+  const learningProperties = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? {
+        scope: sessionLearningScopeSchema,
+        evidence: { type: "array", items: sessionExerciseEvidenceSchema },
+        completedTutorLessons: {
+          type: "array",
+          items: completedTutorLessonSnapshotSchema,
+        },
+      }
+    : {};
+  const learningRequired = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? ["scope", "evidence", "completedTutorLessons"]
+    : [];
   return objectSchema(
     {
       schemaVersion: { type: "integer", const: version },
@@ -492,6 +557,7 @@ function sessionSchema(version: number): JsonSchema {
         type: "array",
         items: { $ref: "#/definitions/sessionResult" },
       },
+      ...learningProperties,
     },
     [
       "schemaVersion",
@@ -504,6 +570,7 @@ function sessionSchema(version: number): JsonSchema {
       "score",
       "ratings",
       "results",
+      ...learningRequired,
     ],
   );
 }
@@ -518,6 +585,12 @@ const currentDefinitions: Record<string, JsonSchema> = {
   ...sharedDefinitions,
   sessionResult: currentSessionResultSchema,
   session: sessionSchema(PRACTICE_BANK_SCHEMA_VERSION),
+};
+
+const v3Definitions: Record<string, JsonSchema> = {
+  ...sharedDefinitions,
+  sessionResult: currentSessionResultSchema,
+  session: sessionSchema(CURRENT_PRACTICE_BANK_SCHEMA_VERSION),
 };
 
 /** Provider-neutral output schema passed unchanged to every structured CLI. */
@@ -537,10 +610,201 @@ export const generationDraftV1JsonSchema: JsonSchema = {
   },
 };
 
+const sourceMaterialScopeSchema: JsonSchema = {
+  oneOf: [
+    objectSchema({ kind: { const: "note" } }, ["kind"]),
+    objectSchema({ kind: { const: "selection" } }, ["kind"]),
+    objectSchema(
+      {
+        kind: { const: "pdf-pages" },
+        firstPage: { type: "integer", minimum: 1 },
+        lastPage: { type: "integer", minimum: 1 },
+        pageCount: { type: "integer", minimum: 1 },
+        pdfContentHash: SHA256_STRING,
+      },
+      ["kind", "firstPage", "lastPage", "pageCount", "pdfContentHash"],
+    ),
+  ],
+};
+
+const sourceMaterialSchema = objectSchema(
+  {
+    id: ID_STRING,
+    role: { enum: ["primary", "supporting"] },
+    vaultPath: NON_EMPTY_STRING,
+    wikilink: NON_EMPTY_STRING,
+    title: NON_EMPTY_STRING,
+    sourceHash: SHA256_STRING,
+    scope: sourceMaterialScopeSchema,
+    segmentIds: { type: "array", minItems: 1, items: ID_STRING },
+    visualIds: { type: "array", items: ID_STRING },
+  },
+  [
+    "id",
+    "role",
+    "vaultPath",
+    "wikilink",
+    "title",
+    "sourceHash",
+    "scope",
+    "segmentIds",
+    "visualIds",
+  ],
+);
+
+const learningAspectSchema = objectSchema(
+  {
+    id: ID_STRING,
+    title: NON_EMPTY_STRING,
+    purpose: NON_EMPTY_STRING,
+    prerequisiteAspectIds: { type: "array", items: ID_STRING },
+    sourceSegmentIds: { type: "array", items: ID_STRING },
+    status: { enum: ["supported", "source-gap"] },
+  },
+  [
+    "id",
+    "title",
+    "purpose",
+    "prerequisiteAspectIds",
+    "sourceSegmentIds",
+    "status",
+  ],
+);
+
+const exerciseAssignmentSchema = objectSchema(
+  {
+    exerciseId: ID_STRING,
+    aspectIds: { type: "array", minItems: 1, items: ID_STRING },
+    role: { enum: ["guided-check", "independent", "transfer", "diagnostic"] },
+  },
+  ["exerciseId", "aspectIds", "role"],
+);
+
+const practiceSetSchema = objectSchema(
+  {
+    id: ID_STRING,
+    title: NON_EMPTY_STRING,
+    purpose: NON_EMPTY_STRING,
+    instructionalRole: {
+      enum: [
+        "general",
+        "foundations",
+        "mechanisms",
+        "guided-application",
+        "independent-transfer",
+        "repair",
+      ],
+    },
+    order: { type: "integer", minimum: 0 },
+    assignments: { type: "array", minItems: 1, items: exerciseAssignmentSchema },
+  },
+  ["id", "title", "purpose", "instructionalRole", "order", "assignments"],
+);
+
+const tutorTeachingBlockSchema = objectSchema(
+  {
+    id: ID_STRING,
+    kind: {
+      enum: [
+        "why",
+        "prerequisite",
+        "explanation",
+        "worked-example",
+        "causal-walkthrough",
+      ],
+    },
+    title: NON_EMPTY_STRING,
+    content: NON_EMPTY_STRING,
+    sourceSegmentIds: { type: "array", minItems: 1, items: ID_STRING },
+  },
+  ["id", "kind", "title", "content", "sourceSegmentIds"],
+);
+
+const tutorCheckSchema = objectSchema(
+  {
+    prompt: NON_EMPTY_STRING,
+    groundedAnswer: NON_EMPTY_STRING,
+    keyPoints: { type: "array", minItems: 1, items: NON_EMPTY_STRING },
+    sourceSegmentIds: { type: "array", minItems: 1, items: ID_STRING },
+  },
+  ["prompt", "groundedAnswer", "keyPoints", "sourceSegmentIds"],
+);
+
+const tutorHintSchema = objectSchema(
+  {
+    id: ID_STRING,
+    level: { type: "integer", minimum: 1 },
+    text: NON_EMPTY_STRING,
+    sourceSegmentIds: { type: "array", minItems: 1, items: ID_STRING },
+  },
+  ["id", "level", "text", "sourceSegmentIds"],
+);
+
+const tutorRepairExplanationSchema = objectSchema(
+  {
+    text: NON_EMPTY_STRING,
+    sourceSegmentIds: { type: "array", minItems: 1, items: ID_STRING },
+  },
+  ["text", "sourceSegmentIds"],
+);
+
+const tutorLessonSchema = objectSchema(
+  {
+    id: ID_STRING,
+    title: NON_EMPTY_STRING,
+    objective: NON_EMPTY_STRING,
+    aspectIds: { type: "array", minItems: 1, items: ID_STRING },
+    prerequisiteAspectIds: { type: "array", items: ID_STRING },
+    guidedExerciseId: ID_STRING,
+    teachingBlocks: { type: "array", minItems: 1, items: tutorTeachingBlockSchema },
+    selfExplanationCheck: tutorCheckSchema,
+    hints: { type: "array", minItems: 2, maxItems: 3, items: tutorHintSchema },
+    repairExplanation: tutorRepairExplanationSchema,
+  },
+  [
+    "id",
+    "title",
+    "objective",
+    "aspectIds",
+    "prerequisiteAspectIds",
+    "guidedExerciseId",
+    "teachingBlocks",
+    "selfExplanationCheck",
+    "hints",
+    "repairExplanation",
+  ],
+);
+
+const learningPathStepSchema: JsonSchema = {
+  oneOf: [
+    objectSchema(
+      { kind: { const: "lesson" }, lessonId: ID_STRING, order: { type: "integer", minimum: 0 } },
+      ["kind", "lessonId", "order"],
+    ),
+    objectSchema(
+      { kind: { const: "practice-set" }, setId: ID_STRING, order: { type: "integer", minimum: 0 } },
+      ["kind", "setId", "order"],
+    ),
+  ],
+};
+
+const learningPathSchema: JsonSchema = objectSchema(
+  {
+    id: ID_STRING,
+    title: NON_EMPTY_STRING,
+    startingLevel: { enum: ["new-to-topic", "some-familiarity", "exam-review"] },
+    aspectIds: { type: "array", minItems: 1, items: ID_STRING },
+    steps: { type: "array", minItems: 1, items: learningPathStepSchema },
+  },
+  ["id", "title", "startingLevel", "aspectIds", "steps"],
+);
+
 function practiceBankSchema(
   version: number,
   id: string,
   definitions: Record<string, JsonSchema>,
+  extraProperties: Record<string, JsonSchema> = {},
+  extraRequired: string[] = [],
 ): JsonSchema {
   return {
     $schema: "http://json-schema.org/draft-07/schema#",
@@ -558,6 +822,7 @@ function practiceBankSchema(
       "visuals",
       "exercises",
       "sessions",
+      ...extraRequired,
     ],
     properties: {
       schemaVersion: { type: "integer", const: version },
@@ -602,6 +867,7 @@ function practiceBankSchema(
         },
         ["provider", "generatedAt", "promptVersion"],
       ),
+      ...extraProperties,
     },
     definitions,
   };
@@ -619,6 +885,30 @@ export const practiceBankV2JsonSchema: JsonSchema = practiceBankSchema(
   currentDefinitions,
 );
 
+export const practiceBankV3JsonSchema: JsonSchema = practiceBankSchema(
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  "https://practice-lab.local/schema/practice-bank-v3.json",
+  v3Definitions,
+  {
+    sourceMaterials: {
+      type: "array",
+      minItems: 1,
+      maxItems: 5,
+      items: sourceMaterialSchema,
+    },
+    aspects: { type: "array", minItems: 1, items: learningAspectSchema },
+    practiceSets: {
+      type: "array",
+      minItems: 1,
+      maxItems: 6,
+      items: practiceSetSchema,
+    },
+    tutorLessons: { type: "array", items: tutorLessonSchema },
+    learningPath: { anyOf: [{ type: "null" }, learningPathSchema] },
+  },
+  ["sourceMaterials", "aspects", "practiceSets", "tutorLessons", "learningPath"],
+);
+
 const ajv = new Ajv({ allErrors: true, strict: true });
 const validateDraftSchema: ValidateFunction<GenerationDraftV1> =
   ajv.compile<GenerationDraftV1>(generationDraftV1JsonSchema);
@@ -626,6 +916,8 @@ const validateLegacyBankSchema: ValidateFunction<PracticeBankV1> =
   ajv.compile<PracticeBankV1>(practiceBankV1JsonSchema);
 const validateBankSchema: ValidateFunction<PracticeBankV2> =
   ajv.compile<PracticeBankV2>(practiceBankV2JsonSchema);
+const validateBankV3Schema: ValidateFunction<PracticeBankV3> =
+  ajv.compile<PracticeBankV3>(practiceBankV3JsonSchema);
 
 export interface GenerationValidationContext {
   segmentIds: Iterable<string>;
@@ -1361,7 +1653,7 @@ function validateSession(
   }
 }
 
-function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2>(
+function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2 | PracticeBankV3>(
   value: T,
 ): ValidationResult<T> {
   const issues: ValidationIssue[] = [];
@@ -1441,7 +1733,7 @@ function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2>(
   for (const [index, session] of value.sessions.entries()) {
     validateSession(session, index, value.revision, issues);
   }
-  if (value.schemaVersion === PRACTICE_BANK_SCHEMA_VERSION) {
+  if (value.schemaVersion !== LEGACY_PRACTICE_BANK_SCHEMA_VERSION) {
     const requestIds = value.sessions.flatMap((session) =>
       session.results.flatMap((result) =>
         result.grading === "ai-review" ? [result.request.requestId] : [],
@@ -1454,6 +1746,9 @@ function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2>(
         message: "AI review request IDs must be unique across the practice bank",
       });
     }
+  }
+  if (value.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+    issues.push(...learningPathBankIssues(value as PracticeBankV3));
   }
   const created = Date.parse(value.createdAt);
   const updated = Date.parse(value.updatedAt);
@@ -1487,10 +1782,33 @@ export function validatePracticeBankV1(
 export function validatePracticeBank(
   value: unknown,
 ): ValidationResult<PracticeBankV2> {
-  if (!validateBankSchema(value)) {
-    return { ok: false, issues: schemaIssues(validateBankSchema.errors) };
+  if (
+    typeof value === "object"
+    && value !== null
+    && (value as { schemaVersion?: unknown }).schemaVersion
+      === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  ) {
+    const validation = validatePracticeBankV3(value);
+    return validation.ok
+      ? { ok: true, value: validation.value, issues: [] }
+      : validation;
   }
+  if (!validateBankSchema(value)) return { ok: false, issues: schemaIssues(validateBankSchema.errors) };
   return validateBankSemantics(value);
 }
 
-export const validatePracticeBankV2 = validatePracticeBank;
+export function validatePracticeBankV2(
+  value: unknown,
+): ValidationResult<PracticeBankV2> {
+  if (!validateBankSchema(value)) return { ok: false, issues: schemaIssues(validateBankSchema.errors) };
+  return validateBankSemantics(value);
+}
+
+export function validatePracticeBankV3(
+  value: unknown,
+): ValidationResult<PracticeBankV3> {
+  if (!validateBankV3Schema(value)) {
+    return { ok: false, issues: schemaIssues(validateBankV3Schema.errors) };
+  }
+  return validateBankSemantics(value);
+}

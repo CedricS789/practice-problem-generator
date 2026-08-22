@@ -113,6 +113,49 @@ test("dashboard analytics stay scoped, accessible, and descriptive rather than s
   assert.match(options, /weekStart: this\.settings\.dashboardWeekStart/u);
 });
 
+test("guided-path dashboard separates evidence, assistance, coverage, and advisory next steps", () => {
+  const guided = sourceBetween(
+    dashboardViewSource,
+    "private renderLearningPathAnalytics(",
+    "private renderActivityAnalytics(",
+  );
+  for (const label of [
+    "Guided learning paths",
+    "Independent performance",
+    "Guided lessons",
+    "Source coverage",
+    "Assistance used",
+    "Recovery after difficulty",
+    "Consistent evidence",
+    "Developing",
+    "Unpracticed",
+    "Recommended next",
+    "View set and aspect evidence",
+    "Aspect evidence",
+    "Practice-set evidence",
+  ]) {
+    assert.ok(guided.includes(label), `Missing guided dashboard label: ${label}`);
+  }
+  assert.match(guided, /Independent attempts determine performance/u);
+  assert.match(guided, /never create a schedule or inflate a score/u);
+  assert.match(guided, /recommendation\.reasons/u);
+  assert.match(guided, /derived locally from prerequisites and independent evidence/u);
+  assert.match(guided, /setButtonText\("Ignore for now"\)/u);
+  assert.match(guided, /No learning data is changed/u);
+  assert.match(guided, /role: "note"/u);
+  assert.match(guided, /"aria-label": `Recommended next:/u);
+  assert.match(guided, /data-practice-lab-description/u);
+  assert.match(guided, /cell\.scope = "col"/u);
+
+  const render = sourceBetween(
+    dashboardViewSource,
+    "private render(): void",
+    "private contextualTagOptions(",
+  );
+  assert.match(render, /summary\.learning\.pathBankCount > 0/u);
+  assert.match(render, /this\.renderLearningPathAnalytics\(summary, snapshot\.records\)/u);
+});
+
 test("restored unavailable filters stay selected and visible", () => {
   assert.doesNotMatch(dashboardViewSource, /ensureAvailableScope/u);
   const render = sourceBetween(
@@ -147,10 +190,10 @@ test("tag counts follow the primary scope and duplicate source titles show locat
     "private contextualTagOptions(",
     "private renderFilters(",
   );
-  assert.match(contextualTags, /aggregatePracticeDashboard\(records, \{/u);
+  assert.match(contextualTags, /countDashboardBanks\(records, \{/u);
   assert.match(contextualTags, /primary: this\.primary/u);
   assert.match(contextualTags, /tagPrefix: option\.scope\.tag/u);
-  assert.match(contextualTags, /\}\)\.bankCount/u);
+  assert.match(contextualTags, /\}\);/u);
 
   const filters = sourceBetween(
     dashboardViewSource,

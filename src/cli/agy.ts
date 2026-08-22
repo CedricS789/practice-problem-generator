@@ -3,6 +3,8 @@ import type {
   CliJobFileSystem,
   CliJobWorkspace,
   CliProcessRunner,
+  DetectedModelCatalog,
+  DetectedProviderModel,
   NeutralMedia,
   ProviderCapabilities,
 } from "./contracts";
@@ -14,10 +16,12 @@ import {
   agyModelForReasoning,
   agyModelReasoningProblem,
   DEFAULT_AGY_MODEL,
+  modelIdProblem,
 } from "../model-selection";
 
 const PROBE_TIMEOUT_MS = 90_000;
 const PROCESS_EXIT_RESERVE_MS = 10_000;
+const MAX_DETECTED_MODELS = 200;
 const RED_PIXEL_PNG = Uint8Array.from([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0,
   1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 1, 115, 82,
@@ -61,6 +65,21 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
           ? "unsupported"
           : "probe-required",
     };
+  }
+
+  protected async discoverModels(
+    signal?: AbortSignal,
+  ): Promise<DetectedModelCatalog> {
+    const result = await this.runModelCatalog(["models"], signal);
+    try {
+      return parseAgyModelCatalogResult(result.stdout || result.stderr);
+    } catch (error) {
+      throw new CliProviderError(
+        "malformed-output",
+        "agy's installed model catalog could not be read.",
+        { provider: this.id, cause: error },
+      );
+    }
   }
 
   protected async prepareInvocation(
@@ -195,6 +214,84 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
       }
     }
   }
+}
+
+export function parseAgyModelCatalog(
+  output: string,
+): readonly DetectedProviderModel[] {
+  return parseAgyModelCatalogResult(output).models;
+}
+
+function parseAgyModelCatalogResult(output: string): DetectedModelCatalog {
+  const rows: Array<{
+    readonly id: string;
+    readonly label: string;
+    readonly family?: string;
+    readonly effort?: Extract<ReasoningEffortV1, "low" | "medium" | "high">;
+  }> = [];
+  const seen = new Set<string>();
+  const suffixPattern = /-(low|medium|high)$/u;
+  let truncated = false;
+
+  for (const line of output.split(/\r?\n/u)) {
+    const separator = line.indexOf("\t");
+    if (separator < 1) continue;
+    const id = line.slice(0, separator).trim();
+    const label = line.slice(separator + 1).trim().slice(0, 160);
+    if (
+      label.length === 0
+      || modelIdProblem(id) !== null
+      || seen.has(id)
+    ) continue;
+    if (rows.length >= MAX_DETECTED_MODELS) {
+      truncated = true;
+      break;
+    }
+    const suffix = suffixPattern.exec(id)?.[1];
+    const effort = suffix === "low" || suffix === "medium" || suffix === "high"
+      ? suffix
+      : undefined;
+    seen.add(id);
+    rows.push({
+      id,
+      label,
+      ...(effort === undefined
+        ? {}
+        : { family: id.replace(suffixPattern, ""), effort }),
+    });
+  }
+
+  if (rows.length === 0 && output.trim().length > 0) {
+    throw new Error("Expected tab-separated model rows.");
+  }
+
+  const familyEfforts = new Map<string, Set<ReasoningEffortV1>>();
+  for (const row of rows) {
+    if (row.family === undefined || row.effort === undefined) continue;
+    const efforts = familyEfforts.get(row.family) ?? new Set<ReasoningEffortV1>();
+    efforts.add(row.effort);
+    familyEfforts.set(row.family, efforts);
+  }
+
+  const models = rows.map((row) => {
+    if (row.family === undefined || row.effort === undefined) {
+      return { id: row.id, label: row.label };
+    }
+    const available = familyEfforts.get(row.family) ?? new Set<ReasoningEffortV1>();
+    return {
+      id: row.id,
+      label: row.label,
+      defaultReasoningEffort: row.effort,
+      supportedReasoningEfforts: AGY_REASONING_EFFORTS.filter((effort) =>
+        available.has(effort)),
+    };
+  });
+  return {
+    models,
+    ...(truncated
+      ? { detail: `Model catalog limited to the first ${MAX_DETECTED_MODELS} safe entries.` }
+      : {}),
+  };
 }
 
 function printTimeout(timeoutMs: number): string {

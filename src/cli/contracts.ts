@@ -54,12 +54,33 @@ export interface ProviderCapabilities {
   readonly reasoningEfforts: readonly ReasoningEffortV1[];
 }
 
+/**
+ * A model choice discovered locally from an installed provider CLI. Only
+ * display-safe catalog metadata is retained; provider prompts, paths, and
+ * configuration are deliberately excluded.
+ */
+export interface DetectedProviderModel {
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly defaultReasoningEffort?: ReasoningEffortV1;
+  readonly supportedReasoningEfforts?: readonly ReasoningEffortV1[];
+}
+
+export interface DetectedModelCatalog {
+  readonly models: readonly DetectedProviderModel[];
+  readonly detail?: string;
+}
+
 export interface ProviderDetection {
   readonly id: ProviderId;
   readonly available: boolean;
   readonly capabilities: ProviderCapabilities;
+  readonly models: readonly DetectedProviderModel[];
   readonly version?: string;
   readonly detail?: string;
+  /** A non-fatal explanation when an installed provider's catalog is unavailable. */
+  readonly modelCatalogDetail?: string;
 }
 
 export type MediaInput =
@@ -99,13 +120,39 @@ export interface StructuredGenerationRequest<T> {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly onActivity?: CliActivityListener;
+  /**
+   * Desktop-only crash recovery. The approved source stays in an isolated
+   * operating-system temporary directory and the provider keeps its existing
+   * ephemeral/no-persistence mode.
+   */
+  readonly recovery?: StructuredGenerationRecovery;
 }
 
 export interface StructuredGenerationResult<T> {
   readonly provider: ProviderId;
   readonly value: T;
   readonly attempts: 1 | 2;
+  readonly recoveryHandle?: DurableProcessHandle;
 }
+
+export interface DurableProcessHandle {
+  readonly version: 1;
+  readonly jobId: string;
+  readonly workspacePath: string;
+  readonly startedAt: string;
+}
+
+export type StructuredGenerationRecovery =
+  | {
+      readonly mode: "start";
+      readonly jobId: string;
+      readonly context: string;
+      readonly onReady: (handle: DurableProcessHandle) => Promise<void>;
+    }
+  | {
+      readonly mode: "resume";
+      readonly handle: DurableProcessHandle;
+    };
 
 export interface CliProviderAdapter {
   readonly id: ProviderId;
@@ -127,7 +174,21 @@ export interface ProcessRunRequest {
   readonly signal?: AbortSignal;
   readonly timeoutMs: number;
   readonly onOutput?: (event: ProcessOutputEvent) => void;
+  readonly durable?: DurableProcessRun;
 }
+
+export type DurableProcessRun =
+  | {
+      readonly mode: "start";
+      readonly jobId: string;
+      readonly attempt: 1 | 2;
+      readonly handle?: DurableProcessHandle;
+      readonly onReady?: (handle: DurableProcessHandle) => Promise<void>;
+    }
+  | {
+      readonly mode: "resume";
+      readonly handle: DurableProcessHandle;
+    };
 
 export interface ProcessOutputEvent {
   readonly stream: "stdout" | "stderr";
@@ -138,6 +199,8 @@ export interface ProcessRunResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  readonly durableAttempt?: 1 | 2;
+  readonly recoveryHandle?: DurableProcessHandle;
 }
 
 export interface CliProcessRunner {
@@ -155,9 +218,14 @@ export interface CliJobWorkspace {
   writeText(filename: string, content: string): Promise<string>;
   writeBinary(filename: string, content: Uint8Array): Promise<string>;
   copyMedia(media: readonly MediaInput[]): Promise<readonly NeutralMedia[]>;
+  /** Resolve an already-created recovery file without rewriting it. */
+  resolveExisting?(filename: string): Promise<string>;
+  /** Reopen neutral recovery media without copying over a running CLI's input. */
+  openMedia?(media: readonly MediaInput[]): Promise<readonly NeutralMedia[]>;
   cleanup(): Promise<void>;
 }
 
 export interface CliJobFileSystem {
   create(): Promise<CliJobWorkspace>;
+  openRecovery?(handle: DurableProcessHandle): Promise<CliJobWorkspace>;
 }

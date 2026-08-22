@@ -12,11 +12,14 @@ import {
 import type { GifFramePositionV1, ReasoningEffortV1 } from "./model";
 import {
   copyDisplayPreferences,
+  DEFAULT_STUDY_TYPE_SEQUENCE,
   DEFAULT_DISPLAY_PREFERENCES,
   displayPreset,
   normalizeDisplayPreferences,
+  normalizeStudyTypeSequence,
   type DisplayPreset,
   type PracticeLabDisplayPreferences,
+  type StudyExerciseType,
   type StudyOrderDefault,
   type VisualSelectionDefault,
 } from "./preferences";
@@ -35,11 +38,21 @@ import {
   normalizeGifFrameDefault,
 } from "./settings-values";
 import {
+  AUTOMATIC_MODEL_CHOICE,
   agyModelForReasoning,
+  agyReasoningEffortForModel,
+  automaticModelForProvider,
+  CUSTOM_MODEL_CHOICE,
   DEFAULT_AGY_MODEL,
   LEGACY_DEFAULT_AGY_MODEL,
   MAX_MODEL_ID_LENGTH,
+  type ModelCatalogEntry,
+  modelPickerChoice,
+  modelIdProblem,
+  modelsForProvider,
   normalizeModelId,
+  preferredReasoningEffort,
+  reasoningEffortsForModel,
 } from "./model-selection";
 import type {
   ActivityMetric,
@@ -50,19 +63,22 @@ import type {
 export type ProviderId = "codex" | "claude" | "agy";
 export type AnswerReviewDefault = "self" | "ai";
 export type Difficulty = "foundation" | "exam" | "challenge";
-export type ExerciseTypeId =
-  | "short-answer"
-  | "causal-explanation"
-  | "application"
-  | "calculation"
-  | "cloze"
-  | "single-select"
-  | "multi-select"
-  | "matching"
-  | "ordering"
-  | "image-occlusion";
+export type ExerciseTypeId = StudyExerciseType;
 
-export const SETTINGS_SCHEMA_VERSION = 2;
+const EXERCISE_TYPE_LABELS: Readonly<Record<ExerciseTypeId, string>> = {
+  "short-answer": "Short answer",
+  "causal-explanation": "Causal explanation",
+  application: "Application / scenario",
+  calculation: "Calculation",
+  cloze: "Cloze",
+  "single-select": "Single-select MCQ",
+  "multi-select": "Multi-select MCQ",
+  matching: "Matching",
+  ordering: "Ordering",
+  "image-occlusion": "Image occlusion",
+};
+
+export const SETTINGS_SCHEMA_VERSION = 4;
 const LEGACY_GENERATION_TIMEOUT_MS = 300_000;
 const LEGACY_ANSWER_REVIEW_TIMEOUT_MS = 120_000;
 
@@ -79,8 +95,12 @@ export interface PracticeLabSettings {
   defaultFocusInstructions: string;
   visualSelectionDefault: VisualSelectionDefault;
   studyOrderDefault: StudyOrderDefault;
+  studyTypeSequence: ExerciseTypeId[];
+  studyShuffleWithinTypesDefault: boolean;
   exerciseTypePercentages: Record<ExerciseTypeId, number>;
   timeoutMs: number;
+  recoverInterruptedGenerations: boolean;
+  generationRecoveryRetentionHours: number;
   answerReviewDefault: AnswerReviewDefault;
   answerReviewProvider: ProviderId;
   answerReviewReasoningEffort: ReasoningEffortV1;
@@ -107,7 +127,7 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   provider: "codex",
   codexModel: "",
   claudeModel: "",
-  agyModel: DEFAULT_AGY_MODEL,
+  agyModel: "",
   reasoningEffort: "medium",
   gifFrameDefault: "middle",
   quantity: 10,
@@ -115,10 +135,14 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   defaultFocusInstructions: "",
   visualSelectionDefault: "manual",
   studyOrderDefault: "bank",
+  studyTypeSequence: [...DEFAULT_STUDY_TYPE_SEQUENCE],
+  studyShuffleWithinTypesDefault: false,
   exerciseTypePercentages: copyExerciseTypePercentages(
     RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
   ),
   timeoutMs: DEFAULT_AI_TIMEOUT_MS,
+  recoverInterruptedGenerations: true,
+  generationRecoveryRetentionHours: 168,
   answerReviewDefault: "self",
   answerReviewProvider: "codex",
   answerReviewReasoningEffort: "high",
@@ -173,7 +197,7 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
   const defaultFocusInstructions = typeof partial.defaultFocusInstructions === "string"
     ? partial.defaultFocusInstructions.slice(0, 4_000)
     : "";
-  const normalizedAgyModel = normalizeModelId(partial.agyModel, DEFAULT_AGY_MODEL);
+  const normalizedAgyModel = normalizeModelId(partial.agyModel);
   const agyModel = migrateLegacyTimeouts && normalizedAgyModel === LEGACY_DEFAULT_AGY_MODEL
     ? DEFAULT_AGY_MODEL
     : normalizedAgyModel;
@@ -209,9 +233,24 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     visualSelectionDefault: partial.visualSelectionDefault === "all-local"
       ? "all-local"
       : "manual",
-    studyOrderDefault: partial.studyOrderDefault === "shuffle" ? "shuffle" : "bank",
+    studyOrderDefault:
+      partial.studyOrderDefault === "shuffle"
+      || partial.studyOrderDefault === "shuffle-types"
+      || partial.studyOrderDefault === "type-sequence"
+        ? partial.studyOrderDefault
+        : "bank",
+    studyTypeSequence: normalizeStudyTypeSequence(partial.studyTypeSequence),
+    studyShuffleWithinTypesDefault:
+      partial.studyShuffleWithinTypesDefault === true,
     quantity,
     timeoutMs,
+    recoverInterruptedGenerations: partial.recoverInterruptedGenerations !== false,
+    generationRecoveryRetentionHours: boundedInteger(
+      partial.generationRecoveryRetentionHours,
+      1,
+      720,
+      168,
+    ),
     answerReviewDefault,
     answerReviewProvider,
     answerReviewReasoningEffort,
@@ -262,7 +301,16 @@ function cleanExecutable(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+function modelKeyForProvider(
+  provider: ProviderId,
+): "codexModel" | "claudeModel" | "agyModel" {
+  if (provider === "claude") return "claudeModel";
+  return provider === "agy" ? "agyModel" : "codexModel";
+}
+
 export class PracticeLabSettingTab extends PluginSettingTab {
+  private modelSettingsSaveChain: Promise<void> = Promise.resolve();
+
   constructor(app: App, private readonly owner: PracticeLabPlugin) {
     super(app, owner);
   }
@@ -293,57 +341,62 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         .setValue(this.owner.settings.provider)
         .onChange(async (value) => {
           this.owner.settings.provider = value as ProviderId;
-          this.owner.settings.reasoningEffort = normalizeReasoningEffort(
-            this.owner.settings.provider,
-            this.owner.settings.reasoningEffort,
-          );
-          if (this.owner.settings.provider === "agy") {
-            this.owner.settings.agyModel = agyModelForReasoning(
-              this.owner.settings.agyModel,
-              this.owner.settings.reasoningEffort,
-            );
-          }
+          this.normalizeDefaultModelReasoning();
           await this.owner.saveSettings();
           this.update();
         }));
 
-    new Setting(this.containerEl)
-      .setName("Default reasoning effort")
-      .setDesc(reasoningEffortDescription(this.owner.settings.provider))
-      .addDropdown((dropdown) => {
-        for (const effort of reasoningEffortsForProvider(this.owner.settings.provider)) {
-          dropdown.addOption(effort, displayReasoningEffort(effort));
-        }
-        dropdown
-          .setValue(this.owner.settings.reasoningEffort)
-          .onChange(async (value) => {
-            this.owner.settings.reasoningEffort = value as ReasoningEffortV1;
-            if (this.owner.settings.provider === "agy") {
-              this.owner.settings.agyModel = agyModelForReasoning(
-                this.owner.settings.agyModel,
-                this.owner.settings.reasoningEffort,
-              );
-            }
-            await this.owner.saveSettings();
-            if (this.owner.settings.provider === "agy") this.update();
-          });
-      });
+    const provider = this.owner.settings.provider;
+    const modelKey = modelKeyForProvider(provider);
+    const previousReasoningEffort = this.owner.settings.reasoningEffort;
+    this.normalizeDefaultModelReasoning();
+    const reasoningWasAdjusted = previousReasoningEffort
+      !== this.owner.settings.reasoningEffort;
+    if (reasoningWasAdjusted) this.queueModelSettingsSave();
+    let refreshReasoningControl = (): void => undefined;
+    this.addModelDefault(
+      "Default model",
+      modelKey,
+      provider,
+      "Automatic follows the selected CLI's default. Each provider remembers its own selection, and Custom accepts a safe exact model ID.",
+      () => {
+        this.normalizeDefaultModelReasoning();
+        refreshReasoningControl();
+      },
+    );
 
-    this.addModelDefault(
-      "Codex model",
-      "codexModel",
-      "Optional exact Codex model. Leave blank to use the provider default; history will record that it was not pinned.",
-    );
-    this.addModelDefault(
-      "Claude model",
-      "claudeModel",
-      "Optional exact Claude model or alias. Leave blank to use the provider default; history will record that it was not pinned.",
-    );
-    this.addModelDefault(
-      "agy model",
-      "agyModel",
-      "Exact agy model. Model variants ending in low, medium, or high are visibly kept aligned with the default reasoning choice.",
-    );
+    const reasoningSetting = new Setting(this.containerEl)
+      .setName("Default reasoning effort")
+      .setDesc(`${reasoningEffortDescription(provider)} Only levels supported by the selected model are shown.`)
+      .addDropdown((dropdown) => {
+        refreshReasoningControl = (): void => {
+          const efforts = this.defaultModelReasoningEfforts();
+          dropdown.selectEl.empty();
+          for (const effort of efforts) {
+            dropdown.addOption(effort, displayReasoningEffort(effort));
+          }
+          dropdown.setValue(this.owner.settings.reasoningEffort);
+        };
+        refreshReasoningControl();
+        dropdown.onChange(async (value) => {
+          this.owner.settings.reasoningEffort = value as ReasoningEffortV1;
+          if (provider === "agy" && this.owner.settings.agyModel.length > 0) {
+            this.owner.settings.agyModel = agyModelForReasoning(
+              this.owner.settings.agyModel,
+              this.owner.settings.reasoningEffort,
+              this.modelCatalog("agy"),
+            );
+          }
+          await this.owner.saveSettings();
+          if (provider === "agy") this.update();
+        });
+      });
+    reasoningSetting.descEl.createDiv({
+      cls: "practice-lab-model-detail",
+      text: reasoningWasAdjusted
+        ? `Adjusted ${displayReasoningEffort(previousReasoningEffort)} to ${displayReasoningEffort(this.owner.settings.reasoningEffort)} because the selected model does not support the saved level.`
+        : "Changing provider reveals that provider's remembered model and compatible reasoning levels.",
+    });
 
     new Setting(this.containerEl)
       .setName("Default exercise count")
@@ -494,15 +547,27 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     );
     new Setting(this.containerEl)
       .setName("Exercise order")
-      .setDesc("Keep the reviewed bank order or shuffle a fresh copy when each session starts.")
+      .setDesc("Choose the initial ordering strategy shown in the session setup dialog. It can be changed before every practice run.")
       .addDropdown((dropdown) => dropdown
         .addOption("bank", "Use bank order")
-        .addOption("shuffle", "Shuffle each session")
+        .addOption("shuffle", "Shuffle every question")
+        .addOption("shuffle-types", "Shuffle type blocks")
+        .addOption("type-sequence", "Follow custom type sequence")
         .setValue(this.owner.settings.studyOrderDefault)
         .onChange(async (value) => {
           this.owner.settings.studyOrderDefault = value as StudyOrderDefault;
           await this.owner.saveSettings();
         }));
+    new Setting(this.containerEl)
+      .setName("Shuffle within type blocks")
+      .setDesc("For shuffled or custom type blocks, also randomize the questions inside each type. The saved bank order is never modified.")
+      .addToggle((toggle) => toggle
+        .setValue(this.owner.settings.studyShuffleWithinTypesDefault)
+        .onChange(async (value) => {
+          this.owner.settings.studyShuffleWithinTypesDefault = value;
+          await this.owner.saveSettings();
+        }));
+    this.addStudyTypeSequenceEditor();
 
     new Setting(this.containerEl)
       .setName("Default free-response review")
@@ -550,7 +615,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       });
     new Setting(this.containerEl)
       .setName("Restore study defaults")
-      .setDesc("Restore bank order and local self-assessment defaults. Saved sessions are unchanged.")
+      .setDesc("Restore bank order, the recommended type sequence, within-type ordering, and local self-assessment defaults. Saved sessions are unchanged.")
       .addButton((button) => button
         .setButtonText("Restore")
         .onClick(() => void this.restoreStudyDefaults()));
@@ -581,6 +646,40 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       "Advanced runtime",
       "Process limits and executable locations. Changing an executable refreshes provider detection after the active job finishes.",
     );
+    new Setting(advanced)
+      .setName("Recover interrupted generations")
+      .setDesc("Keep the exact ephemeral CLI job running in a detached local helper if Obsidian closes or reloads. Approved source and neutral media stay only in the operating-system temporary directory until the draft is saved, discarded, or expires.")
+      .addToggle((toggle) => toggle
+        .setValue(this.owner.settings.recoverInterruptedGenerations)
+        .onChange(async (value) => {
+          this.owner.settings.recoverInterruptedGenerations = value;
+          await this.owner.saveSettings();
+        }));
+
+    new Setting(advanced)
+      .setName("Recovery retention")
+      .setDesc("Hours to keep an unfinished or recovered draft before automatic cleanup. Range: 1 to 720 hours; active work is always protected for the full generation timeout plus one hour. Default: 168 hours (7 days).")
+      .addText((text) => text
+        .setPlaceholder("168")
+        .setValue(String(this.owner.settings.generationRecoveryRetentionHours))
+        .onChange(async (value) => {
+          const hours = Number.parseInt(value, 10);
+          if (!Number.isInteger(hours)) return;
+          this.owner.settings.generationRecoveryRetentionHours = Math.min(
+            720,
+            Math.max(1, hours),
+          );
+          await this.owner.saveSettings();
+        }));
+
+    new Setting(advanced)
+      .setName("Discard interrupted generation")
+      .setDesc("Cancel and remove the current recoverable CLI job, approved source checkpoint, neutral media copies, and unsaved draft. A typed confirmation is required; saved banks and source notes are untouched.")
+      .addButton((button) => button
+        .setButtonText("Discard…")
+        .setDestructive()
+        .onClick(() => void this.owner.requestDiscardInterruptedGeneration()));
+
     new Setting(advanced)
       .setName("Generation timeout")
       .setDesc("Minutes allowed for one generation job, including its single schema-repair attempt. Default: 180 minutes (3 hours).")
@@ -730,20 +829,8 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         .onClick(() => apply(balanceExerciseTypes(enabledExerciseTypes(
           this.owner.settings.exerciseTypePercentages,
         )))));
-    const labels: Readonly<Record<ExerciseTypeId, string>> = {
-      "short-answer": "Short answer",
-      "causal-explanation": "Causal explanation",
-      application: "Application / scenario",
-      calculation: "Calculation",
-      cloze: "Cloze",
-      "single-select": "Single-select MCQ",
-      "multi-select": "Multi-select MCQ",
-      matching: "Matching",
-      ordering: "Ordering",
-      "image-occlusion": "Image occlusion",
-    };
-    for (const type of Object.keys(labels) as ExerciseTypeId[]) {
-      const row = new Setting(details).setName(labels[type]);
+    for (const type of Object.keys(EXERCISE_TYPE_LABELS) as ExerciseTypeId[]) {
+      const row = new Setting(details).setName(EXERCISE_TYPE_LABELS[type]);
       row.addToggle((toggle) => {
         toggle.onChange((enabled) => {
           apply(toggleExerciseType(
@@ -757,7 +844,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           text.inputEl.min = "0";
           text.inputEl.max = "100";
           text.inputEl.step = "1";
-          text.inputEl.setAttribute("aria-label", `${labels[type]} default percentage`);
+          text.inputEl.setAttribute("aria-label", `${EXERCISE_TYPE_LABELS[type]} default percentage`);
           text.onChange((value) => {
             const parsed = Number.parseInt(value, 10);
             if (!Number.isFinite(parsed)) {
@@ -788,6 +875,65 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       }
     };
     refresh();
+  }
+
+  private addStudyTypeSequenceEditor(): void {
+    const details = this.containerEl.createEl("details", {
+      cls: "practice-lab-settings-details practice-lab-study-sequence-settings",
+    });
+    const summary = details.createEl("summary");
+    summary.createEl("strong", { text: "Default type sequence" });
+    summary.createSpan({ text: " · used when custom type sequence is selected" });
+    details.createEl("p", {
+      cls: "setting-item-description",
+      text: "Move exercise types into the progression you prefer. Types absent from a bank are skipped automatically.",
+    });
+    const list = details.createDiv({ cls: "practice-lab-study-sequence-list" });
+    const render = (): void => {
+      list.empty();
+      for (const [index, type] of this.owner.settings.studyTypeSequence.entries()) {
+        const row = new Setting(list)
+          .setName(`${index + 1}. ${EXERCISE_TYPE_LABELS[type]}`)
+          .setDesc("Questions of this type stay together in sequence mode.");
+        row.addButton((button) => button
+          .setIcon("arrow-up")
+          .setTooltip(`Move ${EXERCISE_TYPE_LABELS[type]} earlier`)
+          .setDisabled(index === 0)
+          .onClick(() => this.moveStudyType(index, index - 1, render)));
+        row.addButton((button) => button
+          .setIcon("arrow-down")
+          .setTooltip(`Move ${EXERCISE_TYPE_LABELS[type]} later`)
+          .setDisabled(index === this.owner.settings.studyTypeSequence.length - 1)
+          .onClick(() => this.moveStudyType(index, index + 1, render)));
+      }
+    };
+    new Setting(details)
+      .setName("Sequence controls")
+      .setDesc("Changes apply to future session setup dialogs, not an active session.")
+      .addButton((button) => button
+        .setButtonText("Restore recommended sequence")
+        .setTooltip("Restore the default progression of exercise types")
+        .onClick(() => {
+          this.owner.settings.studyTypeSequence = [...DEFAULT_STUDY_TYPE_SEQUENCE];
+          render();
+          void this.owner.saveSettings();
+        }));
+    render();
+  }
+
+  private moveStudyType(
+    from: number,
+    to: number,
+    render: () => void,
+  ): void {
+    const sequence = [...this.owner.settings.studyTypeSequence];
+    if (from < 0 || from >= sequence.length || to < 0 || to >= sequence.length) return;
+    const [type] = sequence.splice(from, 1);
+    if (type === undefined) return;
+    sequence.splice(to, 0, type);
+    this.owner.settings.studyTypeSequence = normalizeStudyTypeSequence(sequence);
+    render();
+    void this.owner.saveSettings();
   }
 
   private addPracticeViewSettings(): void {
@@ -1010,25 +1156,210 @@ export class PracticeLabSettingTab extends PluginSettingTab {
   private addModelDefault(
     name: string,
     key: "codexModel" | "claudeModel" | "agyModel",
+    provider: ProviderId,
     description: string,
+    onChanged: () => void,
   ): void {
-    new Setting(this.containerEl)
+    const catalog = this.modelCatalog(provider);
+    const setting = new Setting(this.containerEl)
       .setName(name)
-      .setDesc(description)
-      .addText((text) => {
-        text.inputEl.maxLength = MAX_MODEL_ID_LENGTH;
-        text.inputEl.spellcheck = false;
-        text
-          .setPlaceholder(key === "agyModel" ? DEFAULT_AGY_MODEL : "Provider default")
-          .setValue(this.owner.settings[key])
-          .onChange(async (value) => {
-            this.owner.settings[key] = normalizeModelId(
-              value,
-              key === "agyModel" ? DEFAULT_AGY_MODEL : "",
-            );
-            await this.owner.saveSettings();
-          });
+      .setDesc(description);
+    const controls = setting.controlEl.createDiv({
+      cls: "practice-lab-model-controls",
+    });
+    const select = controls.createEl("select", {
+      attr: { "aria-label": `${provider} default model` },
+    });
+    const automaticModel = automaticModelForProvider(
+      provider,
+      this.owner.settings.reasoningEffort,
+      catalog,
+    );
+    const automaticOption = select.createEl("option", {
+      value: AUTOMATIC_MODEL_CHOICE,
+      text: provider === "agy"
+        ? automaticModel.length > 0
+          ? `Automatic (${automaticModel})`
+          : "Automatic (no compatible catalog model)"
+        : "Automatic (provider default)",
+    });
+    automaticOption.disabled = provider === "agy" && automaticModel.length === 0;
+    for (const model of catalog) {
+      const option = select.createEl("option", {
+        value: model.id,
+        text: model.label,
       });
+      option.title = model.description
+        ?? (model.supportedReasoningEfforts === undefined
+          ? "Uses provider-supported reasoning levels."
+          : `Reasoning: ${model.supportedReasoningEfforts.map(displayReasoningEffort).join(", ")}.`);
+    }
+    select.createEl("option", {
+      value: CUSTOM_MODEL_CHOICE,
+      text: "Custom model id…",
+    });
+    const input = controls.createEl("input", {
+      type: "text",
+      placeholder: "Exact model ID",
+      cls: "practice-lab-custom-model-input",
+      attr: {
+        "aria-label": `${provider} custom model ID`,
+        maxlength: String(MAX_MODEL_ID_LENGTH),
+        autocomplete: "off",
+      },
+    });
+    input.spellcheck = false;
+    const initialChoice = modelPickerChoice(
+      provider,
+      this.owner.settings[key],
+      this.owner.settings.reasoningEffort,
+      catalog,
+    );
+    let customMode = initialChoice === CUSTOM_MODEL_CHOICE;
+    select.value = initialChoice;
+    input.hidden = !customMode;
+    input.value = customMode ? this.owner.settings[key] : "";
+    const detail = setting.descEl.createDiv({
+      cls: "practice-lab-model-detail",
+      attr: { role: "status" },
+    });
+    const updateDetail = (): void => {
+      if (customMode) {
+        const value = input.value.trim();
+        const problem = modelIdProblem(value);
+        detail.setText(
+          value.length === 0
+            ? "Enter a safe exact model ID; the current saved value remains active until then."
+            : problem ?? `Custom exact model: ${value}`,
+        );
+        return;
+      }
+      detail.setText(
+        select.value === AUTOMATIC_MODEL_CHOICE
+          ? provider === "agy"
+            ? automaticModel.length > 0
+              ? `agy requires an explicit model; generation resolves Automatic to ${automaticModel} and records that exact ID.`
+              : "No compatible automatic agy model is available for this reasoning level. Choose a listed or custom model."
+            : "The CLI chooses its current default; generation history records that the model was not pinned."
+          : catalog.find((model) => model.id === select.value)?.description
+            ?? `Exact model: ${select.value}`,
+      );
+    };
+    updateDetail();
+    const catalogDetail = this.owner.providerPresentation(provider)
+      ?.modelCatalogDetail;
+    if (catalogDetail !== undefined) {
+      setting.descEl.createDiv({
+        cls: "practice-lab-model-catalog-note",
+        text: this.owner.providerPresentation(provider)?.models.length === 0
+          ? `Live model list unavailable; showing conservative built-in choices. ${catalogDetail}`
+          : `Model catalog note: ${catalogDetail}`,
+      });
+    }
+    select.addEventListener("change", () => {
+      const choice = select.value;
+      customMode = choice === CUSTOM_MODEL_CHOICE;
+      input.hidden = !customMode;
+      if (customMode) {
+        input.value = "";
+        updateDetail();
+        input.focus();
+        return;
+      }
+      this.owner.settings[key] = choice === AUTOMATIC_MODEL_CHOICE ? "" : choice;
+      if (provider === "agy") {
+        this.owner.settings.reasoningEffort = agyReasoningEffortForModel(
+          this.owner.settings.agyModel,
+        ) ?? this.owner.settings.reasoningEffort;
+      }
+      onChanged();
+      updateDetail();
+      this.queueModelSettingsSave();
+    });
+    input.addEventListener("input", () => {
+      const value = input.value.trim();
+      updateDetail();
+      const problem = modelIdProblem(value);
+      input.setAttribute("aria-invalid", String(problem !== null));
+    });
+    input.addEventListener("change", () => {
+      const value = input.value.trim();
+      if (value.length === 0 || modelIdProblem(value) !== null) return;
+      if (value === this.owner.settings[key]) return;
+      this.owner.settings[key] = value;
+      if (provider === "agy") {
+        this.owner.settings.reasoningEffort = agyReasoningEffortForModel(
+          value,
+        ) ?? this.owner.settings.reasoningEffort;
+      }
+      onChanged();
+      this.queueModelSettingsSave();
+    });
+  }
+
+  private queueModelSettingsSave(): void {
+    this.modelSettingsSaveChain = this.modelSettingsSaveChain
+      .catch(() => undefined)
+      .then(async () => await this.owner.saveSettings())
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        new Notice(`Could not save the model setting. ${detail}`, 8_000);
+      });
+  }
+
+  private modelCatalog(provider: ProviderId): readonly ModelCatalogEntry[] {
+    return modelsForProvider(
+      provider,
+      this.owner.providerPresentation(provider)?.models ?? [],
+    );
+  }
+
+  private defaultModelReasoningEfforts(): readonly ReasoningEffortV1[] {
+    const provider = this.owner.settings.provider;
+    const model = this.owner.settings[modelKeyForProvider(provider)];
+    const effectiveModel = provider === "agy" && model.length === 0
+      ? automaticModelForProvider(
+          "agy",
+          this.owner.settings.reasoningEffort,
+          this.modelCatalog("agy"),
+        )
+      : model;
+    return reasoningEffortsForModel(
+      reasoningEffortsForProvider(provider),
+      effectiveModel,
+      this.modelCatalog(provider),
+    );
+  }
+
+  private normalizeDefaultModelReasoning(): void {
+    const provider = this.owner.settings.provider;
+    const key = modelKeyForProvider(provider);
+    const catalog = this.modelCatalog(provider);
+    const model = this.owner.settings[key];
+    const effectiveModel = provider === "agy" && model.length === 0
+      ? automaticModelForProvider(
+          "agy",
+          this.owner.settings.reasoningEffort,
+          catalog,
+        )
+      : model;
+    const efforts = reasoningEffortsForModel(
+      reasoningEffortsForProvider(provider),
+      effectiveModel,
+      catalog,
+    );
+    const selected = catalog.find((entry) => entry.id === effectiveModel);
+    const pinnedAgyEffort = provider === "agy" && model.length > 0
+      ? agyReasoningEffortForModel(effectiveModel)
+      : undefined;
+    this.owner.settings.reasoningEffort = pinnedAgyEffort !== undefined
+      && efforts.includes(pinnedAgyEffort)
+      ? pinnedAgyEffort
+      : preferredReasoningEffort(
+          this.owner.settings.reasoningEffort,
+          efforts,
+          selected,
+        );
   }
 
   private async applyDisplayPreset(preset: DisplayPreset): Promise<void> {
@@ -1052,6 +1383,10 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.owner.settings.pdfMaxPageCount = DEFAULT_SETTINGS.pdfMaxPageCount;
     this.owner.settings.pdfMaxExtractedCharacters =
       DEFAULT_SETTINGS.pdfMaxExtractedCharacters;
+    this.owner.settings.recoverInterruptedGenerations =
+      DEFAULT_SETTINGS.recoverInterruptedGenerations;
+    this.owner.settings.generationRecoveryRetentionHours =
+      DEFAULT_SETTINGS.generationRecoveryRetentionHours;
     this.owner.settings.exerciseTypePercentages = copyExerciseTypePercentages(
       DEFAULT_SETTINGS.exerciseTypePercentages,
     );
@@ -1061,6 +1396,9 @@ export class PracticeLabSettingTab extends PluginSettingTab {
 
   private async restoreStudyDefaults(): Promise<void> {
     this.owner.settings.studyOrderDefault = DEFAULT_SETTINGS.studyOrderDefault;
+    this.owner.settings.studyTypeSequence = [...DEFAULT_SETTINGS.studyTypeSequence];
+    this.owner.settings.studyShuffleWithinTypesDefault =
+      DEFAULT_SETTINGS.studyShuffleWithinTypesDefault;
     this.owner.settings.answerReviewDefault = DEFAULT_SETTINGS.answerReviewDefault;
     this.owner.settings.answerReviewProvider = DEFAULT_SETTINGS.answerReviewProvider;
     this.owner.settings.answerReviewReasoningEffort =

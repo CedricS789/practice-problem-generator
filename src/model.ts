@@ -1,7 +1,11 @@
 /** Exercise-generation output remains on its independent, provider-facing v1 contract. */
 export const GENERATION_DRAFT_SCHEMA_VERSION = 1 as const;
-/** Persisted banks use v2 so asynchronous AI-review provenance is never disguised as v1. */
+/**
+ * Kept as the v2 compatibility constant while the quick-generation pipeline is
+ * migrated. New authorized writes use CURRENT_PRACTICE_BANK_SCHEMA_VERSION.
+ */
 export const PRACTICE_BANK_SCHEMA_VERSION = 2 as const;
+export const CURRENT_PRACTICE_BANK_SCHEMA_VERSION = 3 as const;
 export const LEGACY_PRACTICE_BANK_SCHEMA_VERSION = 1 as const;
 export const PRACTICE_BLOCK_LANGUAGE = "practice-lab" as const;
 
@@ -299,7 +303,9 @@ export type SessionItemResultV2 =
   | AiReviewSessionItemResultV2;
 
 export interface SessionSummaryV2 {
-  schemaVersion: typeof PRACTICE_BANK_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof PRACTICE_BANK_SCHEMA_VERSION
+    | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   id: string;
   startedAt: string;
   finishedAt: string;
@@ -317,12 +323,179 @@ export interface SessionSummaryV2 {
   results: SessionItemResultV2[];
 }
 
+export type ExerciseInstructionalRoleV1 =
+  | "guided-check"
+  | "independent"
+  | "transfer"
+  | "diagnostic";
+
+export type RecoveryOutcomeV1 =
+  | "not-recorded"
+  | "not-needed"
+  | "recovered"
+  | "unresolved";
+
+export interface HistoricalNamedReferenceV1 {
+  id: string;
+  title: string;
+}
+
+/** Immutable learning evidence retained even after a set or aspect is edited. */
+export interface SessionExerciseEvidenceV3 {
+  exerciseId: string;
+  set: HistoricalNamedReferenceV1;
+  aspects: HistoricalNamedReferenceV1[];
+  instructionalRole: ExerciseInstructionalRoleV1;
+  independent: boolean;
+  hintsRevealed: number;
+  retries: number;
+  recoveryOutcome: RecoveryOutcomeV1;
+}
+
+export interface CompletedTutorLessonSnapshotV3 {
+  lesson: HistoricalNamedReferenceV1;
+  aspects: HistoricalNamedReferenceV1[];
+}
+
+export interface SessionLearningScopeV3 {
+  mode: "quick" | "set" | "mixed" | "learning-path";
+  learningPath?: HistoricalNamedReferenceV1;
+  sets: HistoricalNamedReferenceV1[];
+}
+
+export interface SessionSummaryV3 extends SessionSummaryV2 {
+  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
+  scope: SessionLearningScopeV3;
+  evidence: SessionExerciseEvidenceV3[];
+  completedTutorLessons: CompletedTutorLessonSnapshotV3[];
+}
+
 export interface PracticeSourceV1 {
   vaultPath: string;
   wikilink: string;
   title: string;
   scope: "note" | "selection";
   hash: string;
+}
+
+export type SourceMaterialScopeV1 =
+  | { kind: "note" }
+  | { kind: "selection" }
+  | {
+      kind: "pdf-pages";
+      firstPage: number;
+      lastPage: number;
+      pageCount: number;
+      pdfContentHash: string;
+    };
+
+/** One explicitly approved member of the source bundle. */
+export interface SourceMaterialV1 {
+  id: string;
+  role: "primary" | "supporting";
+  vaultPath: string;
+  wikilink: string;
+  title: string;
+  sourceHash: string;
+  scope: SourceMaterialScopeV1;
+  segmentIds: string[];
+  visualIds: string[];
+}
+
+export interface LearningAspectV1 {
+  id: string;
+  title: string;
+  purpose: string;
+  prerequisiteAspectIds: string[];
+  sourceSegmentIds: string[];
+  status: "supported" | "source-gap";
+}
+
+export interface ExerciseAssignmentV1 {
+  exerciseId: string;
+  aspectIds: string[];
+  role: ExerciseInstructionalRoleV1;
+}
+
+export type PracticeSetInstructionalRoleV1 =
+  | "general"
+  | "foundations"
+  | "mechanisms"
+  | "guided-application"
+  | "independent-transfer"
+  | "repair";
+
+export interface PracticeSetV1 {
+  id: string;
+  title: string;
+  purpose: string;
+  instructionalRole: PracticeSetInstructionalRoleV1;
+  order: number;
+  assignments: ExerciseAssignmentV1[];
+}
+
+export type TutorTeachingBlockKindV1 =
+  | "why"
+  | "prerequisite"
+  | "explanation"
+  | "worked-example"
+  | "causal-walkthrough";
+
+export interface TutorTeachingBlockV1 {
+  id: string;
+  kind: TutorTeachingBlockKindV1;
+  title: string;
+  content: string;
+  sourceSegmentIds: string[];
+}
+
+export interface TutorCheckV1 {
+  prompt: string;
+  groundedAnswer: string;
+  keyPoints: string[];
+  sourceSegmentIds: string[];
+}
+
+export interface TutorHintV1 {
+  id: string;
+  level: number;
+  text: string;
+  sourceSegmentIds: string[];
+}
+
+export interface TutorRepairExplanationV1 {
+  text: string;
+  sourceSegmentIds: string[];
+}
+
+export interface TutorLessonV1 {
+  id: string;
+  title: string;
+  objective: string;
+  aspectIds: string[];
+  prerequisiteAspectIds: string[];
+  guidedExerciseId: string;
+  teachingBlocks: TutorTeachingBlockV1[];
+  selfExplanationCheck: TutorCheckV1;
+  hints: TutorHintV1[];
+  repairExplanation: TutorRepairExplanationV1;
+}
+
+export type LearningPathStartingLevelV1 =
+  | "new-to-topic"
+  | "some-familiarity"
+  | "exam-review";
+
+export type LearningPathStepV1 =
+  | { kind: "lesson"; lessonId: string; order: number }
+  | { kind: "practice-set"; setId: string; order: number };
+
+export interface LearningPathV1 {
+  id: string;
+  title: string;
+  startingLevel: LearningPathStartingLevelV1;
+  aspectIds: string[];
+  steps: LearningPathStepV1[];
 }
 
 export interface GenerationMetadataV1 {
@@ -352,7 +525,9 @@ export interface PracticeBankV1 {
 }
 
 export interface PracticeBankV2 {
-  schemaVersion: typeof PRACTICE_BANK_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof PRACTICE_BANK_SCHEMA_VERSION
+    | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   bankId: string;
   revision: number;
   createdAt: string;
@@ -365,16 +540,31 @@ export interface PracticeBankV2 {
   generation?: GenerationMetadataV1;
 }
 
-export type CurrentPracticeBank = PracticeBankV2;
-export type CurrentSessionSummary = SessionSummaryV2;
+/**
+ * Current one-workspace contract. Flat source and exercise collections remain
+ * canonical; learning-path records reference them by stable ID.
+ */
+export interface PracticeBankV3 extends PracticeBankV2 {
+  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
+  sessions: SessionSummaryV3[];
+  sourceMaterials: SourceMaterialV1[];
+  aspects: LearningAspectV1[];
+  practiceSets: PracticeSetV1[];
+  tutorLessons: TutorLessonV1[];
+  learningPath: LearningPathV1 | null;
+}
+
+export type CurrentPracticeBank = PracticeBankV3;
+export type CurrentSessionSummary = SessionSummaryV3;
 
 export type PracticeBankParseResult =
   | {
       status: "ok";
-      bank: PracticeBankV2;
+      bank: PracticeBankV3;
       storedSchemaVersion:
         | typeof LEGACY_PRACTICE_BANK_SCHEMA_VERSION
-        | typeof PRACTICE_BANK_SCHEMA_VERSION;
+        | typeof PRACTICE_BANK_SCHEMA_VERSION
+        | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
       warnings: string[];
     }
   | {
@@ -408,6 +598,11 @@ export interface ValidationIssue {
     | "mask"
     | "visual"
     | "session"
+    | "source-material"
+    | "aspect"
+    | "practice-set"
+    | "tutor"
+    | "learning-path"
     | "bank";
   path: string;
   message: string;

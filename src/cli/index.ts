@@ -18,6 +18,7 @@ export * from "./activity";
 export {
   appendNeutralMediaManifest,
   DEFAULT_GENERATION_TIMEOUT_MS,
+  GENERATION_RECOVERY_CONTEXT_FILENAME,
 } from "./base-adapter";
 export * from "./claude";
 export * from "./codex";

@@ -121,7 +121,7 @@ export function parseSourceImportMarkdown(
   }
 }
 
-function sourceImportProblem(value: unknown): string | null {
+export function sourceImportProblem(value: unknown): string | null {
   if (!isRecord(value)) return "Source-import metadata must be an object.";
   const allowed = new Set([
     "schemaVersion",

@@ -3,11 +3,15 @@ import type {
   CliJobFileSystem,
   CliJobWorkspace,
   CliProcessRunner,
+  DetectedModelCatalog,
+  DetectedProviderModel,
   NeutralMedia,
   ProviderCapabilities,
 } from "./contracts";
+import { CliProviderError } from "./errors";
 import type { ReasoningEffortV1 } from "../model";
-import { CODEX_REASONING_EFFORTS } from "../reasoning";
+import { modelIdProblem } from "../model-selection";
+import { CODEX_REASONING_EFFORTS, isReasoningEffort } from "../reasoning";
 
 const CAPABILITIES: ProviderCapabilities = {
   text: true,
@@ -16,6 +20,7 @@ const CAPABILITIES: ProviderCapabilities = {
   vision: "supported",
   reasoningEfforts: CODEX_REASONING_EFFORTS,
 };
+const MAX_DETECTED_MODELS = 200;
 
 export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
   readonly id = "codex" as const;
@@ -33,6 +38,24 @@ export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
 
   capabilities(): ProviderCapabilities {
     return CAPABILITIES;
+  }
+
+  protected async discoverModels(
+    signal?: AbortSignal,
+  ): Promise<DetectedModelCatalog> {
+    const result = await this.runModelCatalog(
+      ["debug", "models", "--bundled"],
+      signal,
+    );
+    try {
+      return parseCodexModelCatalogResult(result.stdout);
+    } catch (error) {
+      throw new CliProviderError(
+        "malformed-output",
+        "Codex's installed model catalog could not be read.",
+        { provider: this.id, cause: error },
+      );
+    }
   }
 
   protected prepareInvocation(
@@ -70,4 +93,69 @@ export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
     args.push("-");
     return { args, stdin: prompt };
   }
+}
+
+export function parseCodexModelCatalog(
+  output: string,
+): readonly DetectedProviderModel[] {
+  return parseCodexModelCatalogResult(output).models;
+}
+
+function parseCodexModelCatalogResult(output: string): DetectedModelCatalog {
+  const parsed: unknown = JSON.parse(output);
+  if (!isRecord(parsed) || !Array.isArray(parsed.models)) {
+    throw new Error("Expected a models array.");
+  }
+
+  const seen = new Set<string>();
+  const models: DetectedProviderModel[] = [];
+  let truncated = false;
+  for (const value of parsed.models) {
+    if (!isRecord(value) || value.visibility !== "list") continue;
+    const id = boundedText(value.slug, 120);
+    if (id === undefined || modelIdProblem(id) !== null || seen.has(id)) continue;
+    if (models.length >= MAX_DETECTED_MODELS) {
+      truncated = true;
+      break;
+    }
+
+    const supportedReasoningEfforts = Array.isArray(value.supported_reasoning_levels)
+      ? value.supported_reasoning_levels
+          .map((level) => isRecord(level) ? level.effort : undefined)
+          .filter((effort): effort is ReasoningEffortV1 =>
+            isReasoningEffort(effort) && CODEX_REASONING_EFFORTS.includes(effort))
+      : [];
+    const defaultReasoningEffort = isReasoningEffort(value.default_reasoning_level)
+      && CODEX_REASONING_EFFORTS.includes(value.default_reasoning_level)
+      ? value.default_reasoning_level
+      : undefined;
+    const label = boundedText(value.display_name, 160) ?? id;
+    const description = boundedText(value.description, 500);
+    seen.add(id);
+    models.push({
+      id,
+      label,
+      ...(description === undefined ? {} : { description }),
+      ...(defaultReasoningEffort === undefined ? {} : { defaultReasoningEffort }),
+      ...(supportedReasoningEfforts.length === 0
+        ? {}
+        : { supportedReasoningEfforts }),
+    });
+  }
+  return {
+    models,
+    ...(truncated
+      ? { detail: `Model catalog limited to the first ${MAX_DETECTED_MODELS} safe entries.` }
+      : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedText(value: unknown, maximumLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length === 0 ? undefined : text.slice(0, maximumLength);
 }

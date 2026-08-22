@@ -146,6 +146,21 @@ test("blank edited prompts and grounded answers are blocked before persistence",
   assert.equal(rejectedInvalid.canSave, true);
 });
 
+test("malformed edited LaTeX is blocked while rejected drafts remain irrelevant", () => {
+  const malformed = {
+    ...shortAnswerDraft("latex-problem"),
+    prompt: "Calculate $V=IR.",
+  };
+  const gate = getReviewGateState([malformed], null);
+  assert.equal(gate.invalidLatexCount, 1);
+  assert.equal(gate.canSave, false);
+
+  const rejected = getReviewGateState([
+    { ...malformed, rejected: true },
+  ], null);
+  assert.equal(rejected.invalidLatexCount, 0);
+});
+
 test("accept all reviews every valid kept occlusion without touching rejected exercises", () => {
   const validOne = { ...occlusionDraft(), id: "valid-one", occlusionReviewed: false };
   const validTwo = { ...occlusionDraft(), id: "valid-two", occlusionReviewed: false };

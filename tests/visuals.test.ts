@@ -183,3 +183,34 @@ test("mask validation rejects bounds, blank labels, and duplicate ids", () => {
     { valid: true, errors: [] },
   );
 });
+
+test("mask validation rejects malformed LaTeX without rejecting valid math", () => {
+  const invalid = validateOcclusionMasks([
+    {
+      id: "voltage",
+      label: "Voltage $V_{out}",
+      answer: "$V_{out}=A_vV_{in}$",
+      x: 0.1,
+      y: 0.1,
+      width: 0.2,
+      height: 0.2,
+    },
+  ]);
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.errors.join(" "), /label LaTeX: Unclosed inline/iu);
+
+  assert.deepEqual(
+    validateOcclusionMasks([
+      {
+        id: "voltage",
+        label: "Voltage $V_{out}$",
+        answer: "$V_{out}=A_vV_{in}$",
+        x: 0.1,
+        y: 0.1,
+        width: 0.2,
+        height: 0.2,
+      },
+    ]),
+    { valid: true, errors: [] },
+  );
+});

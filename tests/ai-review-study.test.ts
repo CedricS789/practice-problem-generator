@@ -181,21 +181,21 @@ test("presenters attach key points and only referenced source snapshots", () => 
   });
 });
 
-test("AI submission registers synchronously and then advances without waiting", () => {
+test("AI submission locks the request and checkpoints before advancing without waiting for the review", () => {
   const method = sourceBetween(
-    "private queueAnswerReviewAndContinue(",
+    "private async queueAnswerReviewAndContinue(",
     "private selectedAnswerReviewProvider(",
   );
   const recordIndex = method.indexOf(
-    "this.recordAndContinue(createPendingAnswerReviewRecord(request))",
+    "await this.recordAndContinue(createPendingAnswerReviewRecord(request))",
   );
   const enqueueIndex = method.indexOf(
-    "this.options.callbacks.enqueueAnswerReview?.(request)",
+    "await this.options.callbacks.enqueueAnswerReview?.(request)",
   );
   assert.ok(recordIndex >= 0);
   assert.ok(enqueueIndex >= 0);
   assert.ok(recordIndex > enqueueIndex);
-  assert.doesNotMatch(method, /await/u);
+  assert.doesNotMatch(method, /whenIdle|reviewedAt|finishedAt/u);
   assert.match(viewSource, /studySessionId = `session-\$\{crypto\.randomUUID\(\)\}`/u);
   assert.match(viewSource, /requestId: `review-\$\{crypto\.randomUUID\(\)\}`/u);
 });

@@ -6,11 +6,16 @@ import type {
   GenerationMetadataV1,
   PracticeBankParseResult,
   PracticeBankV2,
+  PracticeBankV3,
   SessionItemResultV2,
   SessionSummaryV2,
+  SessionSummaryV3,
   VisualSourceV1
 } from "./model";
-import { PRACTICE_BANK_SCHEMA_VERSION } from "./model";
+import {
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  PRACTICE_BANK_SCHEMA_VERSION,
+} from "./model";
 import {
   derivePracticePath,
   type AiReviewResolutionPatchV2,
@@ -25,7 +30,10 @@ import type { CollectedSource } from "./source";
 import type { FinishedStudySession } from "./ui/contracts";
 import { compactHeadingPath } from "./segmenter";
 import {
+  generationRecipeCatalogFromLegacy,
+  parseGenerationRecipeCatalogMarkdown,
   parseGenerationRecipeMarkdown,
+  type GenerationRecipeCatalogV1,
   type GenerationRecipeV2,
 } from "./regeneration";
 import {
@@ -40,6 +48,15 @@ import {
   recordPdfSourceRevision,
   type SourceImportV1,
 } from "./source-import";
+import {
+  defaultSessionLearningMetadataV3,
+  GENERAL_ASPECT_ID,
+  GENERAL_PRACTICE_SET_ID,
+  migratePracticeBankV2ToV3,
+  replacePracticeSetContent,
+  type PracticeSetContentReplacementV1,
+  type SessionLearningMetadataV3,
+} from "./learning-path";
 import {
   clearPracticeSessions,
   removePracticeSession,
@@ -61,6 +78,27 @@ export interface SaveBankInput {
   readonly generationHistoryEntry: GenerationHistoryEntryDraftV1;
 }
 
+export interface LearningWorkspaceSidecarsV1 {
+  readonly generationRecipe?: GenerationRecipeV2;
+  readonly generationRecipeCatalog?: GenerationRecipeCatalogV1;
+  readonly generationHistory?: GenerationHistoryV1;
+  readonly sourceImport?: SourceImportV1;
+}
+
+export interface SaveLearningWorkspaceInput extends LearningWorkspaceSidecarsV1 {
+  readonly bank: PracticeBankV3;
+  /** Required only when the derived workspace already exists. */
+  readonly expectedRevision?: number;
+}
+
+export interface ReplacePracticeSetInput extends LearningWorkspaceSidecarsV1 {
+  readonly bankPath: string;
+  readonly bankId: string;
+  readonly setId: string;
+  readonly expectedRevision: number;
+  readonly replacement: PracticeSetContentReplacementV1;
+}
+
 export class PracticeBankRepository {
   constructor(private readonly app: App) {}
 
@@ -80,11 +118,11 @@ export class PracticeBankRepository {
     return { path, file: abstract, parsed: parsePracticeBankMarkdown(await this.app.vault.cachedRead(abstract)) };
   }
 
-  async saveGenerated(input: SaveBankInput): Promise<{ path: string; bank: PracticeBankV2 }> {
+  async saveGenerated(input: SaveBankInput): Promise<{ path: string; bank: PracticeBankV3 }> {
     const path = derivePracticePath(input.source.path);
     await ensureParentFolder(this.app, path);
     const now = new Date().toISOString();
-    const createBank = (previous?: PracticeBankV2): PracticeBankV2 => ({
+    const createBank = (previous?: PracticeBankV2): PracticeBankV3 => migratePracticeBankV2ToV3({
       schemaVersion: PRACTICE_BANK_SCHEMA_VERSION,
       bankId: previous?.bankId ?? `bank-${crypto.randomUUID()}`,
       revision: (previous?.revision ?? -1) + 1,
@@ -105,7 +143,7 @@ export class PracticeBankRepository {
       exercises: input.exercises.map(cloneExercise),
       sessions: previous?.sessions.map((session) => structuredClone(session)) ?? [],
       generation: { ...input.generation }
-    });
+    }, input.source.sourceImport);
 
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (!isVaultFile(existing)) {
@@ -131,6 +169,14 @@ export class PracticeBankRepository {
             input.generationRecipe,
             history,
             sourceImport,
+            generationRecipeCatalogFromLegacy(
+              GENERAL_PRACTICE_SET_ID,
+              {
+                status: "ok",
+                recipe: input.generationRecipe,
+                storedSchemaVersion: 2,
+              },
+            ),
           ),
         );
         return { path, bank };
@@ -155,14 +201,127 @@ export class PracticeBankRepository {
     );
   }
 
+  async saveLearningWorkspace(
+    input: SaveLearningWorkspaceInput,
+  ): Promise<{ path: string; bank: PracticeBankV3 }> {
+    const path = derivePracticePath(input.bank.source.vaultPath);
+    await ensureParentFolder(this.app, path);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (!isVaultFile(existing)) {
+      if (input.expectedRevision !== undefined) {
+        throw new Error("The expected learning workspace no longer exists.");
+      }
+      const bank = structuredClone(input.bank);
+      await this.app.vault.create(
+        path,
+        serializePracticeBank(
+          bank,
+          input.generationRecipe,
+          input.generationHistory,
+          input.sourceImport,
+          input.generationRecipeCatalog,
+        ),
+      );
+      return { path, bank };
+    }
+    if (input.expectedRevision === undefined) {
+      throw new Error("expectedRevision is required when replacing a learning workspace.");
+    }
+    let saved: PracticeBankV3 | undefined;
+    await this.app.vault.process(existing, (markdown) => {
+      const parsed = parsePracticeBankMarkdown(markdown);
+      if (parsed.status !== "ok") throw readOnlyError(parsed);
+      if (parsed.bank.bankId !== input.bank.bankId) {
+        throw new Error("The learning workspace changed identity. Refresh before saving.");
+      }
+      if (parsed.bank.revision !== input.expectedRevision) {
+        throw new Error(
+          `The learning workspace changed from revision ${input.expectedRevision} to ${parsed.bank.revision}. Refresh before saving.`,
+        );
+      }
+      const bank: PracticeBankV3 = {
+        ...structuredClone(input.bank),
+        schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+        bankId: parsed.bank.bankId,
+        revision: parsed.bank.revision + 1,
+        createdAt: parsed.bank.createdAt,
+        updatedAt: nonDecreasingTimestamp(input.bank.updatedAt, parsed.bank.updatedAt),
+        sessions: parsed.bank.sessions.map((session) => structuredClone(session)),
+      };
+      const sidecars = learningWorkspaceSidecars(
+        markdown,
+        input,
+        bank,
+        parsed.bank,
+      );
+      saved = bank;
+      return serializePracticeBank(
+        bank,
+        sidecars.generationRecipe,
+        sidecars.generationHistory,
+        sidecars.sourceImport,
+        sidecars.generationRecipeCatalog,
+      );
+    });
+    if (saved === undefined) {
+      throw new Error("Practice Problem Generator could not confirm the learning workspace save.");
+    }
+    return { path, bank: saved };
+  }
+
+  async replacePracticeSet(
+    input: ReplacePracticeSetInput,
+  ): Promise<PracticeBankV3> {
+    const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(input.bankPath));
+    if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
+    let saved: PracticeBankV3 | undefined;
+    await this.app.vault.process(file, (markdown) => {
+      const parsed = parsePracticeBankMarkdown(markdown);
+      if (parsed.status !== "ok") throw readOnlyError(parsed);
+      if (parsed.bank.bankId !== input.bankId) {
+        throw new Error("The practice bank changed identity. Refresh before regenerating the set.");
+      }
+      if (parsed.bank.revision !== input.expectedRevision) {
+        throw new Error(
+          `The practice bank changed from revision ${input.expectedRevision} to ${parsed.bank.revision}. Refresh before regenerating the set.`,
+        );
+      }
+      const bank = replacePracticeSetContent(
+        parsed.bank,
+        input.setId,
+        input.replacement,
+        nonDecreasingTimestamp(new Date().toISOString(), parsed.bank.updatedAt),
+      );
+      const sidecars = learningWorkspaceSidecars(
+        markdown,
+        input,
+        bank,
+        parsed.bank,
+        input.setId,
+      );
+      saved = bank;
+      return serializePracticeBank(
+        bank,
+        sidecars.generationRecipe,
+        sidecars.generationHistory,
+        sidecars.sourceImport,
+        sidecars.generationRecipeCatalog,
+      );
+    });
+    if (saved === undefined) {
+      throw new Error("Practice Problem Generator could not confirm the regenerated set.");
+    }
+    return saved;
+  }
+
   async appendFinishedSession(
     bankPath: string,
     session: SessionSummaryV2,
     expectedRevision: number
-  ): Promise<PracticeBankV2> {
+  ): Promise<PracticeBankV3> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV2 | undefined;
+    let saved: PracticeBankV3 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -170,8 +329,9 @@ export class PracticeBankRepository {
       if (merged.status === "conflict" || merged.status === "invalid-session") {
         throw new Error(merged.message);
       }
-      saved = merged.bank;
+      saved = requireV3Bank(merged.bank);
       const recipe = generationRecipeForWrite(markdown);
+      const recipeCatalog = generationRecipeCatalogForWrite(markdown, merged.bank);
       const history = requireGenerationHistoryForWrite(markdown);
       const sourceImport = requireSourceImportForWrite(markdown);
       return merged.status === "unchanged"
@@ -181,6 +341,7 @@ export class PracticeBankRepository {
             recipe,
             history,
             sourceImport,
+            recipeCatalog,
           );
     });
     if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the saved session.");
@@ -191,7 +352,7 @@ export class PracticeBankRepository {
     bankPath: string,
     bankId: string,
     sessionId: string,
-  ): Promise<{ bank: PracticeBankV2; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
     return this.updateSessions(
       bankPath,
       bankId,
@@ -203,7 +364,7 @@ export class PracticeBankRepository {
   async clearSessions(
     bankPath: string,
     bankId: string,
-  ): Promise<{ bank: PracticeBankV2; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
     return this.updateSessions(
       bankPath,
       bankId,
@@ -216,7 +377,7 @@ export class PracticeBankRepository {
     bankPath: string,
     patch: AiReviewResolutionPatchV2,
     expectedRevision?: number,
-  ): Promise<PracticeBankV2> {
+  ): Promise<PracticeBankV3> {
     return this.applyAiReviewStateTransition(bankPath, patch, expectedRevision);
   }
 
@@ -224,10 +385,10 @@ export class PracticeBankRepository {
     bankPath: string,
     patch: AiReviewStateTransitionPatchV2,
     expectedRevision?: number,
-  ): Promise<PracticeBankV2> {
+  ): Promise<PracticeBankV3> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV2 | undefined;
+    let saved: PracticeBankV3 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -237,8 +398,9 @@ export class PracticeBankRepository {
       if (merged.status === "conflict" || merged.status === "invalid-review") {
         throw new Error(merged.message);
       }
-      saved = merged.bank;
+      saved = requireV3Bank(merged.bank);
       const recipe = generationRecipeForWrite(markdown);
+      const recipeCatalog = generationRecipeCatalogForWrite(markdown, merged.bank);
       const history = requireGenerationHistoryForWrite(markdown);
       const sourceImport = requireSourceImportForWrite(markdown);
       return merged.status === "unchanged"
@@ -248,6 +410,7 @@ export class PracticeBankRepository {
             recipe,
             history,
             sourceImport,
+            recipeCatalog,
           );
     });
     if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the AI review update.");
@@ -256,15 +419,19 @@ export class PracticeBankRepository {
 
   private async replaceExisting(
     file: TFile,
-    createBank: (previous: PracticeBankV2) => PracticeBankV2,
+    createBank: (previous: PracticeBankV2) => PracticeBankV3,
     generationRecipe: GenerationRecipeV2,
     generationHistoryEntry: GenerationHistoryEntryDraftV1,
     sourceImport?: SourceImportV1,
-  ): Promise<{ path: string; bank: PracticeBankV2 }> {
-    let saved: PracticeBankV2 | undefined;
+  ): Promise<{ path: string; bank: PracticeBankV3 }> {
+    let saved: PracticeBankV3 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
+      const quickReplacementProblem = quickGenerationReplacementProblem(parsed.bank);
+      if (quickReplacementProblem !== null) {
+        throw new Error(quickReplacementProblem);
+      }
       const replacement = createBank(parsed.bank);
       saved = replacement;
       const history = appendGenerationHistory(
@@ -284,11 +451,24 @@ export class PracticeBankRepository {
             replacement.revision,
             generationHistoryEntry.id,
           );
+      const previousRecipeCatalog = generationRecipeCatalogForWrite(markdown, parsed.bank);
+      const newRecipeCatalog = generationRecipeCatalogFromLegacy(
+        GENERAL_PRACTICE_SET_ID,
+        { status: "ok", recipe: generationRecipe, storedSchemaVersion: 2 },
+      );
+      const recipeCatalog: GenerationRecipeCatalogV1 = {
+        schemaVersion: newRecipeCatalog.schemaVersion,
+        recipesBySetId: {
+          ...previousRecipeCatalog?.recipesBySetId,
+          ...newRecipeCatalog.recipesBySetId,
+        },
+      };
       return serializePracticeBank(
         replacement,
         generationRecipe,
         history,
         recordedSourceImport,
+        recipeCatalog,
       );
     });
     if (saved === undefined) throw new Error("Practice Problem Generator could not confirm the saved bank.");
@@ -300,10 +480,10 @@ export class PracticeBankRepository {
     bankId: string,
     update: (bank: PracticeBankV2, updatedAt: string) => SessionRemovalResult,
     unchangedMessage: string,
-  ): Promise<{ bank: PracticeBankV2; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV2 | undefined;
+    let saved: PracticeBankV3 | undefined;
     let removedSessions = 0;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
@@ -313,13 +493,14 @@ export class PracticeBankRepository {
       }
       const result = update(parsed.bank, new Date().toISOString());
       if (result.status === "unchanged") throw new Error(unchangedMessage);
-      saved = result.bank;
+      saved = requireV3Bank(result.bank);
       removedSessions = result.removed.length;
       return serializePracticeBank(
         result.bank,
         generationRecipeForWrite(markdown),
         requireGenerationHistoryForWrite(markdown),
         requireSourceImportForWrite(markdown),
+        generationRecipeCatalogForWrite(markdown, result.bank),
       );
     });
     if (saved === undefined) {
@@ -358,16 +539,160 @@ function generationRecipeForWrite(
   );
 }
 
+function quickGenerationReplacementProblem(bank: PracticeBankV3): string | null {
+  const set = bank.practiceSets[0];
+  const isCanonicalQuickWorkspace = bank.learningPath === null
+    && bank.tutorLessons.length === 0
+    && bank.aspects.length === 1
+    && bank.aspects[0]?.id === GENERAL_ASPECT_ID
+    && bank.practiceSets.length === 1
+    && set?.id === GENERAL_PRACTICE_SET_ID
+    && set.instructionalRole === "general"
+    && set.assignments.length === bank.exercises.length
+    && set.assignments.every((assignment) =>
+      assignment.role === "independent"
+      && assignment.aspectIds.length === 1
+      && assignment.aspectIds[0] === GENERAL_ASPECT_ID
+    );
+  return isCanonicalQuickWorkspace
+    ? null
+    : "This source already has a guided or multi-set learning workspace. Quick generation cannot replace it; regenerate or tweak an individual set, or manage the learning path.";
+}
+
+function generationRecipeCatalogForWrite(
+  markdown: string,
+  bank: PracticeBankV2,
+): GenerationRecipeCatalogV1 | undefined {
+  const parsed = parseGenerationRecipeCatalogMarkdown(markdown);
+  if (parsed.status === "ok") return parsed.catalog;
+  if (parsed.status === "invalid") {
+    throw new Error(
+      `The saved set-scoped generation recipes are invalid and will not be overwritten: ${parsed.message}`,
+    );
+  }
+
+  const legacy = parseGenerationRecipeMarkdown(markdown);
+  if (legacy.status === "invalid") {
+    throw new Error(
+      `The saved generation recipe is invalid and will not be overwritten: ${legacy.message}`,
+    );
+  }
+  if (legacy.status === "missing") return undefined;
+
+  const currentBank = requireV3Bank(bank);
+  const fallbackSetId = currentBank.practiceSets.some((set) => set.id === "set-general")
+    ? "set-general"
+    : [...currentBank.practiceSets]
+        .sort((left, right) => left.order - right.order)[0]?.id;
+  return fallbackSetId === undefined
+    ? undefined
+    : generationRecipeCatalogFromLegacy(fallbackSetId, legacy);
+}
+
+function learningWorkspaceSidecars(
+  markdown: string,
+  input: LearningWorkspaceSidecarsV1,
+  bank: PracticeBankV3,
+  previousBank: PracticeBankV3,
+  mutableRecipeSetId?: string,
+): {
+  readonly generationRecipe: GenerationRecipeV2 | undefined;
+  readonly generationRecipeCatalog: GenerationRecipeCatalogV1 | undefined;
+  readonly generationHistory: GenerationHistoryV1;
+  readonly sourceImport: SourceImportV1 | undefined;
+} {
+  const previousHistory = requireGenerationHistoryForWrite(markdown);
+  const generationHistory = input.generationHistory ?? previousHistory;
+  if (
+    generationHistory.entries.length < previousHistory.entries.length
+    || previousHistory.entries.some((entry, index) =>
+      JSON.stringify(entry) !== JSON.stringify(generationHistory.entries[index]),
+    )
+  ) {
+    throw new Error("The replacement generation history would erase or alter an existing entry.");
+  }
+  const previousSourceImport = requireSourceImportForWrite(markdown);
+  const sourceImport = input.sourceImport ?? previousSourceImport;
+  if (
+    previousSourceImport !== undefined
+    && sourceImport !== undefined
+    && (
+      sourceImport.revisions.length < previousSourceImport.revisions.length
+      || previousSourceImport.revisions.some((revision, index) =>
+        JSON.stringify(revision) !== JSON.stringify(sourceImport.revisions[index]),
+      )
+    )
+  ) {
+    throw new Error("The replacement PDF provenance would erase or alter an existing revision.");
+  }
+  const previousRecipeCatalog = generationRecipeCatalogForWrite(markdown, previousBank);
+  if (input.generationRecipeCatalog !== undefined && previousRecipeCatalog !== undefined) {
+    const liveSetIds = new Set(bank.practiceSets.map((set) => set.id));
+    for (const [setId, previousRecipe] of Object.entries(previousRecipeCatalog.recipesBySetId)) {
+      if (!liveSetIds.has(setId)) continue;
+      const nextRecipe = input.generationRecipeCatalog.recipesBySetId[setId];
+      if (nextRecipe === undefined) {
+        throw new Error(`The replacement generation recipe catalog would erase live set ${setId}.`);
+      }
+      if (
+        mutableRecipeSetId !== undefined
+        && setId !== mutableRecipeSetId
+        && JSON.stringify(nextRecipe) !== JSON.stringify(previousRecipe)
+      ) {
+        throw new Error(`Regenerating ${mutableRecipeSetId} cannot alter the recipe for ${setId}.`);
+      }
+    }
+  }
+  const generationRecipeCatalog = input.generationRecipeCatalog
+    ?? previousRecipeCatalog;
+  return {
+    generationRecipe: input.generationRecipe
+      ?? (input.generationRecipeCatalog === undefined
+        ? generationRecipeForWrite(markdown)
+        : undefined),
+    generationRecipeCatalog,
+    generationHistory,
+    sourceImport,
+  };
+}
+
+function nonDecreasingTimestamp(candidate: string, previous: string): string {
+  const candidateTime = Date.parse(candidate);
+  const previousTime = Date.parse(previous);
+  if (!Number.isFinite(candidateTime) || !Number.isFinite(previousTime)) {
+    throw new Error("The learning workspace timestamps are invalid.");
+  }
+  return candidateTime < previousTime ? previous : candidate;
+}
+
+export interface CreateSessionSummaryOptionsV3 {
+  readonly sessionId?: string;
+  readonly learning?: SessionLearningMetadataV3;
+}
+
 export function createSessionSummary(
   bank: PracticeBankV2,
   session: FinishedStudySession,
-  options: { readonly sessionId?: string } = {},
-): SessionSummaryV2 {
+  options: CreateSessionSummaryOptionsV3 = {},
+): SessionSummaryV3 {
   if (options.sessionId !== undefined && session.id !== options.sessionId) {
     throw new Error("The finished session ID does not match the requested stable session ID.");
   }
   const sessionId = options.sessionId ?? session.id ?? `session-${crypto.randomUUID()}`;
-  const exerciseIds = new Set(bank.exercises.map((exercise) => exercise.id));
+  const orderedExerciseIds = session.orderedExerciseIds
+    ?? bank.exercises.map((exercise) => exercise.id);
+  const exerciseIds = new Set(orderedExerciseIds);
+  if (exerciseIds.size !== orderedExerciseIds.length) {
+    throw new Error("The session's locked exercise order contains duplicate IDs.");
+  }
+  const exerciseCount = session.exerciseCountAtStart ?? orderedExerciseIds.length;
+  if (exerciseCount !== orderedExerciseIds.length) {
+    throw new Error("The session's locked exercise count is inconsistent.");
+  }
+  const bankRevisionAtStart = session.bankRevisionAtStart ?? bank.revision;
+  if (!Number.isInteger(bankRevisionAtStart) || bankRevisionAtStart < 0) {
+    throw new Error("The session's starting bank revision is invalid.");
+  }
   const seen = new Set<string>();
   const results: SessionItemResultV2[] = session.answers.map((answer) => {
     if (!exerciseIds.has(answer.exerciseId)) throw new Error(`Unknown exercise in session: ${answer.exerciseId}`);
@@ -390,20 +715,69 @@ export function createSessionSummary(
   ));
   const ratings = { again: 0, hard: 0, good: 0, easy: 0 };
   for (const result of results) if (result.grading === "self-rated") ratings[result.rating] += 1;
+  const learning = options.learning
+    ?? sessionLearningMetadata(session)
+    ?? defaultSessionLearningMetadataV3(
+      bank,
+      results.map((result) => result.exerciseId),
+    );
+  const resultIds = results.map((result) => result.exerciseId);
+  if (
+    learning.evidence.length !== resultIds.length
+    || new Set(learning.evidence.map((entry) => entry.exerciseId)).size
+      !== learning.evidence.length
+    || learning.evidence.some((entry) => !resultIds.includes(entry.exerciseId))
+  ) {
+    throw new Error("The session learning evidence must contain one snapshot per recorded result.");
+  }
+  const scopedSets = new Map(learning.scope.sets.map((set) => [set.id, set]));
+  if (scopedSets.size !== learning.scope.sets.length) {
+    throw new Error("The session learning scope contains duplicate practice sets.");
+  }
+  if (
+    (learning.scope.mode === "quick" || learning.scope.mode === "set")
+    && learning.scope.sets.length !== 1
+  ) {
+    throw new Error(`${learning.scope.mode} sessions require exactly one scoped practice set.`);
+  }
+  if (learning.scope.mode === "mixed" && learning.scope.sets.length < 2) {
+    throw new Error("Mixed sessions require at least two scoped practice sets.");
+  }
+  if ((learning.scope.mode === "learning-path") !== (learning.scope.learningPath !== undefined)) {
+    throw new Error("Only learning-path sessions may identify a learning path.");
+  }
+  if (learning.evidence.some((entry) => {
+    const scoped = scopedSets.get(entry.set.id);
+    return scoped === undefined || scoped.title !== entry.set.title;
+  })) {
+    throw new Error("Every session evidence set must exactly match its scoped snapshot.");
+  }
+  if (learning.evidence.length > 0) {
+    const contributingSetIds = new Set(learning.evidence.map((entry) => entry.set.id));
+    if (
+      contributingSetIds.size !== scopedSets.size
+      || learning.scope.sets.some((set) => !contributingSetIds.has(set.id))
+    ) {
+      throw new Error("Every scoped practice set must contribute recorded session evidence.");
+    }
+  }
   return {
-    schemaVersion: PRACTICE_BANK_SCHEMA_VERSION,
+    schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
     id: sessionId,
     startedAt: session.startedAt,
     finishedAt: session.finishedAt,
-    bankRevisionAtStart: bank.revision,
-    exerciseCount: bank.exercises.length,
+    bankRevisionAtStart,
+    exerciseCount,
     completedCount: results.length,
     score: {
       correct: objective.filter((result) => result.correct).length,
       total: objective.length
     },
     ratings,
-    results
+    results,
+    scope: structuredClone(learning.scope),
+    evidence: learning.evidence.map((entry) => structuredClone(entry)),
+    completedTutorLessons: learning.completedTutorLessons.map((entry) => structuredClone(entry)),
   };
 }
 
@@ -415,6 +789,26 @@ function dynamicProperty(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)[key]
     : undefined;
+}
+
+function sessionLearningMetadata(
+  session: FinishedStudySession,
+): SessionLearningMetadataV3 | undefined {
+  const value = dynamicProperty(session, "learning");
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw new Error("The finished session learning snapshot must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.scope !== "object"
+    || record.scope === null
+    || !Array.isArray(record.evidence)
+    || !Array.isArray(record.completedTutorLessons)
+  ) {
+    throw new Error("The finished session learning snapshot is incomplete.");
+  }
+  return structuredClone(value) as SessionLearningMetadataV3;
 }
 
 function dynamicString(value: unknown, key: string, fallback: string): string {
@@ -503,6 +897,13 @@ function cloneExercise(exercise: ExerciseV1): ExerciseV1 {
 function createSourceWikilink(path: string): string {
   const linkPath = normalizeVaultPath(path).replace(/\.md$/iu, "");
   return `[[${linkPath}]]`;
+}
+
+function requireV3Bank(bank: PracticeBankV2): PracticeBankV3 {
+  if (bank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+    throw new Error("An authorized bank update did not produce the current schema version.");
+  }
+  return bank as PracticeBankV3;
 }
 
 function readOnlyError(parsed: Exclude<PracticeBankParseResult, { status: "ok" }>): Error {

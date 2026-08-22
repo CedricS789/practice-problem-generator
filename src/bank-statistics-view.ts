@@ -27,6 +27,7 @@ import {
   type BankStatisticsPreferences,
 } from "./preferences";
 import { installHoverDescriptions } from "./ui/hover-descriptions";
+import { renderLatexMarkup } from "./ui/latex-renderer";
 import type { PersistedAnswerReviewRetryTarget } from "./ui/contracts";
 
 export interface BankStatisticsViewOptions {
@@ -297,7 +298,8 @@ function renderCriterionFeedback(
     const heading = item.createDiv({
       cls: "practice-lab-ai-review-criterion-heading",
     });
-    heading.createEl("strong", { text: result.criterion });
+    const criterion = heading.createEl("strong");
+    renderLatexMarkup(criterion, result.criterion);
     heading.createSpan({
       text: result.outcome === "met"
         ? "Met"
@@ -305,7 +307,10 @@ function renderCriterionFeedback(
           ? "Partial"
           : "Missed",
     });
-    item.createEl("p", { text: result.feedback });
+    const feedback = item.createDiv({
+      cls: "practice-lab-ai-review-feedback",
+    });
+    renderLatexMarkup(feedback, result.feedback);
     const evidence = item.createDiv({
       cls: "practice-lab-ai-review-evidence",
     });
@@ -325,7 +330,10 @@ function renderCriterionFeedback(
           const excerpt = segment.text.length <= 180
             ? segment.text
             : `${segment.text.slice(0, 177)}…`;
-          row.createSpan({ text: `${heading}: ${excerpt}` });
+          const sourceExcerpt = row.createDiv({
+            cls: "practice-lab-ai-review-source-excerpt",
+          });
+          renderLatexMarkup(sourceExcerpt, `${heading}: ${excerpt}`);
         }
       }
     }
@@ -549,13 +557,24 @@ export function renderBankStatistics(
         const exerciseTitle = bank.exercises.find((exercise) => exercise.id === review.exerciseId)?.title
           ?? review.request.context.exerciseTitle;
         const item = reviewDetails.createDiv({ cls: "practice-lab-ai-review-history-item" });
-        item.createEl("strong", { text: exerciseTitle });
-        item.createEl("p", { text: `Your answer: ${review.request.submittedAnswer}` });
+        const title = item.createEl("strong");
+        renderLatexMarkup(title, exerciseTitle);
+        const submitted = item.createDiv({
+          cls: "practice-lab-ai-review-submitted-answer",
+        });
+        submitted.createEl("strong", { text: "Your answer: " });
+        const submittedValue = submitted.createDiv();
+        renderLatexMarkup(submittedValue, review.request.submittedAnswer);
         renderAnswerReviewAudit(item, review);
         if (review.state.status === "reviewed") {
-          item.createEl("p", {
-            text: `${review.state.verdict === "correct" ? "Correct" : review.state.verdict === "partial" ? "Partially correct" : "Incorrect"}: ${review.state.feedback}`,
+          const feedback = item.createDiv({
+            cls: "practice-lab-ai-review-feedback",
           });
+          feedback.createEl("strong", {
+            text: `${review.state.verdict === "correct" ? "Correct" : review.state.verdict === "partial" ? "Partially correct" : "Incorrect"}: `,
+          });
+          const feedbackValue = feedback.createDiv();
+          renderLatexMarkup(feedbackValue, review.state.feedback);
           renderCriterionFeedback(
             item,
             review.state.criteria,

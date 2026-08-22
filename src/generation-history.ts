@@ -10,11 +10,12 @@ import {
   type SourceMode,
 } from "./ui/contracts";
 
-export const GENERATION_HISTORY_VERSION = 1 as const;
+export const LEGACY_GENERATION_HISTORY_VERSION = 1 as const;
+export const GENERATION_HISTORY_VERSION = 2 as const;
 export const GENERATION_HISTORY_FRONTMATTER_KEY =
   "practice-lab-generation-history";
 
-export interface GenerationHistoryEntryV1 {
+export interface GenerationHistoryEntryV2 {
   readonly id: string;
   readonly bankRevision: number;
   readonly generatedAt: string;
@@ -33,39 +34,48 @@ export interface GenerationHistoryEntryV1 {
   readonly exerciseTypePercentages: ExerciseTypePercentages;
   readonly selectedVisualCount: number;
   readonly attempts: 1 | 2;
+  /** Present together for a generation owned by one learning-path set. */
+  readonly batchId?: string;
+  readonly blueprintId?: string;
+  readonly setId?: string;
 }
 
-export type GenerationHistoryEntryDraftV1 = Omit<
-  GenerationHistoryEntryV1,
+export type GenerationHistoryEntryDraftV2 = Omit<
+  GenerationHistoryEntryV2,
   "bankRevision"
 >;
 
-export interface GenerationHistoryV1 {
+export interface GenerationHistoryV2 {
   readonly schemaVersion: typeof GENERATION_HISTORY_VERSION;
-  readonly entries: readonly GenerationHistoryEntryV1[];
+  readonly entries: readonly GenerationHistoryEntryV2[];
 }
+
+/** Compatibility aliases for existing quick-generation consumers. */
+export type GenerationHistoryEntryV1 = GenerationHistoryEntryV2;
+export type GenerationHistoryEntryDraftV1 = GenerationHistoryEntryDraftV2;
+export type GenerationHistoryV1 = GenerationHistoryV2;
 
 export type GenerationHistoryParseResult =
   | { readonly status: "missing" }
   | { readonly status: "invalid"; readonly message: string }
-  | { readonly status: "ok"; readonly history: GenerationHistoryV1 };
+  | { readonly status: "ok"; readonly history: GenerationHistoryV2 };
 
-export function emptyGenerationHistory(): GenerationHistoryV1 {
+export function emptyGenerationHistory(): GenerationHistoryV2 {
   return { schemaVersion: GENERATION_HISTORY_VERSION, entries: [] };
 }
 
 export function appendGenerationHistory(
-  history: GenerationHistoryV1,
-  entry: GenerationHistoryEntryDraftV1,
+  history: GenerationHistoryV2,
+  entry: GenerationHistoryEntryDraftV2,
   bankRevision: number,
-): GenerationHistoryV1 {
-  const next: GenerationHistoryEntryV1 = { ...entry, bankRevision };
+): GenerationHistoryV2 {
+  const next: GenerationHistoryEntryV2 = { ...entry, bankRevision };
   const problem = generationHistoryEntryProblem(next);
   if (problem !== null) throw new Error(problem);
   if (history.entries.some((candidate) => candidate.id === entry.id)) {
     throw new Error("The generation history already contains this job ID.");
   }
-  const candidate: GenerationHistoryV1 = {
+  const candidate: GenerationHistoryV2 = {
     schemaVersion: GENERATION_HISTORY_VERSION,
     entries: [...history.entries, next],
   };
@@ -74,10 +84,26 @@ export function appendGenerationHistory(
   return cloneHistory(candidate);
 }
 
-export function generationForBankRevision(
-  history: GenerationHistoryV1,
+export function appendGenerationHistoryBatch(
+  history: GenerationHistoryV2,
+  entries: readonly GenerationHistoryEntryDraftV2[],
   bankRevision: number,
-): GenerationHistoryEntryV1 | undefined {
+): GenerationHistoryV2 {
+  if (entries.length === 0) throw new Error("A generation-history batch cannot be empty.");
+  let next = history;
+  for (const entry of entries) {
+    if (entry.batchId === undefined || entry.blueprintId === undefined || entry.setId === undefined) {
+      throw new Error("Every learning-path history entry needs batch, blueprint, and set IDs.");
+    }
+    next = appendGenerationHistory(next, entry, bankRevision);
+  }
+  return next;
+}
+
+export function generationForBankRevision(
+  history: GenerationHistoryV2,
+  bankRevision: number,
+): GenerationHistoryEntryV2 | undefined {
   return [...history.entries]
     .filter((entry) => entry.bankRevision <= bankRevision)
     .sort((left, right) => (
@@ -87,8 +113,22 @@ export function generationForBankRevision(
     ))[0];
 }
 
+export function generationForSetRevision(
+  history: GenerationHistoryV2,
+  setId: string,
+  bankRevision: number,
+): GenerationHistoryEntryV2 | undefined {
+  return [...history.entries]
+    .filter((entry) => entry.setId === setId && entry.bankRevision <= bankRevision)
+    .sort((left, right) => (
+      right.bankRevision - left.bankRevision
+      || Date.parse(right.generatedAt) - Date.parse(left.generatedAt)
+      || compareText(right.id, left.id)
+    ))[0];
+}
+
 export function serializeGenerationHistoryFrontmatter(
-  history: GenerationHistoryV1,
+  history: GenerationHistoryV2,
 ): string {
   const problem = generationHistoryProblem(history);
   if (problem !== null) {
@@ -108,7 +148,7 @@ export function parseGenerationHistoryMarkdown(
     const value = JSON.parse(encoded) as unknown;
     const problem = generationHistoryProblem(value);
     return problem === null
-      ? { status: "ok", history: cloneHistory(value as GenerationHistoryV1) }
+      ? { status: "ok", history: cloneHistory(value) }
       : { status: "invalid", message: problem };
   } catch {
     return {
@@ -122,35 +162,56 @@ function generationHistoryProblem(value: unknown): string | null {
   if (!isRecord(value)) return "Generation history must be an object.";
   if (
     Object.keys(value).some((key) => key !== "schemaVersion" && key !== "entries")
-    || value.schemaVersion !== GENERATION_HISTORY_VERSION
+    || (value.schemaVersion !== LEGACY_GENERATION_HISTORY_VERSION
+      && value.schemaVersion !== GENERATION_HISTORY_VERSION)
     || !Array.isArray(value.entries)
   ) {
     return "The generation history version or shape is unsupported.";
   }
   const ids = new Set<string>();
   let priorRevision = -1;
+  let priorEntry: GenerationHistoryEntryV2 | undefined;
   for (const [index, entry] of value.entries.entries()) {
-    const problem = generationHistoryEntryProblem(entry);
+    const problem = generationHistoryEntryProblem(
+      entry,
+      value.schemaVersion === GENERATION_HISTORY_VERSION,
+    );
     if (problem !== null) return `Generation history entry ${index + 1}: ${problem}`;
-    const typed = entry as unknown as GenerationHistoryEntryV1;
+    const typed = entry as unknown as GenerationHistoryEntryV2;
     if (ids.has(typed.id)) return "Generation history job IDs must be unique.";
-    if (typed.bankRevision <= priorRevision) {
-      return "Generation history bank revisions must increase strictly.";
+    if (typed.bankRevision < priorRevision) {
+      return "Generation history bank revisions must increase or remain equal within one atomic batch; they must not decrease.";
+    }
+    if (
+      typed.bankRevision === priorRevision
+      && (
+        priorEntry?.batchId === undefined
+        || typed.batchId === undefined
+        || priorEntry.batchId !== typed.batchId
+        || priorEntry.blueprintId !== typed.blueprintId
+        || priorEntry.setId === typed.setId
+      )
+    ) {
+      return "Equal bank revisions are allowed only for distinct sets in the same atomic learning-path batch.";
     }
     ids.add(typed.id);
     priorRevision = typed.bankRevision;
+    priorEntry = typed;
   }
   return null;
 }
 
-function generationHistoryEntryProblem(value: unknown): string | null {
+function generationHistoryEntryProblem(
+  value: unknown,
+  allowPathOwnership = true,
+): string | null {
   if (!isRecord(value)) return "the entry must be an object.";
   const allowed = new Set([
     "id", "bankRevision", "generatedAt", "provider", "providerVersion",
     "model", "reasoningEffort", "promptVersion", "sourceHash", "sourceScope",
     "requestedQuantity", "draftExerciseCount", "savedExerciseCount",
     "difficulty", "focusInstructions", "exerciseTypePercentages",
-    "selectedVisualCount", "attempts",
+    "selectedVisualCount", "attempts", "batchId", "blueprintId", "setId",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     return "the entry contains an unknown field.";
@@ -195,6 +256,17 @@ function generationHistoryEntryProblem(value: unknown): string | null {
   }
   if (!integerInRange(value.selectedVisualCount, 0, 1_000)) return "the visual count is invalid.";
   if (value.attempts !== 1 && value.attempts !== 2) return "the attempt count is invalid.";
+  const pathIds = [value.batchId, value.blueprintId, value.setId];
+  const presentPathIds = pathIds.filter((item) => item !== undefined);
+  if (!allowPathOwnership && presentPathIds.length > 0) {
+    return "legacy entries cannot contain learning-path ownership.";
+  }
+  if (presentPathIds.length !== 0 && presentPathIds.length !== pathIds.length) {
+    return "batch, blueprint, and set IDs must be present together.";
+  }
+  if (presentPathIds.some((item) => !historyIdentifier(item))) {
+    return "the batch, blueprint, or set ID is invalid.";
+  }
   return null;
 }
 
@@ -210,16 +282,27 @@ function percentagesFromUnknown(value: unknown): ExerciseTypePercentages | null 
     : null;
 }
 
-function cloneHistory(history: GenerationHistoryV1): GenerationHistoryV1 {
+function cloneHistory(history: unknown): GenerationHistoryV2 {
+  if (!isRecord(history) || !Array.isArray(history.entries)) {
+    throw new Error("Generation history must be an object.");
+  }
   return {
     schemaVersion: GENERATION_HISTORY_VERSION,
-    entries: history.entries.map((entry) => ({
-      ...entry,
+    entries: history.entries.map((raw) => {
+      const entry = raw as GenerationHistoryEntryV2;
+      return {
+        ...entry,
       exerciseTypePercentages: Object.fromEntries(
         EXERCISE_TYPES.map((type) => [type, entry.exerciseTypePercentages[type]]),
       ) as Record<ExerciseType, number>,
-    })),
+      };
+    }),
   };
+}
+
+function historyIdentifier(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value);
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

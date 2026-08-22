@@ -26,9 +26,31 @@ import {
   type AnswerReviewQueueEvent,
 } from "./answer-review-queue";
 import { retryAsync } from "./async-retry";
+import { enabledExerciseTypes } from "./exercise-distribution";
+import { auditOfflineReadiness } from "./offline-readiness";
 import { PracticeBankRepository, createSessionSummary } from "./bank-repository";
 import { renderBankStatistics } from "./bank-statistics-view";
-import type { CliActivityEvent, CliProviderLayer, ProviderDetection } from "./cli";
+import { LearningPathController } from "./learning-path-controller";
+import { SavedSetGenerationController } from "./saved-set-controller";
+import {
+  deriveRepairSetSeed,
+  repairFocusInstructions,
+  type RepairSetSeedV1,
+} from "./saved-set-generation";
+import {
+  deriveLearningAnalytics,
+  recommendNextLearningStep,
+} from "./learning-analytics";
+import {
+  createGuidedLessonState,
+  createSessionExerciseEvidence,
+} from "./learning-study";
+import type {
+  CliActivityEvent,
+  CliProviderLayer,
+  DurableProcessHandle,
+  ProviderDetection,
+} from "./cli";
 import type { DashboardBankRecord, DashboardScope } from "./dashboard-model";
 import { PracticeDashboardRepository } from "./dashboard-repository";
 import {
@@ -38,14 +60,34 @@ import {
   validateGeneratedDraft
 } from "./generation";
 import {
+  createGenerationRecoveryContext,
+  createGenerationRecoveryDraft,
+  GENERATION_RECOVERY_DRAFT_FILENAME,
+  parseGenerationRecoveryContext,
+  parseGenerationRecoveryDraft,
+  type GenerationRecoveryContextV1,
+} from "./generation-recovery";
+import {
   parseGenerationHistoryMarkdown,
   type GenerationHistoryV1,
 } from "./generation-history";
+import {
+  checkpointBankSnapshot,
+  createStudySessionCheckpoint,
+  finishedSessionFromCheckpoint,
+  markStudySessionCheckpointMerging,
+  parseStudySessionCheckpoint,
+  updateStudySessionCheckpoint,
+  type StudySessionCheckpointV1,
+} from "./study-checkpoint";
 import type {
   AiReviewSessionItemResultV2,
   PracticeBankV2,
+  PracticeBankV3,
+  PracticeSetV1,
   GenerationDraftV1,
   SessionSummaryV2,
+  VisualSourceV1,
 } from "./model";
 import {
   getStaleSourceState,
@@ -60,8 +102,11 @@ import {
   type PdfExtractionResult,
   type PdfPageRange,
 } from "./pdf-tools";
-import { displayReasoningEffort } from "./reasoning";
-import { displayModelSelection } from "./model-selection";
+import {
+  displayReasoningEffort,
+  reasoningEffortsForProvider,
+} from "./reasoning";
+import { displayModelSelection, modelsForProvider } from "./model-selection";
 import {
   createGenerationRecipe,
   parseGenerationRecipeMarkdown,
@@ -76,6 +121,7 @@ import {
   practiceBankBackupPath,
 } from "./data-management";
 import { generationDraftV1JsonSchema } from "./schema";
+import { prepareSource } from "./segmenter";
 import {
   DEFAULT_SETTINGS,
   PracticeLabSettingTab,
@@ -86,6 +132,7 @@ import {
   collectRegenerationSource,
   collectRegenerationPdfSource,
   collectSource,
+  collectSourceFromFile,
   collectPdfSource,
   type CollectedSource,
   type RegenerationSourceResult,
@@ -94,8 +141,12 @@ import { parseSourceImportMarkdown } from "./source-import";
 import {
   PRACTICE_DASHBOARD_VIEW_TYPE,
   PRACTICE_LAB_VIEW_TYPE,
+  PRACTICE_LEARNING_PATH_VIEW_TYPE,
   PracticeDashboardView,
   PracticeLabView,
+  PracticeLearningPathView,
+  choosePracticeSet,
+  OfflineReadinessModal,
   applyDraftEdits,
   presentExercises,
   type DraftExercisePresentation,
@@ -108,13 +159,18 @@ import {
   type PersistedAnswerReviewRetryTarget,
   type PracticeDashboardViewOptions,
   type PracticeLabViewOptions,
+  type LearningPathViewOptions,
+  type LearningStudyLaunchV1,
   type ProviderPresentation,
   type MarkdownSourceMode,
-  type SourcePresentation
+  type SourcePresentation,
+  type StudySessionProgressV1,
 } from "./ui";
+import { chooseSourceMaterialFile } from "./ui/source-material-picker-modal";
 import { confirmDestructiveAction } from "./ui/destructive-confirmation-modal";
 import { choosePdfPageRange } from "./ui/pdf-page-range-modal";
 import { showPdfExtractionProgress } from "./ui/pdf-extraction-progress-modal";
+import { SavedSetGenerationModal } from "./ui/saved-set-generation-modal";
 import {
   chooseVisualFrame,
   importRemoteVisual,
@@ -135,8 +191,20 @@ interface PendingGeneration {
 
 interface ActiveBank {
   readonly path: string;
-  bank: PracticeBankV2;
+  bank: PracticeBankV3;
 }
+
+type BankStudySelection =
+  | { readonly kind: "quick" }
+  | { readonly kind: "set"; readonly setId: string }
+  | {
+      readonly kind: "path-set";
+      readonly setId: string;
+      readonly pathStepIndex: number;
+    }
+  | { readonly kind: "mixed" }
+  | { readonly kind: "lesson"; readonly lessonId: string }
+  | { readonly kind: "recommended" };
 
 interface AnswerReviewPersistenceTarget {
   readonly bankPath: string;
@@ -154,23 +222,42 @@ type TerminalAnswerReviewStatus = Exclude<
 
 const ANSWER_REVIEW_PERSISTENCE_RETRY_DELAYS_MS = [0, 500, 2_000] as const;
 const ANSWER_REVIEW_PERSISTENCE_DEFER_MS = 30_000;
+const GENERATION_RECOVERY_DATA_KEY = "generationRecovery";
+const LEARNING_BATCH_RECOVERY_DATA_KEY = "learningBatchRecovery";
+const STUDY_CHECKPOINT_DATA_KEY = "studySessionCheckpoint";
+const DISCARD_GENERATION_RECOVERY_CONFIRMATION = "DISCARD INTERRUPTED GENERATION";
+const DISCARD_LEARNING_BATCH_RECOVERY_CONFIRMATION = "DISCARD GUIDED PATH";
+const DISCARD_STUDY_CHECKPOINT_CONFIRMATION = "DISCARD PRACTICE SESSION";
 
-const MOBILE_PROVIDERS: readonly ProviderPresentation[] = [
-  { id: "codex", label: "Codex", available: false, supportsVision: false, reasoningEfforts: [], defaultModel: "", detail: "Generation is desktop-only." },
-  { id: "claude", label: "Claude", available: false, supportsVision: false, reasoningEfforts: [], defaultModel: "", detail: "Generation is desktop-only." },
-  { id: "agy", label: "agy", available: false, supportsVision: false, reasoningEfforts: [], defaultModel: "", detail: "Generation is desktop-only." }
-];
+function mobileProviderPresentations(
+  settings: PracticeLabSettings,
+): readonly ProviderPresentation[] {
+  return (["codex", "claude", "agy"] as const).map((id) => ({
+    id,
+    label: id === "codex" ? "Codex" : id === "claude" ? "Claude" : "agy",
+    available: false,
+    executionMode: "queue-for-desktop" as const,
+    supportsVision: false,
+    reasoningEfforts: [...reasoningEffortsForProvider(id)],
+    models: modelsForProvider(id),
+    defaultModel: modelForProvider(settings, id),
+    detail: "Generation is desktop-only; grounded answer reviews can be queued for a synchronized desktop.",
+  }));
+}
 
 export default class PracticeLabPlugin extends Plugin {
   settings: PracticeLabSettings = {
     ...DEFAULT_SETTINGS,
+    studyTypeSequence: [...DEFAULT_SETTINGS.studyTypeSequence],
     exerciseTypePercentages: { ...DEFAULT_SETTINGS.exerciseTypePercentages },
     display: copyDisplayPreferences(DEFAULT_SETTINGS.display),
   };
   private repository!: PracticeBankRepository;
+  private learningPathController!: LearningPathController;
+  private savedSetController!: SavedSetGenerationController;
   private dashboardRepository!: PracticeDashboardRepository;
   private cliLayer: CliProviderLayer | undefined;
-  private providers: readonly ProviderPresentation[] = MOBILE_PROVIDERS;
+  private providers: readonly ProviderPresentation[] = [];
   private providerRefreshEpoch = 0;
   private providerRefreshPromise: Promise<void> | undefined;
   private providersRefreshedAt = 0;
@@ -180,6 +267,7 @@ export default class PracticeLabPlugin extends Plugin {
   private activeBank?: ActiveBank;
   private lastSource?: CollectedSource;
   private dashboardRefreshTimer: number | undefined;
+  private pendingAnswerReviewScanTimer: number | undefined;
   private answerReviewQueue: AnswerReviewQueue | undefined;
   private answerReviewQueueUnsubscribe: (() => void) | undefined;
   private readonly answerReviewRequests = new Map<string, AnswerReviewRequest>();
@@ -195,14 +283,59 @@ export default class PracticeLabPlugin extends Plugin {
   private answerReviewPersistenceChain: Promise<void> = Promise.resolve();
   private answerReviewPersistenceRetryTimer: number | undefined;
   private activeGenerationJobId: string | undefined;
+  private generationRecoveryHandle: DurableProcessHandle | undefined;
+  private learningBatchRecoveryHandle: DurableProcessHandle | undefined;
+  private generationRecoveryContext: GenerationRecoveryContextV1 | undefined;
+  private generationRecoveryState: "idle" | "running" | "blocked" | "ready" | "failed" = "idle";
+  private generationRecoveryMessage: string | undefined;
+  private generationRecoveryTask: Promise<void> | undefined;
+  private discardingGenerationRecovery = false;
+  private studyCheckpoint: StudySessionCheckpointV1 | undefined;
+  private invalidStudyCheckpointRaw: unknown;
+  private restoringStudyCheckpoint = false;
+  private storedDataSaveChain: Promise<void> = Promise.resolve();
 
   override async onload(): Promise<void> {
-    const storedSettings: unknown = await this.loadData();
-    this.settings = normalizeSettings(storedSettings);
-    if (JSON.stringify(storedSettings) !== JSON.stringify(this.settings)) {
-      await this.saveData(this.settings);
+    const storedData: unknown = await this.loadData();
+    this.settings = normalizeSettings(storedData);
+    this.providers = mobileProviderPresentations(this.settings);
+    this.generationRecoveryHandle = storedGenerationRecoveryHandle(storedData);
+    this.learningBatchRecoveryHandle = storedLearningBatchRecoveryHandle(storedData);
+    const storedCheckpoint = storedDataValue(storedData, STUDY_CHECKPOINT_DATA_KEY);
+    const parsedCheckpoint = parseStudySessionCheckpoint(storedCheckpoint);
+    if (parsedCheckpoint.status === "ok") {
+      this.studyCheckpoint = parsedCheckpoint.checkpoint;
+    } else if (parsedCheckpoint.status !== "missing") {
+      this.invalidStudyCheckpointRaw = storedCheckpoint;
+    }
+    if (JSON.stringify(storedData) !== JSON.stringify(this.storedDataSnapshot())) {
+      await this.saveData(this.storedDataSnapshot());
     }
     this.repository = new PracticeBankRepository(this.app);
+    this.learningPathController = new LearningPathController({
+      app: this.app,
+      repository: this.repository,
+      ensureCliLayer: async () => this.ensureCliLayer(),
+      providers: () => this.providers,
+      timeoutMs: () => this.settings.timeoutMs,
+      setRecoveryHandle: async (handle) => {
+        this.learningBatchRecoveryHandle = handle;
+        await this.persistStoredData();
+        for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+          if (leaf.view instanceof PracticeLearningPathView) {
+            leaf.view.setRecoveryAvailable(handle !== undefined);
+          }
+        }
+      },
+    });
+    this.learningPathController.setRecoveryHandle(this.learningBatchRecoveryHandle);
+    this.savedSetController = new SavedSetGenerationController({
+      app: this.app,
+      repository: this.repository,
+      ensureCliLayer: async () => this.ensureCliLayer(),
+      providers: () => this.providers,
+      timeoutMs: () => this.settings.timeoutMs,
+    });
     this.dashboardRepository = new PracticeDashboardRepository(this.app, {
       hasPracticeBankMarker: (file) =>
         this.app.metadataCache.getFileCache(file)?.frontmatter?.["practice-lab"] === true,
@@ -213,6 +346,10 @@ export default class PracticeLabPlugin extends Plugin {
     });
 
     this.registerView(PRACTICE_LAB_VIEW_TYPE, (leaf) => new PracticeLabView(leaf, this.createViewOptions()));
+    this.registerView(
+      PRACTICE_LEARNING_PATH_VIEW_TYPE,
+      (leaf) => new PracticeLearningPathView(leaf, this.createLearningPathViewOptions()),
+    );
     this.registerView(
       PRACTICE_DASHBOARD_VIEW_TYPE,
       (leaf) => new PracticeDashboardView(leaf, this.createDashboardViewOptions())
@@ -230,7 +367,11 @@ export default class PracticeLabPlugin extends Plugin {
     });
     this.addSettingTab(new PracticeLabSettingTab(this.app, this));
 
-    if (!Platform.isMobileApp) void this.initializeDesktopAnswerReviews();
+    this.app.workspace.onLayoutReady(() => {
+      void this.restoreStudyCheckpoint();
+    });
+
+    if (!Platform.isMobileApp) void this.initializeDesktopWork();
   }
 
   override onunload(): void {
@@ -238,15 +379,26 @@ export default class PracticeLabPlugin extends Plugin {
     this.answerReviewQueueUnsubscribe?.();
     this.answerReviewQueueUnsubscribe = undefined;
     void this.answerReviewQueue?.shutdown();
-    this.cliLayer?.coordinator.cancel();
+    const coordinator = this.cliLayer?.coordinator;
+    if (this.learningPathController.detachActive()) {
+      // The durable guided-set process continues independently for recovery.
+    } else if (
+      this.activeGenerationJobId !== undefined
+      && this.generationRecoveryHandle !== undefined
+    ) {
+      coordinator?.detach(this.activeGenerationJobId);
+    } else {
+      coordinator?.cancel();
+    }
     this.clearAnswerReviewPersistenceRetryTimer();
     this.clearDashboardRefreshTimer();
+    this.clearPendingAnswerReviewScanTimer();
   }
 
   async saveSettings(
     options: { readonly refreshProviders?: boolean } = {},
   ): Promise<void> {
-    await this.saveData(this.settings);
+    await this.persistStoredData();
     for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
       if (leaf.view instanceof PracticeLabView) {
         leaf.view.setDisplayPreferences(this.settings.display);
@@ -269,6 +421,203 @@ export default class PracticeLabPlugin extends Plugin {
       this.cliLayer = undefined;
     }
     if (!Platform.isMobileApp) void this.refreshProviders(true);
+  }
+
+  private storedDataSnapshot(): Record<string, unknown> {
+    return {
+      ...this.settings,
+      ...(this.generationRecoveryHandle === undefined
+        ? {}
+        : { [GENERATION_RECOVERY_DATA_KEY]: this.generationRecoveryHandle }),
+      ...(this.learningBatchRecoveryHandle === undefined
+        ? {}
+        : { [LEARNING_BATCH_RECOVERY_DATA_KEY]: this.learningBatchRecoveryHandle }),
+      ...(this.studyCheckpoint === undefined
+        ? this.invalidStudyCheckpointRaw === undefined
+          ? {}
+          : { [STUDY_CHECKPOINT_DATA_KEY]: this.invalidStudyCheckpointRaw }
+        : { [STUDY_CHECKPOINT_DATA_KEY]: this.studyCheckpoint }),
+    };
+  }
+
+  private async persistStoredData(): Promise<void> {
+    const snapshot = this.storedDataSnapshot();
+    const operation = this.storedDataSaveChain
+      .catch(() => undefined)
+      .then(async () => await this.saveData(snapshot));
+    this.storedDataSaveChain = operation;
+    await operation;
+  }
+
+  private async persistStudySessionCheckpoint(
+    progress: StudySessionProgressV1,
+  ): Promise<void> {
+    if (this.invalidStudyCheckpointRaw !== undefined) {
+      throw new Error(
+        "A malformed older study checkpoint is preserved in plugin data. Discard or recover it before starting another session.",
+      );
+    }
+    if (this.studyCheckpoint === undefined) {
+      const active = this.activeBank;
+      if (
+        active === undefined
+        || active.path !== progress.bankPath
+        || active.bank.bankId !== progress.bankId
+        || active.bank.revision !== progress.bankRevisionAtStart
+      ) {
+        throw new Error("The active bank changed before its study checkpoint could be created.");
+      }
+      this.studyCheckpoint = createStudySessionCheckpoint(
+        active.path,
+        active.bank,
+        progress,
+      );
+    } else {
+      this.studyCheckpoint = updateStudySessionCheckpoint(
+        this.studyCheckpoint,
+        progress,
+      );
+    }
+    await this.persistStoredData();
+  }
+
+  private async clearStudySessionCheckpoint(sessionId?: string): Promise<void> {
+    if (
+      sessionId !== undefined
+      && this.studyCheckpoint !== undefined
+      && this.studyCheckpoint.sessionId !== sessionId
+    ) {
+      throw new Error("The requested checkpoint cleanup does not match the saved session.");
+    }
+    this.studyCheckpoint = undefined;
+    this.invalidStudyCheckpointRaw = undefined;
+    await this.persistStoredData();
+  }
+
+  private async restoreStudyCheckpoint(): Promise<void> {
+    if (this.restoringStudyCheckpoint) return;
+    if (this.invalidStudyCheckpointRaw !== undefined) {
+      new Notice(
+        "Practice Problem Generator preserved an invalid device-local study checkpoint. No data was discarded; use “discard saved practice session” only if recovery is unnecessary.",
+        12_000,
+      );
+      return;
+    }
+    const checkpoint = this.studyCheckpoint;
+    if (checkpoint === undefined) return;
+    this.restoringStudyCheckpoint = true;
+    try {
+      if (checkpoint.phase === "merging") {
+        await this.resumeMergingStudyCheckpoint(checkpoint);
+        return;
+      }
+      const file = this.app.vault.getAbstractFileByPath(checkpoint.bankPath);
+      if (!(file instanceof TFile)) {
+        throw new Error(
+          `The saved practice bank ${checkpoint.bankPath} is not available on this device. The checkpoint was retained.`,
+        );
+      }
+      const current = await this.loadPracticeBank(checkpoint.bankPath);
+      if (current.bankId !== checkpoint.bankId) {
+        throw new Error("The saved practice bank changed identity. The checkpoint was retained for explicit recovery or discard.");
+      }
+      if (current.revision < checkpoint.bankRevisionAtStart) {
+        throw new Error("This device has an older bank revision than the saved session. Synchronize first; the checkpoint was retained.");
+      }
+      this.activeBank = { path: checkpoint.bankPath, bank: current };
+      const lockedBank = checkpointBankSnapshot(checkpoint);
+      const source = sourcePresentationFromBank(lockedBank);
+      const view = await this.openView(source);
+      const visualUrls = new Map(checkpoint.visuals.map((visual) => [
+        visual.id,
+        this.app.vault.adapter.getResourcePath(visual.vaultPath),
+      ]));
+      const exercises = presentExercises(
+        checkpoint.exercises,
+        (visualId) => visualUrls.get(visualId),
+        checkpoint.segments,
+      );
+      const learningEvidence = checkpoint.learningProgress === undefined
+        ? []
+        : this.learningEvidenceTemplates(
+            lockedBank as PracticeBankV3,
+            checkpoint.learningProgress.scope.sets.map((reference) => {
+              const set = (lockedBank as PracticeBankV3).practiceSets.find((candidate) => candidate.id === reference.id);
+              if (set === undefined) throw new Error(`The saved learning scope references missing set ${reference.id}.`);
+              return set;
+            }),
+            checkpoint.exercises.map((exercise) => exercise.id),
+          );
+      view.restoreStudy(
+        exercises,
+        studyProgressFromCheckpoint(checkpoint),
+        learningEvidence,
+      );
+      if (!Platform.isMobileApp) {
+        for (const answer of checkpoint.answers) {
+          if (answer.aiReview?.status.state !== "pending") continue;
+          this.enqueueAnswerReview(answer.aiReview.request);
+        }
+      }
+      new Notice(
+        `Resumed practice at question ${Math.min(checkpoint.currentQuestionIndex + 1, checkpoint.exercises.length)} of ${checkpoint.exercises.length}.`,
+        8_000,
+      );
+    } catch (error) {
+      this.showError(error);
+    } finally {
+      this.restoringStudyCheckpoint = false;
+    }
+  }
+
+  private async resumeMergingStudyCheckpoint(
+    checkpoint: StudySessionCheckpointV1,
+  ): Promise<void> {
+    const current = await this.loadPracticeBank(checkpoint.bankPath);
+    if (current.bankId !== checkpoint.bankId) {
+      throw new Error("The practice bank changed identity while a finished mobile session was awaiting merge. The checkpoint was retained.");
+    }
+    const session = finishedSessionFromCheckpoint(checkpoint);
+    const summary = createSessionSummary(checkpointBankSnapshot(checkpoint), session);
+    const saved = await this.repository.appendFinishedSession(
+      checkpoint.bankPath,
+      summary,
+      checkpoint.bankRevisionAtStart,
+    );
+    this.activeBank = { path: checkpoint.bankPath, bank: saved };
+    await this.clearStudySessionCheckpoint(checkpoint.sessionId);
+    this.scheduleDashboardRefresh();
+    new Notice("Recovered and saved the completed practice session without duplicating history.", 10_000);
+  }
+
+  private async requestDiscardStudyCheckpoint(): Promise<void> {
+    if (this.studyCheckpoint === undefined && this.invalidStudyCheckpointRaw === undefined) {
+      new Notice("There is no saved in-progress practice session to discard.");
+      return;
+    }
+    const confirmed = await confirmDestructiveAction(this.app, {
+      title: "Discard the saved practice session?",
+      warning: "The device-local in-progress session, current input, and any answers not yet merged into the Practice Markdown will be removed.",
+      consequences: [
+        "Already finished sessions in practice-bank history remain unchanged.",
+        "Generated problems, source notes, images, settings, scores, and synchronized data remain unchanged.",
+        "This in-progress checkpoint cannot be reconstructed after removal.",
+      ],
+      confirmationPhrase: DISCARD_STUDY_CHECKPOINT_CONFIRMATION,
+      confirmLabel: "Discard saved session",
+    });
+    if (!confirmed) return;
+    await this.clearStudySessionCheckpoint();
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView) leaf.view.discardStudySession();
+    }
+    new Notice("The device-local practice-session checkpoint was discarded.", 8_000);
+  }
+
+  public providerPresentation(
+    provider: ProviderPresentation["id"],
+  ): ProviderPresentation | undefined {
+    return this.providers.find((entry) => entry.id === provider);
   }
 
   public async requestResetAllSettings(): Promise<void> {
@@ -438,9 +787,100 @@ export default class PracticeLabPlugin extends Plugin {
       callback: () => { void this.openView(); }
     });
     this.addCommand({
+      id: "build-guided-learning-path-from-selection",
+      name: "Build guided learning path from selection",
+      editorCheckCallback: (checking, editor) => {
+        const selection = editor.getSelection();
+        const available = !Platform.isMobileApp && selection.trim().length > 0;
+        if (!checking && available) void this.generateGuidedFrom("selection", selection);
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "build-guided-learning-path-from-current-note",
+      name: "Build guided learning path from current note",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp && this.activeMarkdownFile() !== null;
+        if (!checking && available) void this.generateGuidedFrom("note");
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "build-guided-learning-path-from-current-pdf",
+      name: "Build guided learning path from current PDF",
+      checkCallback: (checking) => {
+        const file = this.activePdfFile();
+        const available = !Platform.isMobileApp && file !== null;
+        if (!checking && available && file !== null) void this.generateGuidedFromPdf(file);
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "open-guided-learning-path",
+      name: "Open guided learning path builder",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp;
+        if (!checking && available) void this.openLearningPathView();
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "resume-guided-learning-path",
+      name: "Resume interrupted guided learning path",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp && this.learningBatchRecoveryHandle !== undefined;
+        if (!checking && available) void this.resumeLearningPathBatch();
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "discard-guided-learning-path-recovery",
+      name: "Discard interrupted guided learning path",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp && this.learningBatchRecoveryHandle !== undefined;
+        if (!checking && available) void this.requestDiscardLearningPathRecovery();
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "resume-interrupted-generation",
+      name: "Resume interrupted generation",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp
+          && this.generationRecoveryHandle !== undefined;
+        if (!checking && available) void this.requestResumeInterruptedGeneration();
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "discard-interrupted-generation",
+      name: "Discard interrupted generation",
+      checkCallback: (checking) => {
+        const available = !Platform.isMobileApp
+          && this.generationRecoveryHandle !== undefined;
+        if (!checking && available) void this.requestDiscardInterruptedGeneration();
+        return available;
+      },
+    });
+    this.addCommand({
+      id: "discard-saved-practice-session",
+      name: "Discard saved practice session",
+      checkCallback: (checking) => {
+        const available = this.studyCheckpoint !== undefined
+          || this.invalidStudyCheckpointRaw !== undefined;
+        if (!checking && available) void this.requestDiscardStudyCheckpoint();
+        return available;
+      },
+    });
+    this.addCommand({
       id: "open-practice-dashboard",
       name: "Open practice dashboard",
       callback: () => { void this.openDashboard(); }
+    });
+    this.addCommand({
+      id: "prepare-for-offline-practice",
+      name: "Prepare for offline practice",
+      callback: () => { void this.prepareForOfflinePractice(); },
     });
     this.addCommand({
       id: "start-practice-for-current-note",
@@ -473,11 +913,23 @@ export default class PracticeLabPlugin extends Plugin {
         .setTitle("Practice Problem Generator: Generate from selection")
         .setIcon("text-select")
         .onClick(() => { void this.generateFrom("selection", selection); }));
+      if (!Platform.isMobileApp) {
+        menu.addItem((item) => item
+          .setTitle("Practice Problem Generator: Build guided path from selection")
+          .setIcon("route")
+          .onClick(() => { void this.generateGuidedFrom("selection", selection); }));
+      }
     }
     menu.addItem((item) => item
       .setTitle("Practice Problem Generator: Generate from current note")
       .setIcon("flask-conical")
       .onClick(() => { void this.generateFrom("note"); }));
+    if (!Platform.isMobileApp) {
+      menu.addItem((item) => item
+        .setTitle("Practice Problem Generator: Build guided path from current note")
+        .setIcon("route")
+        .onClick(() => { void this.generateGuidedFrom("note"); }));
+    }
   }
 
   private addFileMenuItems(menu: Menu, file: TAbstractFile): void {
@@ -490,10 +942,20 @@ export default class PracticeLabPlugin extends Plugin {
       .setTitle("Practice Problem Generator: Generate from PDF")
       .setIcon("file-scan")
       .onClick(() => { void this.generateFromPdf(file); }));
+    menu.addItem((item) => item
+      .setTitle("Practice Problem Generator: Build guided path from PDF")
+      .setIcon("route")
+      .onClick(() => { void this.generateGuidedFromPdf(file); }));
   }
 
   private async generateFrom(mode: MarkdownSourceMode, selection?: string): Promise<void> {
     try {
+      if (this.learningBatchRecoveryHandle !== undefined) {
+        new Notice("Finish, save, or discard the interrupted guided path before starting another generation.", 8_000);
+        await this.resumeLearningPathBatch();
+        return;
+      }
+      if (await this.redirectToInterruptedGeneration()) return;
       const source = await collectSource(this.app, mode, selection);
       this.lastSource = source;
       await this.openView(source, true);
@@ -504,6 +966,12 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async generateFromPdf(file?: TFile): Promise<void> {
     try {
+      if (this.learningBatchRecoveryHandle !== undefined) {
+        new Notice("Finish, save, or discard the interrupted guided path before starting another generation.", 8_000);
+        await this.resumeLearningPathBatch();
+        return;
+      }
+      if (await this.redirectToInterruptedGeneration()) return;
       const source = await this.requestPdfSource(file);
       if (source === null) return;
       this.lastSource = source;
@@ -630,6 +1098,31 @@ export default class PracticeLabPlugin extends Plugin {
           }
         },
         saveDrafts: async (source, drafts) => this.saveDrafts(source, drafts),
+        resolveStudySessionOrigin: () => this.activeBank === undefined
+          ? null
+          : {
+              bankPath: this.activeBank.path,
+              bankId: this.activeBank.bank.bankId,
+              bankRevisionAtStart: this.activeBank.bank.revision,
+              exerciseCountAtStart: this.activeBank.bank.exercises.length,
+            },
+        persistStudyCheckpoint: async (progress) => {
+          await this.persistStudySessionCheckpoint(progress);
+        },
+        enqueueAnswerReview: async (request) => {
+          const validation = validateAnswerReviewInput(createAnswerReviewInput(request));
+          if (!validation.valid) {
+            throw new Error(validation.errors?.[0] ?? "The locked AI review is invalid.");
+          }
+          if (!Platform.isMobileApp) this.enqueueAnswerReview(request);
+        },
+        updateStudyOrderDefaults: async (selection) => {
+          this.settings.studyOrderDefault = selection.mode;
+          this.settings.studyTypeSequence = [...selection.typeSequence];
+          this.settings.studyShuffleWithinTypesDefault =
+            selection.shuffleWithinTypes;
+          await this.saveSettings();
+        },
         ...(Platform.isMobileApp ? {} : {
           importRemoteVisual: async (visual: DetectedVisual) => {
             try {
@@ -652,10 +1145,7 @@ export default class PracticeLabPlugin extends Plugin {
           },
           updateGifFrameDefault: async (position) => {
             this.settings.gifFrameDefault = position;
-            await this.saveData(this.settings);
-          },
-          enqueueAnswerReview: (request) => {
-            this.enqueueAnswerReview(request);
+            await this.saveSettings();
           },
           retryAnswerReview: async (request) => this.retryAnswerReview(request),
           pauseAnswerReview: (requestId) => {
@@ -667,11 +1157,34 @@ export default class PracticeLabPlugin extends Plugin {
           if (!this.activeBank || this.activeBank.bank.source.vaultPath !== source.path) {
             throw new Error("The active study session no longer matches its saved bank.");
           }
-          const summary = createSessionSummary(this.activeBank.bank, session);
+          let lockedSession = session;
+          let summaryBank: PracticeBankV2 = this.activeBank.bank;
+          let expectedRevision = this.activeBank.bank.revision;
+          if (this.studyCheckpoint !== undefined) {
+            if (this.studyCheckpoint.sessionId !== session.id) {
+              throw new Error("The finished session does not match the device-local checkpoint.");
+            }
+            if (this.studyCheckpoint.phase === "active") {
+              this.studyCheckpoint = markStudySessionCheckpointMerging(
+                this.studyCheckpoint,
+                session,
+              );
+              await this.persistStoredData();
+            }
+            lockedSession = finishedSessionFromCheckpoint(this.studyCheckpoint);
+            summaryBank = checkpointBankSnapshot(this.studyCheckpoint);
+            expectedRevision = this.studyCheckpoint.bankRevisionAtStart;
+          }
+          const currentBank = await this.loadPracticeBank(this.activeBank.path);
+          if (currentBank.bankId !== summaryBank.bankId) {
+            throw new Error("The practice bank changed identity; the finished session remains safely checkpointed.");
+          }
+          this.activeBank.bank = currentBank;
+          const summary = createSessionSummary(summaryBank, lockedSession);
           this.activeBank.bank = await this.repository.appendFinishedSession(
             this.activeBank.path,
             summary,
-            this.activeBank.bank.revision
+            expectedRevision,
           );
           const storedSession = this.activeBank.bank.sessions.find((candidate) => candidate.id === summary.id);
           if (storedSession === undefined) {
@@ -696,12 +1209,208 @@ export default class PracticeLabPlugin extends Plugin {
           const pendingCount = storedSession.results.filter((result) =>
             result.grading === "ai-review" && result.state.status === "pending",
           ).length;
+          await this.clearStudySessionCheckpoint(session.id);
           new Notice(pendingCount > 0
-            ? `Practice session saved. ${pendingCount} AI ${pendingCount === 1 ? "review is" : "reviews are"} continuing in the background.`
+            ? Platform.isMobileApp
+              ? `Practice session saved. ${pendingCount} AI ${pendingCount === 1 ? "review is" : "reviews are"} queued for synchronized desktop processing.`
+              : `Practice session saved. ${pendingCount} AI ${pendingCount === 1 ? "review is" : "reviews are"} continuing in the background.`
             : "Practice session saved.");
-        }
+        },
+        ...(Platform.isMobileApp ? {} : {
+          buildRepairSet: async (_source: SourcePresentation, session) => {
+            await this.openRepairSetFromSession(session);
+          },
+        }),
       }
     };
+  }
+
+  private createLearningPathViewOptions(): LearningPathViewOptions {
+    return {
+      providers: this.providers,
+      recoverableBatch: this.learningBatchRecoveryHandle !== undefined,
+      defaults: {
+        provider: this.settings.provider,
+        model: modelForProvider(this.settings, this.settings.provider),
+        reasoningEffort: this.settings.reasoningEffort,
+        quantity: this.settings.quantity,
+        difficulty: this.settings.difficulty === "foundation"
+          ? "foundational"
+          : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+        focusInstructions: this.settings.defaultFocusInstructions,
+        gifFrameDefault: this.settings.gifFrameDefault,
+      },
+      callbacks: {
+        requestPrimarySource: async (mode) => {
+          try {
+            const source = mode === "pdf"
+              ? await this.requestPdfSource()
+              : await collectSource(
+                  this.app,
+                  mode,
+                  mode === "selection"
+                    ? this.app.workspace.getActiveViewOfType(MarkdownView)?.editor.getSelection()
+                    : undefined,
+                );
+            if (source === null) return null;
+            const prepared = await this.prepareGuidedSourceVisuals(source);
+            this.lastSource = prepared;
+            return this.learningPathController.registerSource(prepared);
+          } catch (error) {
+            this.showError(error);
+            return null;
+          }
+        },
+        requestSupportingSource: async () => {
+          try {
+            const file = await chooseSourceMaterialFile(this.app);
+            if (file === null) return null;
+            const source = file.extension.toLowerCase() === "pdf"
+              ? await this.requestPdfSource(file)
+              : await collectSourceFromFile(this.app, file, "note");
+            if (source === null) return null;
+            return this.learningPathController.registerSource(
+              await this.prepareGuidedSourceVisuals(source),
+            );
+          } catch (error) {
+            this.showError(error);
+            return null;
+          }
+        },
+        updateSourceVisuals: (source) => {
+          if (!isRuntimeCollectedSource(source)) {
+            throw new Error("The selected source must be chosen again before its visual changes can be used.");
+          }
+          return this.learningPathController.registerSource(source);
+        },
+        ...(Platform.isMobileApp ? {} : {
+          importRemoteVisual: async (visual: DetectedVisual) => {
+            try {
+              return await importRemoteVisual(this.app, visual);
+            } catch (error) {
+              this.showError(error);
+              return null;
+            }
+          },
+          chooseMediaFrame: async (visual: DetectedVisual, position) => {
+            try {
+              return await chooseVisualFrame(this.app, visual, {
+                ffmpegExecutable: this.settings.ffmpegExecutable,
+                ffprobeExecutable: this.settings.ffprobeExecutable,
+              }, position);
+            } catch (error) {
+              this.showError(error);
+              return null;
+            }
+          },
+          updateGifFrameDefault: async (position) => {
+            this.settings.gifFrameDefault = position;
+            await this.saveSettings();
+          },
+        }),
+        openQuickPractice: async (source) => {
+          await this.openView(source, true);
+        },
+        previewBlueprint: async (primary, supporting, configuration) =>
+          this.learningPathController.previewBlueprint(primary, supporting, configuration),
+        generateBlueprint: async (primary, supporting, configuration, onActivity) =>
+          this.learningPathController.generateBlueprint(
+            primary,
+            supporting,
+            configuration,
+            onActivity,
+          ),
+        previewSetPayloads: async (blueprint, configurations) =>
+          this.learningPathController.previewSetPayloads(blueprint, configurations),
+        generateAllSets: async (
+          blueprint,
+          configurations,
+          onStatus,
+          onActivity,
+        ) => this.learningPathController.generateAllSets(
+          blueprint,
+          configurations,
+          onStatus,
+          onActivity,
+        ),
+        cancelGeneration: () => this.learningPathController.cancel(),
+        saveLearningPath: async (request) => {
+          const saved = await this.learningPathController.saveLearningPath(request);
+          this.scheduleDashboardRefresh();
+          return saved;
+        },
+        saveManagedWorkspace: async (workspace) => {
+          const saved = await this.repository.saveLearningWorkspace({
+            bank: {
+              ...structuredClone(workspace.bank),
+              updatedAt: new Date().toISOString(),
+            },
+            expectedRevision: workspace.bank.revision,
+          });
+          this.scheduleDashboardRefresh();
+          if (this.activeBank?.path === saved.path) this.activeBank.bank = saved.bank;
+          return saved;
+        },
+        ...(Platform.isMobileApp ? {} : {
+          regenerateSavedSet: async (workspace, setId) => {
+            const current = await this.loadPracticeBank(workspace.path);
+            if (
+              current.bankId !== workspace.bank.bankId
+              || current.revision !== workspace.bank.revision
+            ) {
+              throw new Error("The learning workspace changed. Refresh the manager before regenerating a set.");
+            }
+            const set = current.practiceSets.find((candidate) => candidate.id === setId);
+            if (set === undefined) throw new Error("The selected practice set no longer exists.");
+            await this.openSavedSetGenerator(workspace.path, current, set);
+          },
+        }),
+        useSavedWorkspace: async (workspace, action) => {
+          if (action === "open-bank") {
+            await this.app.workspace.openLinkText(workspace.path, "", true);
+          } else if (action === "choose-set") {
+            await this.chooseAndStartPracticeSet(workspace.path, workspace.bank);
+          } else if (action === "mixed") {
+            await this.startBankStudy(workspace.path, workspace.bank, { kind: "mixed" });
+          } else {
+            await this.startBankStudy(workspace.path, workspace.bank, { kind: "recommended" });
+          }
+        },
+        resumeRecoverableBatch: async (onStatus, onActivity) =>
+          this.learningPathController.resumeRecoverableBatch(onStatus, onActivity),
+        discardRecoverableBatch: async () => this.requestDiscardLearningPathRecovery(),
+      },
+    };
+  }
+
+  private async prepareGuidedSourceVisuals(
+    source: CollectedSource,
+  ): Promise<CollectedSource> {
+    const visuals: DetectedVisual[] = [];
+    for (const visual of source.visuals) {
+      if (visual.state === "ready") {
+        visuals.push({ ...visual, selected: true });
+        continue;
+      }
+      if (visual.state === "frame-required" && visual.kind === "animated-gif") {
+        try {
+          const prepared = await chooseVisualFrame(this.app, visual, {
+            ffmpegExecutable: this.settings.ffmpegExecutable,
+            ffprobeExecutable: this.settings.ffprobeExecutable,
+          }, this.settings.gifFrameDefault);
+          visuals.push(prepared ?? visual);
+        } catch (error) {
+          visuals.push(visual);
+          new Notice(
+            `Could not prepare the default frame for ${displayVisualName(visual)}: ${error instanceof Error ? error.message : String(error)}`,
+            8_000,
+          );
+        }
+        continue;
+      }
+      visuals.push(visual);
+    }
+    return { ...source, visuals };
   }
 
   private createDashboardViewOptions(): PracticeDashboardViewOptions {
@@ -714,6 +1423,25 @@ export default class PracticeLabPlugin extends Plugin {
       },
       load: async () => this.dashboardRepository.load(),
       startPractice: async (record) => this.startBankStudy(record.bankPath, record.bank),
+      continueLearning: async (record) => this.startBankStudy(
+        record.bankPath,
+        record.bank,
+        { kind: "recommended" },
+      ),
+      chooseSet: async (record) => this.chooseAndStartPracticeSet(
+        record.bankPath,
+        record.bank,
+      ),
+      mixedPractice: async (record) => this.startBankStudy(
+        record.bankPath,
+        record.bank,
+        { kind: "mixed" },
+      ),
+      ...(Platform.isMobileApp ? {} : {
+        manageLearningPath: async (record: DashboardBankRecord) => {
+          await this.openSavedLearningPathManager(record.bankPath, record.bank);
+        },
+      }),
       openBank: async (record) => {
         await this.app.workspace.openLinkText(record.bankPath, "", true);
       },
@@ -723,6 +1451,9 @@ export default class PracticeLabPlugin extends Plugin {
           record.bankPath,
           true
         );
+      },
+      prepareOffline: async (records) => {
+        await this.prepareForOfflinePractice(records);
       },
       ...(Platform.isMobileApp ? {} : {
         regenerate: async (record) => {
@@ -737,7 +1468,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async requestRemovePracticeSession(
     bankPath: string,
-    bank: PracticeBankV2,
+    bank: PracticeBankV3,
     sessionId: string,
   ): Promise<void> {
     const session = bank.sessions.find((candidate) => candidate.id === sessionId);
@@ -770,7 +1501,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async requestClearPracticeBankHistory(
     bankPath: string,
-    bank: PracticeBankV2,
+    bank: PracticeBankV3,
   ): Promise<void> {
     if (bank.sessions.length === 0) {
       new Notice("This practice bank has no session history to clear.");
@@ -802,7 +1533,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async requestDeletePracticeBank(
     bankPath: string,
-    bank: PracticeBankV2,
+    bank: PracticeBankV3,
   ): Promise<void> {
     const confirmed = await confirmDestructiveAction(this.app, {
       title: `Delete the practice bank for ${bank.source.title}?`,
@@ -895,6 +1626,11 @@ export default class PracticeLabPlugin extends Plugin {
     configuration: GenerationConfiguration
   ): Promise<PayloadPreview> {
     if (Platform.isMobileApp) throw new Error("Exercise generation is available in Obsidian desktop only.");
+    if (this.generationRecoveryHandle !== undefined) {
+      throw new Error(
+        "A recoverable generation already exists. Review, save, or discard it before approving another payload.",
+      );
+    }
     const source = this.resolveCollectedSource(presentation);
     const preparedVisuals = await prepareSelectedVisuals(this.app, presentation.visuals);
     const prompt = buildGenerationPrompt(
@@ -932,14 +1668,35 @@ export default class PracticeLabPlugin extends Plugin {
       throw new Error("The source or configuration changed. Preview and approve the payload again.");
     }
     const layer = await this.ensureCliLayer();
+    const cli = await import("./cli");
     const adapter = layer.adapters[configuration.provider];
     const detection = this.providers.find((provider) => provider.id === configuration.provider);
     if (!detection?.available) throw new Error(`${adapter.label} is not available. ${detection?.detail ?? "Check its executable setting."}`);
     if (pending.preparedVisuals.length > 0 && adapter.capabilities().vision !== "supported") {
       throw new Error(`${adapter.label} vision is not enabled. Choose Codex or Claude for image occlusion.`);
     }
+    if (this.generationRecoveryHandle !== undefined) {
+      throw new Error(
+        "A recoverable generation already exists. Review, save, or discard it before starting another generation.",
+      );
+    }
 
     const generationJobId = `generation-${crypto.randomUUID()}`;
+    const recoveryContext = this.settings.recoverInterruptedGenerations
+      ? createGenerationRecoveryContext({
+          jobId: generationJobId,
+          startedAt: new Date().toISOString(),
+          source: pending.source,
+          configuration,
+          prompt: pending.prompt,
+          visuals: pending.preparedVisuals.map((visual) => visual.source),
+        })
+      : undefined;
+    this.generationRecoveryContext = recoveryContext;
+    this.generationRecoveryState = recoveryContext === undefined ? "idle" : "running";
+    this.generationRecoveryMessage = recoveryContext === undefined
+      ? undefined
+      : "Generation is recoverable if Obsidian closes or reloads.";
     this.activeGenerationJobId = generationJobId;
     let generatedValue: unknown;
     try {
@@ -956,14 +1713,45 @@ export default class PracticeLabPlugin extends Plugin {
         media: pending.preparedVisuals.map((visual) => visual.media),
         timeoutMs: this.settings.timeoutMs,
         ...(onActivity === undefined ? {} : { onActivity }),
+        ...(recoveryContext === undefined
+          ? {}
+          : {
+              recovery: {
+                mode: "start" as const,
+                jobId: generationJobId,
+                context: JSON.stringify(recoveryContext),
+                onReady: async (handle: DurableProcessHandle): Promise<void> => {
+                  this.generationRecoveryHandle = handle;
+                  await this.persistStoredData();
+                },
+              },
+            }),
       }, {
         id: generationJobId,
         kind: "generation",
         provider: configuration.provider,
       });
       generatedValue = result.value;
+      this.generationRecoveryHandle = result.recoveryHandle
+        ?? this.generationRecoveryHandle;
       pending.jobId = generationJobId;
       pending.attempts = result.attempts;
+    } catch (error) {
+      const code = cliErrorCode(error);
+      if (code === "detached") throw error;
+      if (this.generationRecoveryHandle !== undefined) {
+        if (code === "cancelled" || code === "timeout") {
+          await this.clearGenerationRecovery(false);
+        } else {
+          this.generationRecoveryState = "failed";
+          const detail = error instanceof Error
+            ? error.message
+            : "The recoverable generation stopped before producing a valid draft.";
+          this.generationRecoveryMessage = `${detail} The approved source remains available; discard this recovery before retrying it.`;
+          await this.persistStoredData();
+        }
+      }
+      throw error;
     } finally {
       if (this.activeGenerationJobId === generationJobId) this.activeGenerationJobId = undefined;
     }
@@ -973,6 +1761,20 @@ export default class PracticeLabPlugin extends Plugin {
       visualIds: pending.preparedVisuals.map((visual) => visual.source.id)
     });
     pending.draft = draft;
+    if (this.generationRecoveryHandle !== undefined) {
+      await cli.writeDurableRecoveryText(
+        this.generationRecoveryHandle,
+        GENERATION_RECOVERY_DRAFT_FILENAME,
+        JSON.stringify(createGenerationRecoveryDraft({
+          jobId: generationJobId,
+          attempts: pending.attempts ?? 1,
+          draft,
+        })),
+      );
+      this.generationRecoveryState = "ready";
+      this.generationRecoveryMessage = "Recovered draft ready for review and saving.";
+      await this.persistStoredData();
+    }
     const visualUrls = new Map(pending.preparedVisuals.map((visual) => [
       visual.source.id,
       this.app.vault.adapter.getResourcePath(visual.source.vaultPath)
@@ -1038,6 +1840,16 @@ export default class PracticeLabPlugin extends Plugin {
       },
     });
     this.activeBank = { path: saved.path, bank: saved.bank };
+    if (this.generationRecoveryHandle !== undefined) {
+      try {
+        await this.clearGenerationRecovery(true);
+      } catch (error) {
+        new Notice(
+          `The practice set was saved, but its temporary recovery data could not be removed. ${error instanceof Error ? error.message : String(error)}`,
+          10_000,
+        );
+      }
+    }
     new Notice(`Saved ${exercises.length} practice ${exercises.length === 1 ? "problem" : "problems"}.`);
     await this.app.workspace.openLinkText(saved.path, pending.source.path, true);
   }
@@ -1096,19 +1908,351 @@ export default class PracticeLabPlugin extends Plugin {
     }
   }
 
-  private async startBankStudy(path: string, bank: PracticeBankV2): Promise<void> {
-    const source = sourcePresentationFromBank(bank);
+  private async startBankStudy(
+    path: string,
+    bank: PracticeBankV2,
+    selection: BankStudySelection = { kind: "quick" },
+  ): Promise<void> {
+    if (this.studyCheckpoint !== undefined || this.invalidStudyCheckpointRaw !== undefined) {
+      new Notice(
+        "A saved practice session already exists. Resume or explicitly discard it before starting another.",
+        8_000,
+      );
+      await this.restoreStudyCheckpoint();
+      return;
+    }
+    const currentBank = bank as PracticeBankV3;
+    if (
+      currentBank.schemaVersion !== 3
+      || !Array.isArray(currentBank.practiceSets)
+      || !Array.isArray(currentBank.aspects)
+      || !Array.isArray(currentBank.tutorLessons)
+    ) {
+      throw new Error("This bank must be migrated before its learning controls can be used.");
+    }
+    let resolvedSelection = selection;
+    if (selection.kind === "recommended") {
+      const recommended = recommendNextLearningStep(
+        currentBank,
+        deriveLearningAnalytics(currentBank),
+      );
+      if (recommended === null) {
+        new Notice("This path already has consistent evidence. Starting mixed practice; the recommendation remains optional.", 7_000);
+        resolvedSelection = { kind: "mixed" };
+      } else {
+        new Notice(`Recommended next: ${recommended.title}. ${recommended.reasons.join(" ")}`, 10_000);
+        if (recommended.kind === "lesson") {
+          resolvedSelection = { kind: "lesson", lessonId: recommended.id };
+        } else {
+          const pathStepIndex = [...(currentBank.learningPath?.steps ?? [])]
+            .sort((left, right) => left.order - right.order)
+            .findIndex((step) => (
+              step.kind === "practice-set" && step.setId === recommended.id
+            ));
+          if (pathStepIndex < 0) {
+            throw new Error("The recommended set is missing from the saved path sequence.");
+          }
+          resolvedSelection = {
+            kind: "path-set",
+            setId: recommended.id,
+            pathStepIndex,
+          };
+        }
+      }
+    }
+
+    let exerciseIds: string[] = currentBank.exercises.map((exercise) => exercise.id);
+    let learning: LearningStudyLaunchV1 | undefined;
+    const setById = new Map(currentBank.practiceSets.map((set) => [set.id, set]));
+    const exerciseById = new Map(currentBank.exercises.map((exercise) => [exercise.id, exercise]));
+    if (
+      resolvedSelection.kind === "set"
+      || resolvedSelection.kind === "path-set"
+    ) {
+      const set = setById.get(resolvedSelection.setId);
+      if (set === undefined) throw new Error("The selected practice set no longer exists.");
+      exerciseIds = set.assignments.map((assignment) => assignment.exerciseId);
+      learning = this.learningStudyLaunch(currentBank, [set], exerciseIds, {
+        mode: resolvedSelection.kind === "path-set" ? "learning-path" : "set",
+        activeSetId: set.id,
+        ...(resolvedSelection.kind === "path-set"
+          ? { pathStepIndex: resolvedSelection.pathStepIndex }
+          : {}),
+      });
+    } else if (resolvedSelection.kind === "mixed") {
+      const sets = [...currentBank.practiceSets]
+        .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+      exerciseIds = sets.flatMap((set) => set.assignments.map((assignment) => assignment.exerciseId));
+      learning = this.learningStudyLaunch(currentBank, sets, exerciseIds, {
+        mode: "mixed",
+        activeSetId: sets[0]?.id ?? null,
+      });
+    } else if (resolvedSelection.kind === "lesson") {
+      const lesson = currentBank.tutorLessons.find((candidate) => (
+        candidate.id === resolvedSelection.lessonId
+      ));
+      if (lesson === undefined) throw new Error("The selected tutor lesson no longer exists.");
+      const set = currentBank.practiceSets.find((candidate) => (
+        candidate.assignments.some((assignment) => (
+          assignment.exerciseId === lesson.guidedExerciseId
+        ))
+      ));
+      if (set === undefined) throw new Error("The tutor lesson's guided problem has no practice set.");
+      const path = currentBank.learningPath;
+      if (path === null) throw new Error("This tutor lesson is not attached to a saved learning path.");
+      const pathStepIndex = [...path.steps]
+        .sort((left, right) => left.order - right.order)
+        .findIndex((step) => step.kind === "lesson" && step.lessonId === lesson.id);
+      if (pathStepIndex < 0) throw new Error("The tutor lesson is missing from the saved path sequence.");
+      exerciseIds = [lesson.guidedExerciseId];
+      learning = this.learningStudyLaunch(currentBank, [set], exerciseIds, {
+        mode: "learning-path",
+        activeSetId: set.id,
+        pathStepIndex,
+        lesson,
+      });
+    }
+    if (exerciseIds.length === 0) throw new Error("The selected learning scope contains no exercises.");
+    const selectedExercises = exerciseIds.map((id) => {
+      const exercise = exerciseById.get(id);
+      if (exercise === undefined) throw new Error(`The learning scope references missing exercise ${id}.`);
+      return exercise;
+    });
+    const source = sourcePresentationFromBank(currentBank);
     const view = await this.openView(source);
-    const visualUrls = new Map(bank.visuals.map((visual) => [
+    const visualUrls = new Map(currentBank.visuals.map((visual) => [
       visual.id,
       this.app.vault.adapter.getResourcePath(visual.vaultPath)
     ]));
-    this.activeBank = { path, bank };
-    view.startStudy(presentExercises(
-      bank.exercises,
-      (visualId) => visualUrls.get(visualId),
-      bank.segments,
-    ));
+    this.activeBank = { path, bank: currentBank };
+    view.startStudy(
+      presentExercises(
+        selectedExercises,
+        (visualId) => visualUrls.get(visualId),
+        currentBank.segments,
+      ),
+      {
+        bankPath: path,
+        bankId: currentBank.bankId,
+        bankRevisionAtStart: currentBank.revision,
+        exerciseCountAtStart: selectedExercises.length,
+      },
+      learning,
+    );
+  }
+
+  private async chooseAndStartPracticeSet(
+    path: string,
+    bank: PracticeBankV3,
+  ): Promise<void> {
+    const set = await choosePracticeSet(this.app, bank.practiceSets, "practice");
+    if (set === null) return;
+    await this.startBankStudy(path, bank, { kind: "set", setId: set.id });
+  }
+
+  private async openSavedLearningPathManager(
+    path: string,
+    bank: PracticeBankV3,
+  ): Promise<void> {
+    const view = await this.openLearningPathView();
+    view.manageSavedWorkspace(path, bank);
+  }
+
+  private async openRepairSetFromSession(
+    session: Parameters<NonNullable<PracticeLabViewOptions["callbacks"]["buildRepairSet"]>>[1],
+  ): Promise<void> {
+    const active = this.activeBank;
+    if (active === undefined) throw new Error("The saved learning workspace is no longer active.");
+    const bank = await this.loadPracticeBank(active.path);
+    const storedSession = bank.sessions.find((candidate) => candidate.id === session.id);
+    if (storedSession === undefined) {
+      throw new Error("The finished session was saved, but its historical evidence could not be located.");
+    }
+    const seed = deriveRepairSetSeed(bank, storedSession, session);
+    if (seed === null) {
+      throw new Error("This session has no incorrect or partial independent outcomes that need a repair set.");
+    }
+    if (bank.practiceSets.length >= 6) {
+      throw new Error("This path already has six sets. Remove or regenerate a set before adding a repair set.");
+    }
+    const remaining = 60 - bank.exercises.length;
+    if (remaining < 1) {
+      throw new Error("This path already contains the maximum of sixty exercises.");
+    }
+    const targetSet: PracticeSetV1 = {
+      id: seed.setId,
+      title: seed.title,
+      purpose: seed.purpose,
+      instructionalRole: "repair",
+      order: bank.practiceSets.length,
+      assignments: [],
+    };
+    await this.openSavedSetGenerator(
+      active.path,
+      bank,
+      targetSet,
+      {
+        addingSet: true,
+        repairSeed: seed,
+        targetAspectIds: seed.aspectIds,
+        quantity: Math.min(remaining, Math.max(3, Math.min(10, seed.entries.length * 2))),
+      },
+    );
+  }
+
+  private async openSavedSetGenerator(
+    bankPath: string,
+    bank: PracticeBankV3,
+    targetSet: PracticeSetV1,
+    options: {
+      readonly addingSet?: boolean;
+      readonly repairSeed?: RepairSetSeedV1;
+      readonly targetAspectIds?: readonly string[];
+      readonly quantity?: number;
+    } = {},
+  ): Promise<void> {
+    if (Platform.isMobileApp) {
+      throw new Error("AI set generation is available on desktop only. Saved paths remain usable on mobile.");
+    }
+    if (this.providersRefreshedAt === 0) await this.refreshProviders();
+    else if (Date.now() - this.providersRefreshedAt > 60_000) void this.refreshProviders();
+    const basePercentages = { ...this.settings.exerciseTypePercentages };
+    const fallback: GenerationConfiguration = {
+      provider: this.settings.provider,
+      model: modelForProvider(this.settings, this.settings.provider),
+      reasoningEffort: this.settings.reasoningEffort,
+      focusInstructions: options.repairSeed === undefined
+        ? ""
+        : repairFocusInstructions(options.repairSeed, {
+            includeSubmittedAnswers: false,
+            includeReviewFeedback: false,
+          }),
+      quantity: options.quantity
+        ?? Math.max(1, Math.min(30, targetSet.assignments.length || this.settings.quantity)),
+      difficulty: this.settings.difficulty === "foundation"
+        ? "foundational"
+        : this.settings.difficulty === "exam" ? "deep-exam" : "challenge",
+      exerciseTypes: enabledExerciseTypes(basePercentages),
+      exerciseTypePercentages: basePercentages,
+      selectedVisualIds: bank.visuals.map((visual) => visual.id),
+    };
+    const configuration = options.addingSet === true
+      ? fallback
+      : await this.savedSetController.defaults(
+          bankPath,
+          bank,
+          targetSet.id,
+          fallback,
+        );
+    const request = {
+      bankPath,
+      bank: structuredClone(bank),
+      targetSet: structuredClone(targetSet),
+      ...(options.targetAspectIds === undefined
+        ? {}
+        : { targetAspectIds: [...options.targetAspectIds] }),
+      configuration,
+      addingSet: options.addingSet === true,
+    };
+    new SavedSetGenerationModal(this.app, {
+      request,
+      providers: this.providers,
+      visuals: bank.visuals,
+      ...(options.repairSeed === undefined ? {} : { repairSeed: options.repairSeed }),
+      callbacks: {
+        preview: async (next) => this.savedSetController.preview(next),
+        generate: async (next, onActivity) => this.savedSetController.generate(next, onActivity),
+        save: async (next, review) => this.savedSetController.save(next, review),
+        cancel: () => this.savedSetController.cancel(),
+        onSaved: async (saved) => {
+          this.activeBank = { path: saved.path, bank: saved.bank };
+          this.scheduleDashboardRefresh();
+          for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+            if (leaf.view instanceof PracticeLearningPathView) {
+              leaf.view.manageSavedWorkspace(saved.path, saved.bank);
+            }
+          }
+        },
+      },
+    }).open();
+  }
+
+  private learningStudyLaunch(
+    bank: PracticeBankV3,
+    sets: readonly PracticeSetV1[],
+    exerciseIds: readonly string[],
+    options: {
+      readonly mode: "set" | "mixed" | "learning-path";
+      readonly activeSetId: string | null;
+      readonly pathStepIndex?: number;
+      readonly lesson?: PracticeBankV3["tutorLessons"][number];
+    },
+  ): LearningStudyLaunchV1 {
+    const evidenceByExerciseId = this.learningEvidenceTemplates(
+      bank,
+      sets,
+      exerciseIds,
+    );
+    return {
+      evidenceByExerciseId,
+      progress: {
+        schemaVersion: 1,
+        scope: options.mode === "learning-path"
+          ? {
+              mode: "learning-path",
+              learningPath: learningPathReference(bank),
+              sets: sets.map((set) => ({ id: set.id, title: set.title })),
+            }
+          : {
+              mode: options.mode,
+              sets: sets.map((set) => ({ id: set.id, title: set.title })),
+            },
+        pathStepIndex: options.mode === "learning-path"
+          ? options.pathStepIndex ?? 0
+          : null,
+        activeSetId: options.activeSetId,
+        activeLesson: options.lesson === undefined
+          ? null
+          : {
+              lesson: structuredClone(options.lesson),
+              state: createGuidedLessonState(
+                options.lesson,
+                options.lesson.guidedExerciseId,
+              ),
+              currentInput: "",
+            },
+        evidence: [],
+        completedTutorLessons: [],
+      },
+    };
+  }
+
+  private learningEvidenceTemplates(
+    bank: PracticeBankV3,
+    sets: readonly PracticeSetV1[],
+    exerciseIds: readonly string[],
+  ): ReturnType<typeof createSessionExerciseEvidence>[] {
+    const assignmentByExercise = new Map(
+      sets.flatMap((set) => set.assignments.map((assignment) => [
+        assignment.exerciseId,
+        { set, assignment },
+      ] as const)),
+    );
+    const aspectById = new Map(bank.aspects.map((aspect) => [aspect.id, aspect]));
+    return exerciseIds.map((exerciseId) => {
+      const owned = assignmentByExercise.get(exerciseId);
+      if (owned === undefined) throw new Error(`Exercise ${exerciseId} has no assignment in the selected scope.`);
+      const aspects = owned.assignment.aspectIds.map((aspectId) => {
+        const aspect = aspectById.get(aspectId);
+        if (aspect === undefined) throw new Error(`Exercise ${exerciseId} references missing aspect ${aspectId}.`);
+        return aspect;
+      });
+      return createSessionExerciseEvidence({
+        assignment: owned.assignment,
+        set: owned.set,
+        aspects,
+      });
+    });
   }
 
   private async regenerateBank(
@@ -1219,7 +2363,7 @@ export default class PracticeLabPlugin extends Plugin {
     source?: SourcePresentation,
     prepareDefaultVisuals = false,
   ): Promise<PracticeLabView> {
-    if (!Platform.isMobileApp) {
+    if (!Platform.isMobileApp && this.generationRecoveryHandle === undefined) {
       if (this.providersRefreshedAt === 0) {
         await this.refreshProviders();
       } else if (Date.now() - this.providersRefreshedAt > 60_000) {
@@ -1243,6 +2387,9 @@ export default class PracticeLabPlugin extends Plugin {
       gifFrameDefault: this.settings.gifFrameDefault,
       visualSelectionDefault: this.settings.visualSelectionDefault,
       studyOrderDefault: this.settings.studyOrderDefault,
+      studyTypeSequence: [...this.settings.studyTypeSequence],
+      studyShuffleWithinTypesDefault:
+        this.settings.studyShuffleWithinTypesDefault,
       quantity: this.settings.quantity,
       difficulty: this.settings.difficulty === "foundation"
         ? "foundational"
@@ -1254,8 +2401,66 @@ export default class PracticeLabPlugin extends Plugin {
     });
     if (source !== undefined) {
       leaf.view.setSource(source, { prepareDefaultVisuals });
+    } else if (
+      this.generationRecoveryHandle !== undefined
+      && this.pendingGeneration !== undefined
+    ) {
+      this.presentInterruptedGeneration(leaf.view);
     }
     return leaf.view;
+  }
+
+  private async openLearningPathView(
+    source?: SourcePresentation,
+  ): Promise<PracticeLearningPathView> {
+    if (Platform.isMobileApp) {
+      throw new Error("Guided learning-path generation is available on desktop. Saved paths remain usable on mobile.");
+    }
+    if (this.providersRefreshedAt === 0) {
+      await this.refreshProviders();
+    } else if (Date.now() - this.providersRefreshedAt > 60_000) {
+      void this.refreshProviders();
+    }
+    let leaf = this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)[0];
+    if (leaf === undefined) {
+      leaf = this.app.workspace.getLeaf("tab");
+      await leaf.setViewState({ type: PRACTICE_LEARNING_PATH_VIEW_TYPE, active: true });
+    }
+    await this.app.workspace.revealLeaf(leaf);
+    if (!(leaf.view instanceof PracticeLearningPathView)) {
+      throw new Error("The guided learning-path builder could not be opened.");
+    }
+    leaf.view.setProviders(this.providers);
+    leaf.view.setRecoveryAvailable(this.learningBatchRecoveryHandle !== undefined);
+    if (source !== undefined) leaf.view.setPrimarySource(source);
+    return leaf.view;
+  }
+
+  private async resumeLearningPathBatch(): Promise<void> {
+    try {
+      const view = await this.openLearningPathView();
+      await view.resumeRecovery();
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  private async requestDiscardLearningPathRecovery(): Promise<boolean> {
+    if (this.learningBatchRecoveryHandle === undefined) return true;
+    const confirmed = await confirmDestructiveAction(this.app, {
+      title: "Discard interrupted guided path?",
+      warning: "This removes the recoverable local batch workspace and its completed unsaved drafts.",
+      consequences: [
+        "Already saved practice banks, sessions, notes, PDFs, and original attachments remain untouched.",
+        "The exact approved payloads and unsaved generated sets in this interrupted batch cannot be resumed afterward.",
+      ],
+      confirmationPhrase: DISCARD_LEARNING_BATCH_RECOVERY_CONFIRMATION,
+      confirmLabel: "Discard guided path",
+    });
+    if (!confirmed) return false;
+    await this.learningPathController.discardRecoverableBatch();
+    new Notice("Discarded the interrupted guided learning path.", 6_000);
+    return true;
   }
 
   private async openDashboard(scope?: DashboardScope): Promise<PracticeDashboardView> {
@@ -1274,8 +2479,37 @@ export default class PracticeLabPlugin extends Plugin {
     return leaf.view;
   }
 
+  private async prepareForOfflinePractice(
+    selectedRecords?: readonly DashboardBankRecord[],
+  ): Promise<void> {
+    const snapshot = await this.dashboardRepository.load();
+    const records = selectedRecords ?? snapshot.records;
+    const selectedPaths = new Set(records.map((record) => record.bankPath));
+    const parseIssues = snapshot.issues
+      .filter((issue) => selectedRecords === undefined || selectedPaths.has(issue.bankPath))
+      .map((issue) => ({
+        bankPath: issue.bankPath,
+        severity: issue.severity,
+        message: issue.message,
+      }));
+    const report = auditOfflineReadiness(
+      records,
+      (path) => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        return file instanceof TFile
+          ? { exists: true, extension: file.extension }
+          : { exists: false };
+      },
+      parseIssues,
+    );
+    new OfflineReadinessModal(this.app, report).open();
+  }
+
   private registerDashboardRefreshEvents(): void {
-    const scheduleRefresh = (): void => { this.scheduleDashboardRefresh(); };
+    const scheduleRefresh = (): void => {
+      this.scheduleDashboardRefresh();
+      this.schedulePendingAnswerReviewScan();
+    };
     this.registerEvent(this.app.vault.on("create", scheduleRefresh));
     this.registerEvent(this.app.vault.on("modify", scheduleRefresh));
     this.registerEvent(this.app.vault.on("delete", scheduleRefresh));
@@ -1283,6 +2517,7 @@ export default class PracticeLabPlugin extends Plugin {
     this.registerEvent(this.app.metadataCache.on("changed", scheduleRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.register(() => { this.clearDashboardRefreshTimer(); });
+    this.register(() => { this.clearPendingAnswerReviewScanTimer(); });
   }
 
   private scheduleDashboardRefresh(): void {
@@ -1305,12 +2540,506 @@ export default class PracticeLabPlugin extends Plugin {
     this.dashboardRefreshTimer = undefined;
   }
 
+  private schedulePendingAnswerReviewScan(): void {
+    if (Platform.isMobileApp || this.unloading) return;
+    this.clearPendingAnswerReviewScanTimer();
+    this.pendingAnswerReviewScanTimer = window.setTimeout(() => {
+      this.pendingAnswerReviewScanTimer = undefined;
+      void this.resumePendingAnswerReviews().catch((error: unknown) => {
+        this.showError(error);
+      });
+    }, 1_500);
+  }
+
+  private clearPendingAnswerReviewScanTimer(): void {
+    if (this.pendingAnswerReviewScanTimer === undefined) return;
+    window.clearTimeout(this.pendingAnswerReviewScanTimer);
+    this.pendingAnswerReviewScanTimer = undefined;
+  }
+
   private resolveCollectedSource(presentation: SourcePresentation): CollectedSource {
     const source = this.lastSource;
     if (!source || source.path !== presentation.path || source.mode !== presentation.mode) {
       throw new Error("The active source changed. Load the note or selection again.");
     }
     return { ...source, visuals: presentation.visuals };
+  }
+
+  private async initializeDesktopWork(): Promise<void> {
+    const recovery = this.restoreInterruptedGeneration();
+    this.generationRecoveryTask = recovery;
+    try {
+      await recovery;
+    } catch (error) {
+      const code = cliErrorCode(error);
+      if (
+        !this.unloading
+        && !this.discardingGenerationRecovery
+        && code !== "detached"
+      ) {
+        if (code === "workspace-error") {
+          await this.clearGenerationRecovery(false);
+          new Notice("The saved interrupted-generation workspace was no longer available, so its stale recovery pointer was cleared.", 10_000);
+        } else {
+          if (
+            this.generationRecoveryHandle !== undefined
+            && this.generationRecoveryState === "running"
+            && this.activeGenerationJobId === undefined
+          ) {
+            this.generationRecoveryState = "blocked";
+            this.generationRecoveryMessage = `${error instanceof Error ? error.message : String(error)} Restore the required source or visual, then run “Resume interrupted generation” again.`;
+            await this.persistStoredData();
+            this.updateInterruptedGenerationViews();
+          }
+          this.showError(error);
+        }
+      }
+    } finally {
+      if (this.generationRecoveryTask === recovery) {
+        this.generationRecoveryTask = undefined;
+      }
+    }
+    if (
+      !this.unloading
+      && this.generationRecoveryState !== "running"
+      && this.generationRecoveryState !== "blocked"
+    ) {
+      await this.initializeDesktopAnswerReviews();
+    }
+  }
+
+  private async generateGuidedFrom(
+    mode: MarkdownSourceMode,
+    selection?: string,
+  ): Promise<void> {
+    try {
+      if (this.generationRecoveryHandle !== undefined) {
+        new Notice("Finish, save, or discard the interrupted quick generation before building a guided path.", 8_000);
+        await this.openInterruptedGeneration();
+        return;
+      }
+      if (this.learningBatchRecoveryHandle !== undefined) {
+        await this.resumeLearningPathBatch();
+        return;
+      }
+      const source = await collectSource(this.app, mode, selection);
+      const prepared = await this.prepareGuidedSourceVisuals(source);
+      this.lastSource = prepared;
+      const presentation = this.learningPathController.registerSource(prepared);
+      await this.openLearningPathView(presentation);
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  private async generateGuidedFromPdf(file?: TFile): Promise<void> {
+    try {
+      if (this.generationRecoveryHandle !== undefined) {
+        new Notice("Finish, save, or discard the interrupted quick generation before building a guided path.", 8_000);
+        await this.openInterruptedGeneration();
+        return;
+      }
+      if (this.learningBatchRecoveryHandle !== undefined) {
+        await this.resumeLearningPathBatch();
+        return;
+      }
+      const source = await this.requestPdfSource(file);
+      if (source === null) return;
+      const prepared = await this.prepareGuidedSourceVisuals(source);
+      this.lastSource = prepared;
+      const presentation = this.learningPathController.registerSource(prepared);
+      await this.openLearningPathView(presentation);
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  private async restoreInterruptedGeneration(): Promise<void> {
+    const handle = this.generationRecoveryHandle;
+    if (handle === undefined) return;
+    const cli = await import("./cli");
+    // The adapter shares one timeout budget across its initial and repair
+    // attempts. Keep recovery longer than that complete approved budget.
+    const minimumRetentionMs = this.settings.timeoutMs + 60 * 60 * 1_000;
+    const configuredRetentionMs = this.settings.generationRecoveryRetentionHours
+      * 60 * 60 * 1_000;
+    if (
+      Date.now() - Date.parse(handle.startedAt)
+      > Math.max(minimumRetentionMs, configuredRetentionMs)
+    ) {
+      await cli.removeDurableRecovery(handle);
+      await this.clearGenerationRecovery(false);
+      new Notice("Expired interrupted-generation data was removed from the operating-system temporary directory.", 8_000);
+      return;
+    }
+
+    const context = parseGenerationRecoveryContext(
+      await cli.readDurableRecoveryText(
+        handle,
+        cli.GENERATION_RECOVERY_CONTEXT_FILENAME,
+      ),
+    );
+    if (context.jobId !== handle.jobId) {
+      throw new Error("The interrupted generation does not match its saved recovery handle.");
+    }
+    this.generationRecoveryState = "running";
+    this.generationRecoveryMessage = "Inspecting the saved local job before reattaching.";
+    const pending = await this.pendingGenerationFromRecovery(context);
+    this.generationRecoveryContext = context;
+    this.pendingGeneration = pending;
+    this.lastSource = pending.source;
+
+    const checkpoint = await this.readRecoveryDraftCheckpoint(handle);
+    if (checkpoint !== null) {
+      if (checkpoint.jobId !== context.jobId) {
+        throw new Error("The recovered draft belongs to a different generation job.");
+      }
+      const draft = asGenerationDraft(checkpoint.draft, {
+        source: pending.source,
+        configuration: pending.configuration,
+        visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+      });
+      pending.draft = draft;
+      pending.jobId = context.jobId;
+      pending.attempts = checkpoint.attempts;
+      this.generationRecoveryState = "ready";
+      this.generationRecoveryMessage = "Recovered draft ready for review and saving.";
+      this.updateInterruptedGenerationViews();
+      new Notice("Recovered an interrupted practice-problem draft. Open Practice Problem Generator to review it.", 10_000);
+      return;
+    }
+
+    this.generationRecoveryState = "running";
+    this.generationRecoveryMessage = "Reattached to the exact local CLI job; generation is continuing from its existing progress.";
+    this.activeGenerationJobId = context.jobId;
+    this.updateInterruptedGenerationViews();
+    new Notice(`Resuming interrupted ${context.configuration.provider} generation in the background.`, 8_000);
+    try {
+      const layer = await this.ensureCliLayer();
+      const adapter = layer.adapters[context.configuration.provider];
+      const result = await layer.coordinator.generate(adapter, {
+        prompt: context.prompt,
+        schema: generationDraftV1JsonSchema,
+        validate: (value) => validateGeneratedDraft(value, {
+          source: pending.source,
+          configuration: pending.configuration,
+          visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+        }),
+        ...(context.configuration.model.length === 0
+          ? {}
+          : { model: context.configuration.model }),
+        reasoningEffort: context.configuration.reasoningEffort,
+        media: pending.preparedVisuals.map((visual) => visual.media),
+        timeoutMs: this.settings.timeoutMs,
+        recovery: { mode: "resume", handle },
+        onActivity: (event) => this.publishRecoveredGenerationActivity(event),
+      }, {
+        id: context.jobId,
+        kind: "generation",
+        provider: context.configuration.provider,
+      });
+      const draft = asGenerationDraft(result.value, {
+        source: pending.source,
+        configuration: pending.configuration,
+        visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+      });
+      pending.draft = draft;
+      pending.jobId = context.jobId;
+      pending.attempts = result.attempts;
+      this.generationRecoveryHandle = result.recoveryHandle ?? handle;
+      await cli.writeDurableRecoveryText(
+        this.generationRecoveryHandle,
+        GENERATION_RECOVERY_DRAFT_FILENAME,
+        JSON.stringify(createGenerationRecoveryDraft({
+          jobId: context.jobId,
+          attempts: result.attempts,
+          draft,
+        })),
+      );
+      this.generationRecoveryState = "ready";
+      this.generationRecoveryMessage = "Interrupted generation completed and is ready for review.";
+      await this.persistStoredData();
+      this.updateInterruptedGenerationViews();
+      new Notice("Interrupted generation recovered successfully. Open Practice Problem Generator to review the draft.", 10_000);
+    } catch (error) {
+      const code = cliErrorCode(error);
+      if (code === "detached") throw error;
+      if (code === "cancelled" || code === "timeout") {
+        await this.clearGenerationRecovery(false);
+      } else {
+        this.generationRecoveryState = "failed";
+        const detail = error instanceof Error
+          ? error.message
+          : "The interrupted generation could not be recovered.";
+        this.generationRecoveryMessage = `${detail} The approved source remains available; discard this recovery before retrying it.`;
+        await this.persistStoredData();
+        this.updateInterruptedGenerationViews();
+      }
+      throw error;
+    } finally {
+      if (this.activeGenerationJobId === context.jobId) {
+        this.activeGenerationJobId = undefined;
+      }
+    }
+  }
+
+  private async pendingGenerationFromRecovery(
+    context: GenerationRecoveryContextV1,
+  ): Promise<PendingGeneration> {
+    const file = this.app.vault.getAbstractFileByPath(context.source.path);
+    if (!(file instanceof TFile)) {
+      throw new Error(
+        `The interrupted generation's source is missing: ${context.source.path}. Restore it before resuming.`,
+      );
+    }
+    const prepared = prepareSource(context.source.submittedText);
+    if (
+      prepared.hash !== context.source.hash
+      || JSON.stringify(prepared.segments) !== JSON.stringify(context.source.segments)
+    ) {
+      throw new Error("The interrupted generation's source checkpoint failed its local integrity check.");
+    }
+    const preparedVisuals: PreparedVisual[] = [];
+    for (const visual of context.visuals) {
+      const visualFile = this.app.vault.getAbstractFileByPath(visual.vaultPath);
+      if (!(visualFile instanceof TFile)) {
+        throw new Error(
+          `A visual required by the interrupted generation is missing: ${visual.vaultPath}.`,
+        );
+      }
+      preparedVisuals.push({
+        source: visual,
+        media: {
+          bytes: await this.app.vault.readBinary(visualFile),
+          mimeType: visual.mimeType,
+        },
+      });
+    }
+    const detectedVisuals = context.visuals.map((visual, index) =>
+      recoveredDetectedVisual(
+        visual,
+        index,
+        this.app.vault.adapter.getResourcePath(visual.vaultPath),
+      ));
+    const source: CollectedSource = {
+      mode: context.source.mode,
+      title: context.source.title,
+      path: context.source.path,
+      characterCount: context.source.characterCount,
+      excerpt: context.source.excerpt,
+      ...(context.source.detail === undefined ? {} : { detail: context.source.detail }),
+      visuals: detectedVisuals,
+      file,
+      submittedText: context.source.submittedText,
+      ...(context.source.sourceImport === undefined
+        ? {}
+        : { sourceImport: context.source.sourceImport }),
+      hash: context.source.hash,
+      segments: [...context.source.segments],
+    };
+    return {
+      source,
+      configuration: context.configuration,
+      prompt: context.prompt,
+      preparedVisuals,
+    };
+  }
+
+  private async readRecoveryDraftCheckpoint(
+    handle: DurableProcessHandle,
+  ): Promise<ReturnType<typeof parseGenerationRecoveryDraft> | null> {
+    const cli = await import("./cli");
+    try {
+      return parseGenerationRecoveryDraft(
+        await cli.readDurableRecoveryText(
+          handle,
+          GENERATION_RECOVERY_DRAFT_FILENAME,
+        ),
+      );
+    } catch (error) {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private publishRecoveredGenerationActivity(event: CliActivityEvent): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView) {
+        leaf.view.publishRecoveredGenerationActivity(event);
+      }
+    }
+  }
+
+  private updateInterruptedGenerationViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView && this.pendingGeneration !== undefined) {
+        this.presentInterruptedGeneration(leaf.view);
+      }
+    }
+  }
+
+  private presentInterruptedGeneration(view: PracticeLabView): void {
+    const pending = this.pendingGeneration;
+    if (pending === undefined || this.generationRecoveryHandle === undefined) return;
+    const visualUrls = new Map(pending.preparedVisuals.map((visual) => [
+      visual.source.id,
+      this.app.vault.adapter.getResourcePath(visual.source.vaultPath),
+    ]));
+    const drafts = pending.draft === undefined
+      ? undefined
+      : presentExercises(
+          pending.draft.exercises,
+          (visualId) => visualUrls.get(visualId),
+          pending.source.segments,
+        );
+    view.prepareRecoveredGeneration(
+      pending.source,
+      configurationDefaults(pending.configuration),
+      {
+        state: this.generationRecoveryState,
+        ...(this.generationRecoveryMessage === undefined
+          ? {}
+          : { message: this.generationRecoveryMessage }),
+      },
+      drafts,
+    );
+  }
+
+  private async openInterruptedGeneration(): Promise<void> {
+    const view = await this.openView();
+    this.presentInterruptedGeneration(view);
+  }
+
+  private async requestResumeInterruptedGeneration(): Promise<void> {
+    if (this.generationRecoveryHandle === undefined) {
+      new Notice("There is no interrupted generation to resume.");
+      return;
+    }
+    if (
+      this.generationRecoveryState === "blocked"
+      && this.generationRecoveryTask === undefined
+    ) {
+      this.generationRecoveryState = "running";
+      this.generationRecoveryMessage = "Checking the saved source and exact detached CLI job again.";
+      const recovery = this.restoreInterruptedGeneration();
+      this.generationRecoveryTask = recovery;
+      try {
+        await recovery;
+      } catch (error) {
+        const code = cliErrorCode(error);
+        if (code === "workspace-error") {
+          await this.clearGenerationRecovery(false);
+          new Notice("The interrupted-generation workspace is no longer available; its stale pointer was cleared.", 10_000);
+          return;
+        }
+        if (code !== "detached") {
+          if (
+            this.generationRecoveryHandle !== undefined
+            && this.pendingGeneration === undefined
+          ) {
+            this.generationRecoveryState = "blocked";
+            this.generationRecoveryMessage = `${error instanceof Error ? error.message : String(error)} Restore the required source or visual, or discard this recovery.`;
+            await this.persistStoredData();
+          }
+          this.showError(error);
+        }
+      } finally {
+        if (this.generationRecoveryTask === recovery) {
+          this.generationRecoveryTask = undefined;
+        }
+      }
+      if (
+        !this.unloading
+        && this.generationRecoveryState !== "running"
+        && this.generationRecoveryState !== "blocked"
+      ) {
+        await this.initializeDesktopAnswerReviews();
+      }
+    }
+    if (this.generationRecoveryHandle !== undefined) {
+      await this.openInterruptedGeneration();
+    }
+  }
+
+  private async redirectToInterruptedGeneration(): Promise<boolean> {
+    if (this.generationRecoveryHandle === undefined) return false;
+    new Notice(
+      "A recoverable generation already exists. Review, save, or discard it before starting another.",
+      8_000,
+    );
+    await this.openInterruptedGeneration();
+    return true;
+  }
+
+  public async requestDiscardInterruptedGeneration(): Promise<void> {
+    const handle = this.generationRecoveryHandle;
+    if (handle === undefined) {
+      new Notice("There is no interrupted generation to discard.");
+      return;
+    }
+    const confirmed = await confirmDestructiveAction(this.app, {
+      title: "Discard the interrupted generation?",
+      warning: "The recoverable CLI job, approved source checkpoint, neutral media copies, and unsaved generated draft will be removed.",
+      consequences: [
+        "No source note, saved practice bank, session history, score, or setting will be changed.",
+        "An unsaved generated draft cannot be recovered after this cleanup.",
+        "A currently running provider process will be cancelled first.",
+      ],
+      confirmationPhrase: DISCARD_GENERATION_RECOVERY_CONFIRMATION,
+      confirmLabel: "Discard generation",
+    });
+    if (!confirmed) return;
+    this.discardingGenerationRecovery = true;
+    try {
+      const cli = await import("./cli");
+      try {
+        await cli.cancelDurableRecovery(handle);
+      } catch (error) {
+        if (cliErrorCode(error) !== "workspace-error") throw error;
+        // A missing or rejected workspace has nothing safe to cancel or
+        // delete. Clearing only the small plugin-data pointer is safe.
+        await this.clearGenerationRecovery(false);
+      }
+      if (this.activeGenerationJobId !== undefined) {
+        this.cliLayer?.coordinator.cancel(this.activeGenerationJobId);
+        try {
+          await this.cliLayer?.coordinator.whenIdle();
+        } catch {
+          // Cleanup below remains authoritative.
+        }
+      }
+      const recoveryTask = this.generationRecoveryTask;
+      if (recoveryTask !== undefined) {
+        try {
+          await recoveryTask;
+        } catch {
+          // An interrupted restore is expected to reject after cancellation.
+        }
+      }
+      await this.clearGenerationRecovery(true);
+      delete this.pendingGeneration;
+      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+        if (leaf.view instanceof PracticeLabView) {
+          leaf.view.setJob({ state: "idle" });
+        }
+      }
+      new Notice("Interrupted-generation recovery data was removed.", 6_000);
+    } finally {
+      this.discardingGenerationRecovery = false;
+    }
+  }
+
+  private async clearGenerationRecovery(removeWorkspace: boolean): Promise<void> {
+    const handle = this.generationRecoveryHandle;
+    if (removeWorkspace && handle !== undefined) {
+      const cli = await import("./cli");
+      await cli.removeDurableRecovery(handle);
+    }
+    this.generationRecoveryHandle = undefined;
+    this.generationRecoveryContext = undefined;
+    this.generationRecoveryState = "idle";
+    this.generationRecoveryMessage = undefined;
+    await this.persistStoredData();
   }
 
   private async initializeDesktopAnswerReviews(): Promise<void> {
@@ -1653,7 +3382,7 @@ export default class PracticeLabPlugin extends Plugin {
     await this.retryAnswerReview(request);
   }
 
-  private async loadPracticeBank(bankPath: string): Promise<PracticeBankV2> {
+  private async loadPracticeBank(bankPath: string): Promise<PracticeBankV3> {
     const file = this.app.vault.getAbstractFileByPath(bankPath);
     if (!(file instanceof TFile)) {
       throw new Error("The Practice Problem Generator bank no longer exists.");
@@ -1919,7 +3648,7 @@ export default class PracticeLabPlugin extends Plugin {
   private async performProviderRefresh(): Promise<void> {
     const refreshEpoch = ++this.providerRefreshEpoch;
     if (Platform.isMobileApp) {
-      this.providers = MOBILE_PROVIDERS;
+      this.providers = mobileProviderPresentations(this.settings);
       this.providersRefreshedAt = Date.now();
       return;
     }
@@ -1944,14 +3673,21 @@ export default class PracticeLabPlugin extends Plugin {
       for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
         if (leaf.view instanceof PracticeLabView) leaf.view.setProviders(this.providers);
       }
+      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+        if (leaf.view instanceof PracticeLearningPathView) leaf.view.setProviders(this.providers);
+      }
       this.queueWaitingAnswerReviews();
     } catch (error) {
       if (refreshEpoch !== this.providerRefreshEpoch) return;
-      this.providers = MOBILE_PROVIDERS.map((provider) => ({
+      this.providers = mobileProviderPresentations(this.settings).map((provider) => ({
         ...provider,
+        executionMode: "unavailable" as const,
         detail: error instanceof Error ? error.message : "Provider detection failed."
       }));
       this.providersRefreshedAt = Date.now();
+      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+        if (leaf.view instanceof PracticeLearningPathView) leaf.view.setProviders(this.providers);
+      }
     }
   }
 
@@ -2069,9 +3805,40 @@ export default class PracticeLabPlugin extends Plugin {
       },
     });
     const actions = element.createDiv({ cls: "practice-lab-bank-actions" });
-    const start = actions.createEl("button", { text: "Start practice", cls: "mod-cta" });
+    if (bank.learningPath !== null) {
+      const continueLearning = actions.createEl("button", {
+        text: "Continue learning",
+        cls: "mod-cta",
+        attr: {
+          type: "button",
+          title: "Start the locally recommended tutor lesson or practice set. The recommendation is advisory and can be ignored.",
+        },
+      });
+      continueLearning.addEventListener("click", () => {
+        void this.startBankStudy(context.sourcePath, bank, { kind: "recommended" });
+      });
+      const chooseSet = actions.createEl("button", {
+        text: "Choose a set",
+        attr: { type: "button", title: "Choose any named set without progression locks." },
+      });
+      chooseSet.addEventListener("click", () => {
+        void this.chooseAndStartPracticeSet(context.sourcePath, bank);
+      });
+      const mixed = actions.createEl("button", {
+        text: "Mixed practice",
+        attr: { type: "button", title: "Practice every named set in path order, with your chosen study-order option." },
+      });
+      mixed.addEventListener("click", () => {
+        void this.startBankStudy(context.sourcePath, bank, { kind: "mixed" });
+      });
+    }
+    const start = actions.createEl("button", {
+      text: bank.learningPath === null ? "Start practice" : "Practice all problems",
+      ...(bank.learningPath === null ? { cls: "mod-cta" } : {}),
+      attr: { type: "button", title: "Start a freely accessible practice run across the saved exercises." },
+    });
     start.addEventListener("click", () => { void this.startBankStudy(context.sourcePath, bank); });
-    if (!Platform.isMobileApp) {
+    if (!Platform.isMobileApp && bank.learningPath === null) {
       const regenerate = actions.createEl("button", {
         text: "Regenerate / tweak",
         attr: {
@@ -2083,6 +3850,17 @@ export default class PracticeLabPlugin extends Plugin {
         void this.regenerateBank(context.sourcePath, bank).catch((error: unknown) => {
           this.showError(error);
         });
+      });
+    } else if (!Platform.isMobileApp && bank.learningPath !== null) {
+      const manage = actions.createEl("button", {
+        text: "Manage path",
+        attr: {
+          type: "button",
+          title: "Open the learning-path manager. Set regeneration never replaces sibling sets or historical evidence.",
+        },
+      });
+      manage.addEventListener("click", () => {
+        void this.openSavedLearningPathManager(context.sourcePath, bank);
       });
     }
     const dashboard = actions.createEl("button", { text: "View dashboard" });
@@ -2160,11 +3938,21 @@ function providerPresentation(
     id: detection.id,
     label: detection.id === "codex" ? "Codex" : detection.id === "claude" ? "Claude" : "agy",
     available: detection.available,
+    executionMode: detection.available ? "execute-now" : "unavailable",
     supportsVision: detection.capabilities.vision === "supported",
     reasoningEfforts: [...detection.capabilities.reasoningEfforts],
+    models: detection.models.map((model) => ({
+      ...model,
+      ...(model.supportedReasoningEfforts === undefined
+        ? {}
+        : { supportedReasoningEfforts: [...model.supportedReasoningEfforts] }),
+    })),
     defaultModel: modelForProvider(settings, detection.id),
     ...(detection.version === undefined ? {} : { version: detection.version }),
-    ...(detection.detail === undefined ? {} : { detail: detection.detail })
+    ...(detection.detail === undefined ? {} : { detail: detection.detail }),
+    ...(detection.modelCatalogDetail === undefined
+      ? {}
+      : { modelCatalogDetail: detection.modelCatalogDetail }),
   };
 }
 
@@ -2174,6 +3962,123 @@ function modelForProvider(
 ): string {
   if (provider === "claude") return settings.claudeModel;
   return provider === "agy" ? settings.agyModel : settings.codexModel;
+}
+
+function storedGenerationRecoveryHandle(
+  value: unknown,
+): DurableProcessHandle | undefined {
+  if (
+    typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+    || !(GENERATION_RECOVERY_DATA_KEY in value)
+  ) return undefined;
+  const candidate = (value as Record<string, unknown>)[GENERATION_RECOVERY_DATA_KEY];
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return undefined;
+  }
+  const record = candidate as Record<string, unknown>;
+  if (
+    record.version !== 1
+    || typeof record.jobId !== "string"
+    || !/^generation-[a-f0-9-]{36}$/u.test(record.jobId)
+    || typeof record.workspacePath !== "string"
+    || record.workspacePath.length === 0
+    || typeof record.startedAt !== "string"
+    || !Number.isFinite(Date.parse(record.startedAt))
+  ) return undefined;
+  return {
+    version: 1,
+    jobId: record.jobId,
+    workspacePath: record.workspacePath,
+    startedAt: record.startedAt,
+  };
+}
+
+function storedLearningBatchRecoveryHandle(
+  value: unknown,
+): DurableProcessHandle | undefined {
+  const candidate = storedDataValue(value, LEARNING_BATCH_RECOVERY_DATA_KEY);
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return undefined;
+  }
+  const record = candidate as Record<string, unknown>;
+  if (
+    record.version !== 1
+    || typeof record.jobId !== "string"
+    || !/^learning-set-[a-f0-9-]{36}$/u.test(record.jobId)
+    || typeof record.workspacePath !== "string"
+    || record.workspacePath.length === 0
+    || typeof record.startedAt !== "string"
+    || !Number.isFinite(Date.parse(record.startedAt))
+  ) return undefined;
+  return {
+    version: 1,
+    jobId: record.jobId,
+    workspacePath: record.workspacePath,
+    startedAt: record.startedAt,
+  };
+}
+
+function storedDataValue(value: unknown, key: string): unknown {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function recoveredDetectedVisual(
+  visual: VisualSourceV1,
+  index: number,
+  previewUrl: string,
+): DetectedVisual {
+  return {
+    id: visual.id,
+    kind: visual.kind === "remote-snapshot" ? "remote-image" : "static-image",
+    state: "ready",
+    start: index,
+    end: index + 1,
+    selected: true,
+    ...(visual.sourceEmbed === undefined ? {} : { sourceTarget: visual.sourceEmbed }),
+    resolvedPath: visual.vaultPath,
+    previewUrl,
+    mimeType: visual.mimeType,
+    ...(visual.remoteHost === undefined ? {} : { remoteHost: visual.remoteHost }),
+    ...(visual.frameTimeSeconds === undefined
+      ? {}
+      : { frameTimeSeconds: visual.frameTimeSeconds }),
+    ...(visual.framePosition === undefined
+      ? {}
+      : { framePosition: visual.framePosition }),
+    reason: "Recovered from the exact approved generation payload",
+  };
+}
+
+function configurationDefaults(
+  configuration: GenerationConfiguration,
+): Parameters<PracticeLabView["setConfigurationDefaults"]>[0] {
+  return {
+    provider: configuration.provider,
+    model: configuration.model,
+    reasoningEffort: configuration.reasoningEffort,
+    focusInstructions: configuration.focusInstructions,
+    quantity: configuration.quantity,
+    difficulty: configuration.difficulty,
+    exerciseTypes: configuration.exerciseTypes,
+    exerciseTypePercentages: { ...configuration.exerciseTypePercentages },
+  };
+}
+
+function cliErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function nodeErrorCode(error: unknown): string | undefined {
+  return cliErrorCode(error);
 }
 
 function sameConfiguration(left: GenerationConfiguration, right: GenerationConfiguration): boolean {
@@ -2213,6 +4118,48 @@ function sourcePresentationFromBank(bank: PracticeBankV2): SourcePresentation {
     excerpt: "Saved Practice Problem Generator bank",
     ...(pdfSource ? { detail: "Saved PDF page-range source" } : {}),
     visuals: []
+  };
+}
+
+function learningPathReference(
+  bank: PracticeBankV3,
+): { readonly id: string; readonly title: string } {
+  if (bank.learningPath === null) {
+    throw new Error("The selected tutor step is not attached to a learning path.");
+  }
+  return { id: bank.learningPath.id, title: bank.learningPath.title };
+}
+
+function isRuntimeCollectedSource(
+  source: SourcePresentation,
+): source is SourcePresentation & CollectedSource {
+  const candidate = source as SourcePresentation & Partial<CollectedSource>;
+  return typeof candidate.submittedText === "string"
+    && typeof candidate.hash === "string"
+    && Array.isArray(candidate.segments)
+    && candidate.file instanceof TFile;
+}
+
+function studyProgressFromCheckpoint(
+  checkpoint: StudySessionCheckpointV1,
+): StudySessionProgressV1 {
+  return {
+    bankPath: checkpoint.bankPath,
+    bankId: checkpoint.bankId,
+    bankRevisionAtStart: checkpoint.bankRevisionAtStart,
+    exerciseCountAtStart: checkpoint.exerciseCountAtStart,
+    sessionId: checkpoint.sessionId,
+    startedAt: checkpoint.startedAt,
+    orderedExerciseIds: checkpoint.exercises.map((exercise) => exercise.id),
+    currentQuestionIndex: checkpoint.currentQuestionIndex,
+    answers: structuredClone(checkpoint.answers),
+    currentInput: structuredClone(checkpoint.currentInput),
+    answerReviewMode: checkpoint.answerReviewMode,
+    answerReviewProvider: checkpoint.answerReviewProvider,
+    answerReviewReasoningEffort: checkpoint.answerReviewReasoningEffort,
+    ...(checkpoint.learningProgress === undefined
+      ? {}
+      : { learningProgress: structuredClone(checkpoint.learningProgress) }),
   };
 }
 

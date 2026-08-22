@@ -16,7 +16,7 @@ function sourceBetween(source: string, start: string, end: string): string {
   return source.slice(startIndex, endIndex);
 }
 
-test("saved banks expose a direct regenerate-and-tweak action", () => {
+test("saved banks route flat regeneration and learning-path management separately", () => {
   const block = sourceBetween(
     mainSource,
     "private async renderPracticeBlock(",
@@ -24,7 +24,19 @@ test("saved banks expose a direct regenerate-and-tweak action", () => {
   );
   assert.match(block, /text: "Regenerate \/ tweak"/u);
   assert.match(block, /regenerateBank\(context\.sourcePath, bank\)/u);
-  assert.match(block, /if \(!Platform\.isMobileApp\)/u);
+  assert.match(
+    block,
+    /if \(!Platform\.isMobileApp && bank\.learningPath === null\)/u,
+  );
+  assert.match(
+    block,
+    /else if \(!Platform\.isMobileApp && bank\.learningPath !== null\)/u,
+  );
+  assert.match(block, /text: "Manage path"/u);
+  assert.match(
+    block,
+    /openSavedLearningPathManager\(context\.sourcePath, bank\)/u,
+  );
 });
 
 test("regeneration restores configuration but never bypasses payload approval", () => {

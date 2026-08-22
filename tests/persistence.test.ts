@@ -8,11 +8,12 @@ import {
   mergeSessionSummary,
   mergeAiReviewResolution,
   mergeAiReviewStateTransition,
-  migratePracticeBankV1ToV2,
+  migratePracticeBankV1ToV3,
   parsePracticeBankMarkdown,
   serializePracticeBank,
 } from "../src/persistence";
 import {
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   LEGACY_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
   type PracticeBankV1,
@@ -20,6 +21,7 @@ import {
   type SessionItemResultV1,
   type SessionSummaryV2,
 } from "../src/model";
+import { migratePracticeBankV2ToV3 } from "../src/learning-path";
 import { createAiReviewRequest } from "../src/schema";
 import { createSourceHash, segmentSource } from "../src/segmenter";
 import {
@@ -104,10 +106,17 @@ function createLegacyBank(): PracticeBankV1 {
 }
 
 function legacyMarkdown(bank: PracticeBankV1): string {
-  const current = migratePracticeBankV1ToV2(bank);
-  return serializePracticeBank(current)
-    .replace("practice-lab-version: 2", "practice-lab-version: 1")
-    .replaceAll('"schemaVersion": 2', '"schemaVersion": 1');
+  return [
+    "---",
+    "practice-lab: true",
+    `practice-lab-version: ${LEGACY_PRACTICE_BANK_SCHEMA_VERSION}`,
+    "---",
+    "",
+    "```practice-lab",
+    JSON.stringify(bank, null, 2),
+    "```",
+    "",
+  ].join("\n");
 }
 
 test("derives the fixed per-course Practice path", () => {
@@ -157,7 +166,7 @@ test("round-trips readable Markdown and its versioned fenced block", () => {
   const parsed = parsePracticeBankMarkdown(markdown);
   assert.equal(parsed.status, "ok");
   if (parsed.status === "ok") {
-    assert.deepEqual(parsed.bank, bank);
+    assert.deepEqual(parsed.bank, migratePracticeBankV2ToV3(bank));
     assert.deepEqual(parsed.warnings, []);
   }
   const windowsParsed = parsePracticeBankMarkdown(markdown.replace(/\n/gu, "\r\n"));
@@ -213,17 +222,17 @@ test("validates legacy v1 strictly and migrates it losslessly in memory", () => 
   assert.equal(parsed.status, "ok");
   if (parsed.status !== "ok") return;
   assert.equal(parsed.storedSchemaVersion, LEGACY_PRACTICE_BANK_SCHEMA_VERSION);
-  assert.equal(parsed.bank.schemaVersion, PRACTICE_BANK_SCHEMA_VERSION);
-  assert.equal(parsed.bank.sessions[0]?.schemaVersion, PRACTICE_BANK_SCHEMA_VERSION);
+  assert.equal(parsed.bank.schemaVersion, CURRENT_PRACTICE_BANK_SCHEMA_VERSION);
+  assert.equal(parsed.bank.sessions[0]?.schemaVersion, CURRENT_PRACTICE_BANK_SCHEMA_VERSION);
   assert.match(parsed.warnings[0] ?? "", /migrated in memory/u);
-  const expected = migratePracticeBankV1ToV2(legacy);
+  const expected = migratePracticeBankV1ToV3(legacy);
   assert.deepEqual(parsed.bank, expected);
-  assert.match(serializePracticeBank(parsed.bank), /practice-lab-version: 2/u);
+  assert.match(serializePracticeBank(parsed.bank), /practice-lab-version: 3/u);
 });
 
 test("opens unknown versions read-only with recovery instructions", () => {
   const markdown = serializePracticeBank(createBank()).replace(
-    '"schemaVersion": 2',
+    '"schemaVersion": 3',
     '"schemaVersion": 99',
   );
   const parsed = parsePracticeBankMarkdown(markdown);

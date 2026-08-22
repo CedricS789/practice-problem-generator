@@ -12,8 +12,9 @@ import {
   focusInstructionsForPrompt,
   focusInstructionsProblem,
 } from "./focus-instructions";
+import { exerciseLatexMarkupProblems } from "./latex";
 
-export const GENERATION_PROMPT_VERSION = "practice-lab-v3.3";
+export const GENERATION_PROMPT_VERSION = "practice-lab-v3.4";
 
 const EXERCISE_GUIDANCE: Readonly<Record<ExerciseV1["type"], string>> = {
   "short-answer": "Ask for a concise reconstruction, distinction, definition in context, or relationship. The grounded answer must fully answer the wording, and keyPoints must identify the essential scoring elements.",
@@ -105,6 +106,10 @@ export function buildGenerationPrompt(
     distributionList,
     "Cover distinct ideas across the submitted scope where evidence permits. Avoid duplicates and superficial paraphrases of the same question.",
     "The groundedAnswer must be a complete, instructional resolution of the prompt. It must not merely name the correct option or repeat the question.",
+    "Use LaTeX for every learner-visible mathematical variable, expression, equation, inequality, subscript, superscript, matrix, and symbolic unit. Use canonical Obsidian delimiters: $...$ for inline math and $$...$$ for display math. Keep ordinary prose outside the delimiters.",
+    "Never use \\(...\\) or \\[...\\] delimiters. Escape a literal currency dollar as \\$. Ensure every delimiter and LaTeX brace is balanced. A cloze placeholder may sit inside a math span, but it must not open, close, or split a delimiter.",
+      "The final object is JSON: JSON-escape LaTeX backslashes correctly so the decoded string contains commands such as \\frac, \\mathrm, and \\Delta. Do not use code fences, HTML, image syntax, or links inside exercise fields.",
+    "Keep machine-graded IDs, numericAnswer, tolerance, acceptedAnswers, cloze blank answers, and occlusion mask answers as concise canonical values; do not add LaTeX delimiters unless the learner is genuinely expected to type them.",
     "Calculations require all necessary quantities in the source, an explicit numeric answer, non-negative tolerance, working, and unit. Use the literal unit \"1\" for a dimensionless result.",
     "MCQ distractors must be plausible but demonstrably wrong from the source. Never use duplicate choices, and never use 'all of the above' or 'none of the above'.",
     "Occlusion masks use normalized x, y, width, and height in [0,1], remain fully inside the image, have precise labels and answers, and reference a listed visualId. Proposals will be reviewed by the user before saving.",
@@ -180,6 +185,9 @@ export function validateGeneratedDraft(
     return { valid: false, errors: core.issues.map((issue) => `${issue.path}: ${issue.message}`) };
   }
   const errors: string[] = [];
+  core.value.exercises.forEach((exercise, index) => {
+    errors.push(...exerciseLatexMarkupProblems(exercise, index));
+  });
   if (core.value.exercises.length !== options.configuration.quantity) {
     errors.push(`Expected exactly ${options.configuration.quantity} exercises, received ${core.value.exercises.length}.`);
   }
