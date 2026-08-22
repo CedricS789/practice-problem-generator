@@ -1,6 +1,6 @@
 {
   "name": "practice-lab-ai",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "private": true,
   "description": "Generate source-grounded practice problems, image occlusions, and analytics from notes and selected PDF pages.",
   "license": "MIT",

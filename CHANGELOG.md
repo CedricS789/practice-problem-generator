@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.8
+
+- Added explicit Select all and Deselect all controls to the quick-set exercise mix without rebuilding or resetting the configuration window.
+- Kept an intentionally empty mix visible and safely blocked generation until at least one exercise type is selected again.
+
 ## 1.2.7
 
 - Guaranteed hover descriptions across every plugin view, picker, and modal, including disabled and dynamically rendered buttons.

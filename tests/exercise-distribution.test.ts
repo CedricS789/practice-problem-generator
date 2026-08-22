@@ -74,6 +74,21 @@ test("balancing selected types preserves a 100 percent integer total", () => {
   assert.equal(exerciseTypePercentageTotal(balanced), 100);
 });
 
+test("an intentionally deselected mix remains empty and explains how to continue", () => {
+  const deselected = balanceExerciseTypes([]);
+  assert.deepEqual(enabledExerciseTypes(deselected), []);
+  assert.equal(exerciseTypePercentageTotal(deselected), 0);
+  assert.equal(
+    exerciseTypeDistributionProblem(deselected),
+    "Select at least one exercise type.",
+  );
+
+  const reselected = toggleExerciseType(deselected, "calculation", true);
+  assert.deepEqual(enabledExerciseTypes(reselected), ["calculation"]);
+  assert.equal(reselected.calculation, 100);
+  assert.equal(exerciseTypeDistributionProblem(reselected), null);
+});
+
 test("invalid saved percentages fail closed to the recommended mix", () => {
   const invalid = {
     ...RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,

@@ -39,6 +39,19 @@ test("slider-driven zero shares retain intent and automatically return when slid
   assert.match(implementation, /will return automatically when you slide back/u);
 });
 
+test("exercise mix offers in-place select-all and deselect-all controls", () => {
+  const start = viewSource.indexOf("private renderExerciseMix(");
+  const end = viewSource.indexOf("private renderConfigureOutput(", start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = viewSource.slice(start, end);
+  assert.match(implementation, /\.setButtonText\("Select all"\)/u);
+  assert.match(implementation, /applyMix\(balanceExerciseTypes\(EXERCISE_TYPES\)\)/u);
+  assert.match(implementation, /\.setButtonText\("Deselect all"\)/u);
+  assert.match(implementation, /applyMix\(balanceExerciseTypes\(\[\]\)\)/u);
+  assert.match(implementation, /deselectAllButton\.setDisabled\(selectedCount === 0\)/u);
+  assert.doesNotMatch(implementation, /this\.render\s*\(/u);
+});
+
 test("configure uses a provider-aware model picker with an explicit custom fallback", () => {
   const start = viewSource.indexOf("const modelSetting =");
   const end = viewSource.indexOf('.setName("Number of exercises")', start);

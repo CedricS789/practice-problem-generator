@@ -1906,13 +1906,25 @@ export class PracticeLabView extends ItemView {
           "calculation",
         ]));
       });
-    new ButtonComponent(typeActions)
+    const equalSelectedButton = new ButtonComponent(typeActions)
       .setButtonText("Equal selected")
       .setTooltip("Give every currently selected type an equal share.")
       .onClick(() => {
         applyMix(balanceExerciseTypes(
           enabledExerciseTypes(this.exerciseTypePercentages),
         ));
+      });
+    const selectAllButton = new ButtonComponent(typeActions)
+      .setButtonText("Select all")
+      .setTooltip("Select every exercise type and give each one an equal share.")
+      .onClick(() => {
+        applyMix(balanceExerciseTypes(EXERCISE_TYPES));
+      });
+    const deselectAllButton = new ButtonComponent(typeActions)
+      .setButtonText("Deselect all")
+      .setTooltip("Clear every exercise type. Generation stays blocked until you select at least one.")
+      .onClick(() => {
+        applyMix(balanceExerciseTypes([]));
       });
 
     const distributionSummary = container.createDiv({
@@ -2054,6 +2066,9 @@ export class PracticeLabView extends ItemView {
       const selectedCount = enabledExerciseTypes(
         this.exerciseTypePercentages,
       ).length;
+      equalSelectedButton.setDisabled(selectedCount <= 1);
+      selectAllButton.setDisabled(selectedCount === EXERCISE_TYPES.length);
+      deselectAllButton.setDisabled(selectedCount === 0);
       distributionSummary.classList.toggle(
         "is-valid",
         distributionProblem === null,

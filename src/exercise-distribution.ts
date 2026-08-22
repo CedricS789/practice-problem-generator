@@ -112,12 +112,12 @@ export function exerciseTypeDistributionProblem(
       return `${type} must use a whole percentage from 0 to 100.`;
     }
   }
+  if (enabledExerciseTypes(value).length === 0) {
+    return "Select at least one exercise type.";
+  }
   const total = exerciseTypePercentageTotal(value);
   if (total !== 100) {
     return `Exercise percentages currently total ${total}%. Adjust them to 100% or use a preset.`;
-  }
-  if (enabledExerciseTypes(value).length === 0) {
-    return "Assign a positive percentage to at least one exercise type.";
   }
   return null;
 }
