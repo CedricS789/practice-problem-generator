@@ -21,6 +21,22 @@ test("quick and guided creation use one clearly related mode vocabulary", () => 
   assert.match(stylesSource, /\.practice-creation-mode-switch/u);
 });
 
+test("guided creation can always return to an empty quick set", () => {
+  assert.match(
+    guidedViewSource,
+    /openQuickPractice: \(source: SourcePresentation \| null\)/u,
+  );
+  assert.match(guidedViewSource, /quick\.disabled = switchBlocked;/u);
+  assert.match(
+    guidedViewSource,
+    /if \(!quick\.disabled\) \{\s+void this\.options\.callbacks\.openQuickPractice\(this\.primary\);/u,
+  );
+  assert.doesNotMatch(
+    guidedViewSource,
+    /quick\.disabled = switchBlocked \|\| this\.primary === null/u,
+  );
+});
+
 test("mode switching reuses the current leaf and carries an approved source", () => {
   assert.match(
     mainSource,
@@ -55,4 +71,3 @@ test("failed recovery can restart the exact approved request without reconfigura
   );
   assert.match(mainSource, /Retry interrupted generation from approved request/u);
 });
-

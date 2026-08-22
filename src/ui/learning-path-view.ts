@@ -133,7 +133,7 @@ export interface LearningPathViewCallbacks {
   readonly updateGifFrameDefault?: (
     position: GifFramePosition,
   ) => Promise<void> | void;
-  readonly openQuickPractice: (source: SourcePresentation) => Promise<void> | void;
+  readonly openQuickPractice: (source: SourcePresentation | null) => Promise<void> | void;
   readonly resumeInterruptedQuickGeneration?: () => Promise<void> | void;
   readonly retryInterruptedQuickGeneration?: () => Promise<void> | void;
   readonly discardInterruptedQuickGeneration?: () => Promise<void> | void;
@@ -521,14 +521,12 @@ export class PracticeLearningPathView extends ItemView {
       },
     });
     const switchBlocked = this.busy !== null || this.stage === "review";
-    quick.disabled = switchBlocked || this.primary === null;
+    quick.disabled = switchBlocked;
     if (switchBlocked) {
       quick.title = "Finish the current guided generation or review before changing creation mode.";
-    } else if (this.primary === null) {
-      quick.title = "Choose a primary source before switching to quick set mode.";
     }
     quick.addEventListener("click", () => {
-      if (!quick.disabled && this.primary !== null) {
+      if (!quick.disabled) {
         void this.options.callbacks.openQuickPractice(this.primary);
       }
     });

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.5
+
+- Kept Quick set available from Guided path before a primary source is selected, so switching modes cannot trap an empty creation workspace.
+
 ## 1.2.4
 
 - Unified quick-set and guided-path creation under one clearly labelled mode switch that reuses the current workspace tab.
