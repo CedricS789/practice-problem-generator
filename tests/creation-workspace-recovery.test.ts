@@ -68,6 +68,19 @@ test("quick and guided source stages share one selector and consistent source ca
   assert.match(stylesSource, /\.practice-source-summary-card/u);
 });
 
+test("source replacement guidance occupies its own row without overlapping cards", () => {
+  const noteStart = stylesSource.indexOf(".practice-source-replace-note {");
+  const noteEnd = stylesSource.indexOf("}", noteStart);
+  assert.ok(noteStart >= 0 && noteEnd > noteStart);
+  const rule = stylesSource.slice(noteStart, noteEnd);
+  assert.match(rule, /margin: var\(--size-4-2\) 0 var\(--size-4-3\);/u);
+  assert.doesNotMatch(rule, /calc\(-1/u);
+  assert.match(
+    stylesSource,
+    /\.practice-source-stage > \.practice-source-replace-note \{\s+margin: 0;/u,
+  );
+});
+
 test("guided visual defaults appear before supporting-material controls", () => {
   const sourceStart = guidedViewSource.indexOf("private renderSource(container");
   const sourceEnd = guidedViewSource.indexOf("private renderPlanningPreview", sourceStart);

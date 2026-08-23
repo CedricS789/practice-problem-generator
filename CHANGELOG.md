@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.5
+
+- Fixed the shared source picker so replacement guidance occupies its own row instead of overlapping source-choice or selected-source cards.
+- Preserved consistent spacing in both Quick set and Guided path layouts, including narrow panes.
+
 ## 1.3.4
 
 - Made Quick set to Guided path navigation immediate even when the approved source contains GIFs whose default frames still need extraction.

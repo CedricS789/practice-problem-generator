@@ -316,9 +316,14 @@
 }
 
 .practice-source-replace-note {
-  margin: calc(-1 * var(--size-4-2)) 0 0;
+  margin: var(--size-4-2) 0 var(--size-4-3);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.practice-source-stage > .practice-source-replace-note {
+  margin: 0;
 }
 
 .practice-source-empty-inline {
