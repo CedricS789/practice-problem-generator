@@ -29,6 +29,7 @@ import {
   formatCliErrorForUi,
   parseProviderOutput,
   removeDurableRecovery,
+  resolveDurableWorkerExecutable,
   resolveSpawnTarget,
   type CliJobFileSystem,
   type CliJobWorkspace,
@@ -1299,6 +1300,37 @@ test("a durable CLI process survives detachment and resumes the exact output", a
   assert.match(resumed.stdout, /started[\s\S]*finished/u);
   assert.match(resumedEvents.join(""), /finished/u);
   await job.cleanup();
+});
+
+test("durable helpers use installed Node instead of the Obsidian Electron host", async () => {
+  const fileSystem = new DesktopJobFileSystem();
+  const job = await fileSystem.create();
+  const fakeElectron = join(job.absolutePath, "Obsidian.exe");
+  try {
+    assert.equal(
+      await resolveDurableWorkerExecutable(process.execPath, fakeElectron),
+      process.execPath,
+    );
+    const result = await new DesktopProcessRunner(
+      16 * 1024 * 1024,
+      fakeElectron,
+    ).run({
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write('node-worker-ok')"],
+      cwd: job.absolutePath,
+      stdin: "",
+      timeoutMs: 5_000,
+      durable: {
+        mode: "start",
+        jobId: "generation-00000000-0000-4000-8000-000000000011",
+        attempt: 1,
+      },
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "node-worker-ok");
+  } finally {
+    await job.cleanup();
+  }
 });
 
 test("structured generation reattaches without launching a replacement provider turn", async () => {

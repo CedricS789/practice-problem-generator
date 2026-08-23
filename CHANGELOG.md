@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.11
+
+- Fixed recoverable Guided-path helpers exiting immediately in Obsidian builds that do not support `ELECTRON_RUN_AS_NODE`.
+- Detached generation now resolves and launches through an actual installed Node.js runtime, preferring the provider's already verified Node executable.
+- Preserved exact-request recovery and added an Electron-host regression without transmitting authored source material.
+
 ## 1.3.10
 
 - Made every unlocked Guided-path progress step clickable so users can move backward and forward without losing retained work.

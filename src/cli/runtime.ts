@@ -64,7 +64,10 @@ function loadDesktopCommonJsModule<T>(specifier: DesktopNodeModuleId): T {
 export class DesktopProcessRunner implements CliProcessRunner {
   readonly maxOutputBytes: number;
 
-  constructor(maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES) {
+  constructor(
+    maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
+    private readonly desktopHostExecutable = process.execPath,
+  ) {
     this.maxOutputBytes = maxOutputBytes;
   }
 
@@ -230,6 +233,10 @@ export class DesktopProcessRunner implements CliProcessRunner {
     let handle: DurableProcessHandle;
     if (durable.mode === "start") {
       const target = await resolveSpawnTarget(request.executable);
+      const workerExecutable = await resolveDurableWorkerExecutable(
+        target.executable,
+        this.desktopHostExecutable,
+      );
       handle = durable.handle ?? {
           version: 1,
           jobId: durable.jobId,
@@ -254,7 +261,7 @@ export class DesktopProcessRunner implements CliProcessRunner {
         this.maxOutputBytes,
       );
       await durable.onReady?.(handle);
-      await launchDurableWorker(handle, active);
+      await launchDurableWorker(handle, active, workerExecutable);
     } else {
       handle = durable.handle;
       assertDurableHandle(handle);
@@ -264,7 +271,7 @@ export class DesktopProcessRunner implements CliProcessRunner {
           "The recoverable AI job does not match its isolated workspace.",
         );
       }
-      await ensurePreparedDurableWorker(handle);
+      await ensurePreparedDurableWorker(handle, this.desktopHostExecutable);
     }
 
     return await pollDurableRun(
@@ -366,6 +373,7 @@ async function prepareDurableRun(
 async function launchDurableWorker(
   handle: DurableProcessHandle,
   active: DurableActiveRecord,
+  workerExecutable: string,
 ): Promise<void> {
   const { spawn } = loadDesktopCommonJsModule<
     typeof import("node:child_process")
@@ -376,13 +384,14 @@ async function launchDurableWorker(
   const workerPath = path.join(handle.workspacePath, DURABLE_WORKER_FILENAME);
   let worker;
   try {
-    worker = spawn(process.execPath, [workerPath, active.requestFile], {
+    const workerEnvironment: Record<string, string | undefined> = {
+      ...process.env,
+      NO_COLOR: "1",
+    };
+    delete workerEnvironment.ELECTRON_RUN_AS_NODE;
+    worker = spawn(workerExecutable, [workerPath, active.requestFile], {
       cwd: handle.workspacePath,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        NO_COLOR: "1",
-      },
+      env: workerEnvironment,
       shell: false,
       windowsHide: true,
       detached: true,
@@ -407,6 +416,7 @@ async function launchDurableWorker(
 
 async function ensurePreparedDurableWorker(
   handle: DurableProcessHandle,
+  desktopHostExecutable: string,
 ): Promise<void> {
   const path = loadDesktopCommonJsModule<typeof import("node:path")>(
     "node:path",
@@ -435,7 +445,18 @@ async function ensurePreparedDurableWorker(
   // in that tiny window, no provider turn exists yet; launch the already
   // prepared exact request instead of asking the user to start over.
   const { workerPid: _formerWorkerPid, ...prepared } = active;
-  await launchDurableWorker(handle, prepared);
+  const preparedRequest = await readJsonFile(active.requestFile);
+  if (!isRecord(preparedRequest) || typeof preparedRequest.executable !== "string") {
+    throw new CliProviderError(
+      "workspace-error",
+      "The recoverable AI request is missing its executable.",
+    );
+  }
+  const workerExecutable = await resolveDurableWorkerExecutable(
+    preparedRequest.executable,
+    desktopHostExecutable,
+  );
+  await launchDurableWorker(handle, prepared, workerExecutable);
 }
 
 async function pollDurableRun(
@@ -1331,6 +1352,66 @@ export async function resolveSpawnTarget(
 
   // Let spawn produce its native ENOENT for ordinary missing executables.
   return { executable, prefixArgs: [] };
+}
+
+/**
+ * Obsidian's Electron executable is not a dependable Node child-process host:
+ * production builds may disable ELECTRON_RUN_AS_NODE. Durable jobs therefore
+ * use an actual installed Node runtime, preferring the provider's already
+ * resolved Node executable when the CLI itself is a Node application.
+ */
+export async function resolveDurableWorkerExecutable(
+  providerExecutable: string,
+  desktopHostExecutable = process.execPath,
+  environment: SpawnEnvironment = process.env,
+): Promise<string> {
+  const { access } = loadDesktopCommonJsModule<
+    typeof import("node:fs/promises")
+  >("node:fs/promises");
+  const path = loadDesktopCommonJsModule<typeof import("node:path")>(
+    "node:path",
+  );
+  const exists = async (candidate: string): Promise<boolean> => {
+    try {
+      await access(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const isNodeRuntime = (candidate: string): boolean => {
+    const basename = path.basename(candidate).toLowerCase();
+    return basename === "node" || basename === "node.exe";
+  };
+
+  for (const candidate of [providerExecutable, desktopHostExecutable]) {
+    if (isNodeRuntime(candidate) && await exists(candidate)) return candidate;
+  }
+
+  if (process.platform !== "win32") {
+    return "node";
+  }
+
+  const candidates = new Set<string>();
+  for (const directory of (environment.PATH ?? "").split(path.delimiter)) {
+    if (directory.length > 0) candidates.add(path.join(directory, "node.exe"));
+  }
+  for (const programFiles of [environment.ProgramFiles, environment.ProgramW6432]) {
+    if (programFiles !== undefined && programFiles.length > 0) {
+      candidates.add(path.join(programFiles, "nodejs", "node.exe"));
+    }
+  }
+  if (environment.LOCALAPPDATA !== undefined && environment.LOCALAPPDATA.length > 0) {
+    candidates.add(path.join(environment.LOCALAPPDATA, "Programs", "nodejs", "node.exe"));
+  }
+  for (const candidate of candidates) {
+    if (await exists(candidate)) return candidate;
+  }
+
+  throw new CliProviderError(
+    "missing-executable",
+    "Recoverable AI jobs require an installed Node.js runtime. Check providers in Practice Problem Generator settings.",
+  );
 }
 
 /** Node filesystem modules are likewise deferred until a desktop job starts. */
