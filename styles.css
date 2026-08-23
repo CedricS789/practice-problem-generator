@@ -4271,6 +4271,10 @@ button.practice-learning-path-mode-card {
   background: var(--background-secondary);
 }
 
+.practice-learning-path-planning-preview {
+  scroll-margin-block-start: var(--size-4-4);
+}
+
 .practice-learning-path-payload > summary {
   padding: var(--size-4-3);
   cursor: pointer;

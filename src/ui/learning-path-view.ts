@@ -371,6 +371,7 @@ export class PracticeLearningPathView extends ItemView {
   private readonly expandedVisualSources = new Set<string>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
   private blueprintActivityHost: HTMLElement | null = null;
+  private planningPreviewHost: HTMLElement | null = null;
   private batchNavigatorHost: HTMLElement | null = null;
   private batchActivityHost: HTMLElement | null = null;
 
@@ -522,6 +523,7 @@ export class PracticeLearningPathView extends ItemView {
   private render(): void {
     this.clearOcclusionEditors();
     this.blueprintActivityHost = null;
+    this.planningPreviewHost = null;
     this.batchNavigatorHost = null;
     this.batchActivityHost = null;
     this.contentEl.empty();
@@ -879,6 +881,10 @@ export class PracticeLearningPathView extends ItemView {
     const preview = this.preview;
     if (preview === null) return;
     const section = this.section(container, "Exact planning payload", "Review this complete text before the first AI planning call.");
+    section.addClass("practice-learning-path-planning-preview");
+    section.tabIndex = -1;
+    section.setAttribute("aria-label", "Exact planning payload ready for review");
+    this.planningPreviewHost = section;
     const metadata = section.createDiv({ cls: "practice-learning-path-payload-meta" });
     metadata.createSpan({ text: preview.providerLabel });
     metadata.createSpan({ text: preview.modelLabel });
@@ -2167,18 +2173,33 @@ export class PracticeLearningPathView extends ItemView {
   private async previewPlanningPayload(): Promise<void> {
     const primary = this.primary;
     if (primary === null || this.busy !== null) return;
+    let completed = false;
     this.busy = "preview";
     this.error = null;
     this.render();
     try {
       this.preview = await this.options.callbacks.previewBlueprint(primary, this.supporting, this.blueprintConfiguration);
       this.previewAccepted = false;
+      completed = true;
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
       this.busy = null;
       this.render();
+      if (completed) this.revealPlanningPreview();
     }
+  }
+
+  private revealPlanningPreview(): void {
+    window.requestAnimationFrame(() => {
+      const preview = this.planningPreviewHost;
+      if (preview === null || !preview.isConnected) return;
+      preview.focus({ preventScroll: true });
+      preview.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
   }
 
   private async generateBlueprint(): Promise<void> {

@@ -140,6 +140,18 @@ test("guided planning labels its actions and publishes live progress in place", 
   assert.match(stylesSource, /\.practice-learning-path-planning-progress/u);
 });
 
+test("planning preview scrolls into view and receives focus only after it is ready", () => {
+  assert.match(guidedViewSource, /private planningPreviewHost: HTMLElement \| null/u);
+  assert.match(guidedViewSource, /this\.planningPreviewHost = section/u);
+  assert.match(guidedViewSource, /section\.tabIndex = -1/u);
+  assert.match(guidedViewSource, /if \(completed\) this\.revealPlanningPreview\(\)/u);
+  assert.match(guidedViewSource, /window\.requestAnimationFrame/u);
+  assert.match(guidedViewSource, /preview\.focus\(\{ preventScroll: true \}\)/u);
+  assert.match(guidedViewSource, /preview\.scrollIntoView\(/u);
+  assert.match(guidedViewSource, /prefers-reduced-motion: reduce/u);
+  assert.match(stylesSource, /\.practice-learning-path-planning-preview \{\s+scroll-margin-block-start:/u);
+});
+
 test("guided batch progress streams without rebuilding the complete workspace", () => {
   const generateStart = guidedViewSource.indexOf("private async generateAllSets()");
   const generateEnd = guidedViewSource.indexOf("private async saveLearningPath()", generateStart);

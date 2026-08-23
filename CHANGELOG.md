@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.13
+
+- Scrolled the newly prepared Guided-path planning payload into view so the result cannot appear unnoticed below the viewport.
+- Moved keyboard focus to the exact payload panel after a successful preview and respected the operating system's reduced-motion preference.
+
 ## 1.3.12
 
 - Restored recoverable Guided-path maps and queue state when their tabs are opened, without starting or retrying an AI generation job.
