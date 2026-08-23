@@ -229,6 +229,7 @@ const ANSWER_REVIEW_PERSISTENCE_DEFER_MS = 30_000;
 const GENERATION_RECOVERY_DATA_KEY = "generationRecovery";
 const LEARNING_BATCH_RECOVERY_DATA_KEY = "learningBatchRecovery";
 const STUDY_CHECKPOINT_DATA_KEY = "studySessionCheckpoint";
+const CONTEXT_MENU_SECTION = "practice-problem-generator";
 const DISCARD_GENERATION_RECOVERY_CONFIRMATION = "DISCARD INTERRUPTED GENERATION";
 const DISCARD_LEARNING_BATCH_RECOVERY_CONFIRMATION = "DISCARD GUIDED PATH";
 const DISCARD_STUDY_CHECKPOINT_CONFIRMATION = "DISCARD PRACTICE SESSION";
@@ -937,24 +938,31 @@ export default class PracticeLabPlugin extends Plugin {
   private addEditorMenuItems(menu: Menu, editor: Editor, view: MarkdownView | MarkdownFileInfo): void {
     if (Platform.isMobileApp || view.file === null) return;
     const selection = editor.getSelection();
+
+    menu.addSeparator();
+    menu.addItem((item) => item
+      .setTitle("Practice Problem Generator")
+      .setIcon("flask-conical")
+      .setIsLabel(true)
+      .setSection(CONTEXT_MENU_SECTION));
+
     if (selection.trim()) {
       menu.addItem((item) => item
-        .setTitle("Practice Problem Generator: Generate from selection")
+        .setTitle("Create practice from selection…")
         .setIcon("text-select")
+        .setSection(CONTEXT_MENU_SECTION)
         .onClick(() => { void this.generateFrom("selection", selection); }));
-      menu.addItem((item) => item
-        .setTitle("Practice Problem Generator: Build guided path from selection")
-        .setIcon("route")
-        .onClick(() => { void this.generateGuidedFrom("selection", selection); }));
     }
     menu.addItem((item) => item
-      .setTitle("Practice Problem Generator: Generate from current note")
-      .setIcon("flask-conical")
+      .setTitle("Create practice from this note…")
+      .setIcon("sparkles")
+      .setSection(CONTEXT_MENU_SECTION)
       .onClick(() => { void this.generateFrom("note"); }));
     menu.addItem((item) => item
-      .setTitle("Practice Problem Generator: Build guided path from current note")
-      .setIcon("route")
-      .onClick(() => { void this.generateGuidedFrom("note"); }));
+      .setTitle("Start saved practice for this note")
+      .setIcon("gamepad-2")
+      .setSection(CONTEXT_MENU_SECTION)
+      .onClick(() => { void this.startPracticeForCurrentNote(); }));
   }
 
   private addFileMenuItems(menu: Menu, file: TAbstractFile): void {
@@ -963,14 +971,23 @@ export default class PracticeLabPlugin extends Plugin {
       || !(file instanceof TFile)
       || file.extension.toLowerCase() !== "pdf"
     ) return;
+
+    menu.addSeparator();
     menu.addItem((item) => item
-      .setTitle("Practice Problem Generator: Generate from PDF")
+      .setTitle("Practice Problem Generator")
+      .setIcon("flask-conical")
+      .setIsLabel(true)
+      .setSection(CONTEXT_MENU_SECTION));
+    menu.addItem((item) => item
+      .setTitle("Create practice from selected pages…")
       .setIcon("file-scan")
+      .setSection(CONTEXT_MENU_SECTION)
       .onClick(() => { void this.generateFromPdf(file); }));
     menu.addItem((item) => item
-      .setTitle("Practice Problem Generator: Build guided path from PDF")
-      .setIcon("route")
-      .onClick(() => { void this.generateGuidedFromPdf(file); }));
+      .setTitle("Start saved practice for this PDF")
+      .setIcon("gamepad-2")
+      .setSection(CONTEXT_MENU_SECTION)
+      .onClick(() => { void this.startPracticeForSourceFile(file); }));
   }
 
   private async generateFrom(mode: MarkdownSourceMode, selection?: string): Promise<void> {

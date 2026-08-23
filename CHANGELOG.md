@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- Replaced the long, competing editor context-menu generation actions with one labeled Practice Problem Generator group and concise create/start-practice actions.
+- Moved the quick-set versus guided-path choice entirely into the unified creation workspace, where users can switch modes without reopening a context menu.
+- Applied the same grouped creation and saved-practice actions to PDF file menus while keeping every generation entry point hidden on mobile.
+
 ## 1.3.0
 
 - Hardened Codex, Claude, and agy execution with bounded requests, installed-capability discovery, fail-fast terminal-error handling, fixed non-shell argument contracts, and least-privilege isolated jobs.

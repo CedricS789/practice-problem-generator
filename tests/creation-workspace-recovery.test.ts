@@ -21,6 +21,15 @@ test("quick and guided creation use one clearly related mode vocabulary", () => 
   assert.match(stylesSource, /\.practice-creation-mode-switch/u);
 });
 
+test("editor context menu exposes one concise creation entry point instead of competing modes", () => {
+  assert.match(mainSource, /\.setTitle\("Practice Problem Generator"\)[\s\S]*\.setIsLabel\(true\)/u);
+  assert.match(mainSource, /\.setTitle\("Create practice from selection…"\)/u);
+  assert.match(mainSource, /\.setTitle\("Create practice from this note…"\)/u);
+  assert.match(mainSource, /\.setTitle\("Start saved practice for this note"\)/u);
+  assert.doesNotMatch(mainSource, /Practice Problem Generator: Build guided path from selection/u);
+  assert.doesNotMatch(mainSource, /Practice Problem Generator: Build guided path from current note/u);
+});
+
 test("guided creation can always return to an empty quick set", () => {
   assert.match(
     guidedViewSource,

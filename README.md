@@ -82,7 +82,7 @@ No planning, set, regeneration, or repair request is sent until its complete tex
 - `Practice Problem Generator: Open practice dashboard`
 - `Practice Problem Generator: Prepare for offline practice`
 
-Note generation actions are available from the Markdown editor context menu. **Generate from PDF** is available from the PDF file menu. The plugin does not rely on the ribbon.
+The Markdown editor context menu groups concise **Create practice** and **Start saved practice** actions under a **Practice Problem Generator** label. The PDF file menu offers the equivalent selected-page and saved-practice actions. Quick-set versus guided-path creation is chosen inside the unified creation workspace instead of through competing context-menu entries. The plugin does not rely on the ribbon.
 
 ## Settings and display control
 

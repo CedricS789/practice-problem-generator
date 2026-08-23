@@ -14,7 +14,9 @@ test("PDF generation is explicit through commands, active-source UI, or file men
   assert.match(main, /id: "generate-from-current-pdf"/u);
   assert.match(main, /name: "Generate from current PDF"/u);
   assert.match(main, /workspace\.on\("file-menu"/u);
-  assert.match(main, /Practice Problem Generator: Generate from PDF/u);
+  assert.match(main, /Create practice from selected pages…/u);
+  assert.match(main, /Start saved practice for this PDF/u);
+  assert.doesNotMatch(main, /Practice Problem Generator: Build guided path from PDF/u);
   assert.match(view, /Use active PDF/u);
   assert.doesNotMatch(main, /resolveLinks|linked PDFs|scan.*PDF/iu);
 });
