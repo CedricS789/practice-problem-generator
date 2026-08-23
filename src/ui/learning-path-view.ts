@@ -124,8 +124,11 @@ export interface LearningPathSavedWorkspaceV1 {
 
 export interface LearningPathViewCallbacks {
   readonly requestPrimarySource: (
-    mode: "note" | "selection" | "pdf",
+    mode: SourceChoiceMode,
   ) => Promise<SourcePresentation | null>;
+  readonly preparePrimarySourceVisuals?: (
+    source: SourcePresentation,
+  ) => Promise<SourcePresentation>;
   readonly requestSupportingSource: () => Promise<SourcePresentation | null>;
   readonly updateSourceVisuals?: (
     source: SourcePresentation,
@@ -698,7 +701,9 @@ export class PracticeLearningPathView extends ItemView {
       this.visualSelectionBusy = false;
       this.resetAfterSourceChange();
       this.render();
-    }, false);
+    }, false, () => {
+      void this.choosePrimarySource("vault-note");
+    });
     if (this.primaryVisualPreparationToken !== null) {
       section.createEl("p", {
         cls: "practice-lab-muted practice-learning-path-visual-message",
@@ -1452,12 +1457,19 @@ export class PracticeLearningPathView extends ItemView {
     role: string,
     remove: () => void,
     includeVisuals = true,
+    chooseAnotherNote?: () => void,
   ): void {
     const card = renderSourceSummaryCard(container, source, {
       badge: role,
       removeLabel: `Remove ${role.toLowerCase()} source`,
       removeDisabled: this.busy !== null || this.visualSelectionBusy,
       onRemove: remove,
+      ...(chooseAnotherNote === undefined ? {} : {
+        actionLabel: "Choose another note…",
+        actionDescription: "Search the vault and replace the primary source with a different complete Markdown note.",
+        actionDisabled: this.busy !== null,
+        onAction: chooseAnotherNote,
+      }),
     });
     if (includeVisuals) this.renderSourceVisuals(card, source);
   }
@@ -1982,7 +1994,7 @@ export class PracticeLearningPathView extends ItemView {
     this.renderActivity(host);
   }
 
-  private async choosePrimarySource(mode: "note" | "selection" | "pdf"): Promise<void> {
+  private async choosePrimarySource(mode: SourceChoiceMode): Promise<void> {
     if (this.busy !== null) return;
     this.busy = "source";
     this.primarySourceChoiceBusy = mode;
@@ -1990,7 +2002,27 @@ export class PracticeLearningPathView extends ItemView {
     this.render();
     try {
       const source = await this.options.callbacks.requestPrimarySource(mode);
-      if (source !== null) this.setPrimarySource(source);
+      if (source !== null) {
+        this.setPrimarySource(source);
+        const prepare = this.options.callbacks.preparePrimarySourceVisuals;
+        if (
+          prepare !== undefined
+          && source.visuals.some((visual) => (
+            visual.state === "frame-required" && visual.kind === "animated-gif"
+          ))
+        ) {
+          const token = this.beginPrimaryVisualPreparation(source);
+          if (token !== null) {
+            try {
+              const prepared = await prepare(source);
+              this.finishPrimaryVisualPreparation(token, source, prepared);
+            } catch (error) {
+              this.finishPrimaryVisualPreparation(token, source);
+              throw error;
+            }
+          }
+        }
+      }
     } catch (error) {
       this.error = errorMessage(error);
     } finally {

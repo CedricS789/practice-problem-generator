@@ -371,6 +371,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+.practice-source-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--size-4-2);
+}
+
+.practice-source-summary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  white-space: nowrap;
+}
+
+.practice-source-summary-action svg {
+  width: 16px;
+  height: 16px;
+}
+
 .practice-source-subheading {
   display: flex;
   align-items: flex-start;
@@ -4728,17 +4748,9 @@ button.practice-learning-path-mode-card {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .practice-learning-path-source-card > .clickable-icon {
-    position: absolute;
-    right: var(--size-4-2);
-  }
-
-  .practice-learning-path-source-card {
-    position: relative;
-  }
-
-  .practice-learning-path-source-copy {
-    padding-right: var(--size-4-6);
+  .practice-source-summary-actions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 
   .practice-learning-path-visual-toolbar,

@@ -414,7 +414,7 @@ export class PracticeLabView extends ItemView {
   private readonly studyCompletionMetricEls = new Map<string, HTMLElement>();
   private readonly pausedAnswerReviewIds = new Set<string>();
   private visualSelectionBusy = false;
-  private sourceRequestMode: SourcePresentation["mode"] | null = null;
+  private sourceRequestMode: SourceChoiceMode | null = null;
   private sourceRequestEpoch = 0;
   private providerRefreshBusy = false;
   private providerRefreshRenderPending = false;
@@ -1268,6 +1268,7 @@ export class PracticeLabView extends ItemView {
       disabled: this.sourceRequestMode !== null,
       onChoose: (mode) => {
         if (mode === "pdf") void this.requestPdfSource();
+        else if (mode === "vault-note") void this.requestNoteSource();
         else void this.requestSource(mode);
       },
     });
@@ -1289,7 +1290,9 @@ export class PracticeLabView extends ItemView {
       status.createSpan({
         text: this.sourceRequestMode === "pdf"
           ? "Preparing the PDF source. Complete or cancel the page dialog to continue."
-          : "Reading the active source…",
+          : this.sourceRequestMode === "vault-note"
+            ? "Choose a Markdown note from the searchable vault list, or cancel to keep this source."
+            : "Reading the active source…",
       });
     }
 
@@ -1307,6 +1310,14 @@ export class PracticeLabView extends ItemView {
       badge: sourceModeLabel(this.source),
       showPath: this.displayPreferences.practice.showSourcePath,
       showExcerpt: this.displayPreferences.practice.showSourceExcerpt,
+      ...(this.options.callbacks.requestNoteSource === undefined ? {} : {
+        actionLabel: "Choose another note…",
+        actionDescription: "Search the vault and replace this primary source with a different complete Markdown note.",
+        actionDisabled: this.sourceRequestMode !== null,
+        onAction: () => {
+          void this.requestNoteSource();
+        },
+      }),
     });
 
     const visualHeading = section.createDiv({ cls: "practice-source-subheading" });
@@ -4258,6 +4269,29 @@ export class PracticeLabView extends ItemView {
       if (epoch !== this.sourceRequestEpoch) return;
       this.sourceRequestMode = null;
       new Notice(this.errorMessage(error, "Could not load the source."));
+      this.renderPreservingScroll();
+    }
+  }
+
+  private async requestNoteSource(): Promise<void> {
+    const request = this.options.callbacks.requestNoteSource;
+    if (request === undefined || this.sourceRequestMode !== null) return;
+    const epoch = ++this.sourceRequestEpoch;
+    this.sourceRequestMode = "vault-note";
+    this.renderPreservingScroll();
+    try {
+      const source = await request();
+      if (epoch !== this.sourceRequestEpoch) return;
+      this.sourceRequestMode = null;
+      if (source !== null) {
+        this.setSource(source, { prepareDefaultVisuals: true });
+      } else {
+        this.renderPreservingScroll();
+      }
+    } catch (error) {
+      if (epoch !== this.sourceRequestEpoch) return;
+      this.sourceRequestMode = null;
+      new Notice(this.errorMessage(error, "Could not load the selected note."));
       this.renderPreservingScroll();
     }
   }

@@ -8,6 +8,7 @@ const [
   guidedViewSource,
   modeSwitchSource,
   sourcePickerSource,
+  sourceMaterialPickerSource,
   stylesSource,
 ] = await Promise.all([
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
@@ -15,6 +16,7 @@ const [
   readFile(new URL("../src/ui/learning-path-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/creation-mode-switch.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/source-picker.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/ui/source-material-picker-modal.ts", import.meta.url), "utf8"),
   readFile(new URL("../styles.css", import.meta.url), "utf8"),
 ]);
 
@@ -78,6 +80,34 @@ test("source replacement guidance occupies its own row without overlapping cards
   assert.match(
     stylesSource,
     /\.practice-source-stage > \.practice-source-replace-note \{\s+margin: 0;/u,
+  );
+});
+
+test("primary source cards can replace the active source through a searchable note picker", () => {
+  assert.match(sourceMaterialPickerSource, /export function chooseSourceNoteFile/u);
+  assert.match(sourceMaterialPickerSource, /Search for the Markdown note to use/u);
+  assert.match(sourceMaterialPickerSource, /this\.kind === "note"\s+\? extension === "md"/u);
+  assert.match(mainSource, /requestNoteSource: async \(\) =>/u);
+  assert.match(mainSource, /const file = await chooseSourceNoteFile\(this\.app\);/u);
+  assert.match(quickViewSource, /actionLabel: "Choose another note…"/u);
+  assert.match(quickViewSource, /private async requestNoteSource\(\)/u);
+  assert.match(quickViewSource, /const epoch = \+\+this\.sourceRequestEpoch/u);
+  assert.match(guidedViewSource, /this\.choosePrimarySource\("vault-note"\)/u);
+  const chooseStart = guidedViewSource.indexOf("private async choosePrimarySource(");
+  const chooseEnd = guidedViewSource.indexOf("private async addSupportingSource()", chooseStart);
+  assert.ok(chooseStart >= 0 && chooseEnd > chooseStart);
+  const chooseImplementation = guidedViewSource.slice(chooseStart, chooseEnd);
+  assert.ok(
+    chooseImplementation.indexOf("this.setPrimarySource(source)")
+      < chooseImplementation.indexOf("const prepared = await prepare(source)"),
+    "the selected note must appear before default GIF-frame preparation finishes",
+  );
+  assert.match(sourcePickerSource, /practice-source-summary-actions/u);
+  assert.match(sourcePickerSource, /setIcon\(actionIcon, "replace"\)/u);
+  assert.match(stylesSource, /\.practice-source-summary-actions \{/u);
+  assert.match(
+    stylesSource,
+    /\.practice-source-summary-actions \{\s+grid-column: 2;\s+justify-content: flex-start;/u,
   );
 });
 

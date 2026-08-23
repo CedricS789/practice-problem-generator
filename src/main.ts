@@ -170,7 +170,10 @@ import {
   type SourcePresentation,
   type StudySessionProgressV1,
 } from "./ui";
-import { chooseSourceMaterialFile } from "./ui/source-material-picker-modal";
+import {
+  chooseSourceMaterialFile,
+  chooseSourceNoteFile,
+} from "./ui/source-material-picker-modal";
 import { confirmDestructiveAction } from "./ui/destructive-confirmation-modal";
 import { choosePdfPageRange } from "./ui/pdf-page-range-modal";
 import { showPdfExtractionProgress } from "./ui/pdf-extraction-progress-modal";
@@ -1127,6 +1130,20 @@ export default class PracticeLabPlugin extends Plugin {
           }
         },
         ...(Platform.isMobileApp ? {} : {
+          requestNoteSource: async () => {
+            try {
+              const file = await chooseSourceNoteFile(this.app);
+              if (file === null) return null;
+              const source = await collectSourceFromFile(this.app, file, "note");
+              this.lastSource = source;
+              return source;
+            } catch (error) {
+              this.showError(error);
+              return null;
+            }
+          },
+        }),
+        ...(Platform.isMobileApp ? {} : {
           requestPdfSource: async () => {
             try {
               const source = await this.requestPdfSource();
@@ -1308,23 +1325,38 @@ export default class PracticeLabPlugin extends Plugin {
       callbacks: {
         requestPrimarySource: async (mode) => {
           try {
-            const source = mode === "pdf"
-              ? await this.requestPdfSource()
-              : await collectSource(
-                  this.app,
-                  mode,
-                  mode === "selection"
-                    ? this.app.workspace.getActiveViewOfType(MarkdownView)?.editor.getSelection()
-                    : undefined,
-                );
+            let source: CollectedSource | null;
+            if (mode === "pdf") {
+              source = await this.requestPdfSource();
+            } else if (mode === "vault-note") {
+              const file = await chooseSourceNoteFile(this.app);
+              source = file === null
+                ? null
+                : await collectSourceFromFile(this.app, file, "note");
+            } else {
+              source = await collectSource(
+                this.app,
+                mode,
+                mode === "selection"
+                  ? this.app.workspace.getActiveViewOfType(MarkdownView)?.editor.getSelection()
+                  : undefined,
+              );
+            }
             if (source === null) return null;
-            const prepared = await this.prepareGuidedSourceVisuals(source);
-            this.lastSource = prepared;
-            return this.learningPathController.registerSource(prepared);
+            this.lastSource = source;
+            return this.learningPathController.registerSource(source);
           } catch (error) {
             this.showError(error);
             return null;
           }
+        },
+        preparePrimarySourceVisuals: async (source) => {
+          if (!isRuntimeCollectedSource(source)) {
+            throw new Error("Choose the primary source again before preparing its GIF frames.");
+          }
+          const prepared = await this.prepareGuidedSourceVisuals(source);
+          this.lastSource = prepared;
+          return this.learningPathController.registerSource(prepared);
         },
         requestSupportingSource: async () => {
           try {

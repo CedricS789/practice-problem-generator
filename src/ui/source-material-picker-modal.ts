@@ -3,7 +3,13 @@ import { installHoverDescriptions } from "./hover-descriptions";
 
 export function chooseSourceMaterialFile(app: App): Promise<TFile | null> {
   return new Promise((resolve) => {
-    new SourceMaterialPickerModal(app, resolve).open();
+    new SourceMaterialPickerModal(app, resolve, "material").open();
+  });
+}
+
+export function chooseSourceNoteFile(app: App): Promise<TFile | null> {
+  return new Promise((resolve) => {
+    new SourceMaterialPickerModal(app, resolve, "note").open();
   });
 }
 
@@ -13,12 +19,15 @@ class SourceMaterialPickerModal extends FuzzySuggestModal<TFile> {
   constructor(
     app: App,
     private readonly resolve: (file: TFile | null) => void,
+    private readonly kind: "material" | "note",
   ) {
     super(app);
-    this.setPlaceholder("Choose one supporting note or PDF…");
+    this.setPlaceholder(kind === "note"
+      ? "Search for the Markdown note to use…"
+      : "Choose one supporting note or PDF…");
     this.setInstructions([
       { command: "↑↓", purpose: "navigate" },
-      { command: "↵", purpose: "add exact source" },
+      { command: "↵", purpose: kind === "note" ? "use note" : "add exact source" },
       { command: "esc", purpose: "cancel" },
     ]);
   }
@@ -27,7 +36,10 @@ class SourceMaterialPickerModal extends FuzzySuggestModal<TFile> {
     return this.app.vault.getFiles()
       .filter((file) => {
         const extension = file.extension.toLowerCase();
-        return (extension === "md" || extension === "pdf")
+        const supported = this.kind === "note"
+          ? extension === "md"
+          : extension === "md" || extension === "pdf";
+        return supported
           && !/(?:^|\/)Practice(?:\/|$)/iu.test(file.path);
       })
       .sort((left, right) => left.path.localeCompare(right.path));

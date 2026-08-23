@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.6
+
+- Added a searchable **Choose another note…** action directly to the selected primary-source card in both Quick set and Guided path creation.
+- Replacing a note no longer requires changing the active Obsidian tab; cancellation keeps the existing source, and Guided path shows the chosen note before default GIF frames finish preparing.
+- Kept source-card actions responsive and readable in narrow panes.
+
 ## 1.3.5
 
 - Fixed the shared source picker so replacement guidance occupies its own row instead of overlapping source-choice or selected-source cards.

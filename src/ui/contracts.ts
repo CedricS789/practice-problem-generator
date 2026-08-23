@@ -359,6 +359,8 @@ export interface PracticeLabCallbacks {
   readonly requestSource?: (
     mode: MarkdownSourceMode,
   ) => Promise<SourcePresentation | null>;
+  /** Opens a searchable vault picker and returns the selected complete note. */
+  readonly requestNoteSource?: () => Promise<SourcePresentation | null>;
   readonly requestPdfSource?: () => Promise<SourcePresentation | null>;
   readonly previewPayload: (
     source: SourcePresentation,

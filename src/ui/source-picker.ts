@@ -2,7 +2,7 @@ import { setIcon } from "obsidian";
 
 import type { SourcePresentation } from "./contracts";
 
-export type SourceChoiceMode = "note" | "selection" | "pdf";
+export type SourceChoiceMode = "note" | "selection" | "vault-note" | "pdf";
 export type CreationMode = "quick" | "guided";
 
 export interface SourceChoiceOptions {
@@ -85,6 +85,10 @@ export function renderSourceSummaryCard(
     readonly removeLabel?: string;
     readonly removeDisabled?: boolean;
     readonly onRemove?: () => void;
+    readonly actionLabel?: string;
+    readonly actionDescription?: string;
+    readonly actionDisabled?: boolean;
+    readonly onAction?: () => void;
   },
 ): HTMLElement {
   const card = container.createEl("article", {
@@ -116,19 +120,42 @@ export function renderSourceSummaryCard(
     cls: "practice-source-summary-meta",
     text: `${source.characterCount.toLocaleString()} characters submitted`,
   });
-  if (options.onRemove !== undefined && options.removeLabel !== undefined) {
-    const remove = card.createEl("button", {
-      cls: "clickable-icon practice-source-summary-remove",
-      attr: {
-        type: "button",
-        "aria-label": options.removeLabel,
-        title: options.removeLabel,
-        "data-practice-lab-description": options.removeLabel,
-      },
-    });
-    remove.disabled = options.removeDisabled ?? false;
-    setIcon(remove, "x");
-    remove.addEventListener("click", () => options.onRemove?.());
+  if (
+    (options.onAction !== undefined && options.actionLabel !== undefined)
+    || (options.onRemove !== undefined && options.removeLabel !== undefined)
+  ) {
+    const actions = card.createDiv({ cls: "practice-source-summary-actions" });
+    if (options.onAction !== undefined && options.actionLabel !== undefined) {
+      const description = options.actionDescription ?? options.actionLabel;
+      const action = actions.createEl("button", {
+        cls: "practice-source-summary-action",
+        attr: {
+          type: "button",
+          "aria-label": description,
+          title: description,
+          "data-practice-lab-description": description,
+        },
+      });
+      action.disabled = options.actionDisabled ?? false;
+      const actionIcon = action.createSpan({ attr: { "aria-hidden": "true" } });
+      setIcon(actionIcon, "replace");
+      action.createSpan({ text: options.actionLabel });
+      action.addEventListener("click", () => options.onAction?.());
+    }
+    if (options.onRemove !== undefined && options.removeLabel !== undefined) {
+      const remove = actions.createEl("button", {
+        cls: "clickable-icon practice-source-summary-remove",
+        attr: {
+          type: "button",
+          "aria-label": options.removeLabel,
+          title: options.removeLabel,
+          "data-practice-lab-description": options.removeLabel,
+        },
+      });
+      remove.disabled = options.removeDisabled ?? false;
+      setIcon(remove, "x");
+      remove.addEventListener("click", () => options.onRemove?.());
+    }
   }
   return card;
 }
