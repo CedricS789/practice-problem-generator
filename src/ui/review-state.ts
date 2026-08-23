@@ -28,6 +28,131 @@ export interface AcceptAllOcclusionsResult {
   readonly changed: boolean;
 }
 
+export interface LearningPathReviewSetInput {
+  readonly setId: string;
+  readonly setTitle: string;
+  readonly exercises: readonly EditableDraftExercise[];
+  readonly approvedExerciseIds: ReadonlySet<string>;
+}
+
+export interface LearningPathReviewBlocker {
+  readonly setId: string;
+  readonly setTitle: string;
+  readonly exerciseId?: string;
+  readonly reason: string;
+}
+
+export interface LearningPathSetReviewState {
+  readonly setId: string;
+  readonly setTitle: string;
+  readonly keptCount: number;
+  readonly approvedCount: number;
+  readonly pendingApprovalCount: number;
+  readonly blockers: readonly LearningPathReviewBlocker[];
+}
+
+export interface LearningPathBulkApprovalResult {
+  readonly approvedBySet: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly newlyApprovedCount: number;
+  readonly totalKeptCount: number;
+  readonly totalApprovedCount: number;
+  readonly blockers: readonly LearningPathReviewBlocker[];
+}
+
+function exerciseReviewProblem(draft: EditableDraftExercise): string | null {
+  if (draft.prompt.trim().length === 0 || draft.groundedAnswer.trim().length === 0) {
+    return "Add both a prompt and a grounded answer.";
+  }
+  const latexProblem = latexMarkupProblem(draft.prompt)
+    ?? latexMarkupProblem(draft.groundedAnswer);
+  if (latexProblem !== null) return `Fix the malformed LaTeX: ${latexProblem}`;
+  if (draft.type !== "image-occlusion") return null;
+  if (draft.visualUrl === undefined) return "Restore the visual or reject this image occlusion.";
+  const validation = validateOcclusionMasks(draft.masks ?? []);
+  if (!validation.valid || (draft.masks ?? []).length === 0) {
+    return validation.errors[0] ?? "Add at least one valid occlusion mask.";
+  }
+  if (!draft.occlusionReviewed) return "Review and accept its occlusion masks.";
+  return null;
+}
+
+export function learningPathSetReviewState(
+  input: LearningPathReviewSetInput,
+): LearningPathSetReviewState {
+  const kept = input.exercises.filter((exercise) => !exercise.rejected);
+  const blockers: LearningPathReviewBlocker[] = [];
+  if (kept.length === 0) {
+    blockers.push({
+      setId: input.setId,
+      setTitle: input.setTitle,
+      reason: "Keep at least one exercise in this set.",
+    });
+  }
+  let approvedCount = 0;
+  let pendingApprovalCount = 0;
+  for (const exercise of kept) {
+    const problem = exerciseReviewProblem(exercise);
+    if (problem !== null) {
+      blockers.push({
+        setId: input.setId,
+        setTitle: input.setTitle,
+        exerciseId: exercise.id,
+        reason: problem,
+      });
+      continue;
+    }
+    if (input.approvedExerciseIds.has(exercise.id)) approvedCount += 1;
+    else pendingApprovalCount += 1;
+  }
+  return {
+    setId: input.setId,
+    setTitle: input.setTitle,
+    keptCount: kept.length,
+    approvedCount,
+    pendingApprovalCount,
+    blockers,
+  };
+}
+
+/** Approve every ready exercise across the complete guided batch. */
+export function approveReadyLearningPathExercises(
+  inputs: readonly LearningPathReviewSetInput[],
+): LearningPathBulkApprovalResult {
+  const approvedBySet = new Map<string, ReadonlySet<string>>();
+  const blockers: LearningPathReviewBlocker[] = [];
+  let newlyApprovedCount = 0;
+  let totalKeptCount = 0;
+  let totalApprovedCount = 0;
+  for (const input of inputs) {
+    const approved = new Set<string>();
+    for (const exercise of input.exercises) {
+      if (exercise.rejected) continue;
+      totalKeptCount += 1;
+      const problem = exerciseReviewProblem(exercise);
+      if (problem !== null) {
+        blockers.push({
+          setId: input.setId,
+          setTitle: input.setTitle,
+          exerciseId: exercise.id,
+          reason: problem,
+        });
+        continue;
+      }
+      approved.add(exercise.id);
+      totalApprovedCount += 1;
+      if (!input.approvedExerciseIds.has(exercise.id)) newlyApprovedCount += 1;
+    }
+    approvedBySet.set(input.setId, approved);
+  }
+  return {
+    approvedBySet,
+    newlyApprovedCount,
+    totalKeptCount,
+    totalApprovedCount,
+    blockers,
+  };
+}
+
 /**
  * Accept every kept occlusion whose current masks are complete and valid.
  * Invalid exercises remain unreviewed so the normal save gate stays closed.

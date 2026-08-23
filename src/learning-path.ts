@@ -592,7 +592,10 @@ export function learningPathBankIssues(bank: PracticeBankV3): ValidationIssue[] 
     citedTextProblems(lesson.repairExplanation.text, `${path}/repairExplanation/text`, issues);
     for (const aspect of lessonAspects.filter((candidate) => lesson.aspectIds.includes(candidate.id))) {
       for (const prerequisiteId of aspect.prerequisiteAspectIds) {
-        if (!lesson.prerequisiteAspectIds.includes(prerequisiteId)) {
+        if (
+          !lesson.aspectIds.includes(prerequisiteId)
+          && !lesson.prerequisiteAspectIds.includes(prerequisiteId)
+        ) {
           issue(issues, "tutor", `${path}/prerequisiteAspectIds`, `lesson omits required prerequisite ${prerequisiteId}`);
         }
       }
@@ -666,7 +669,20 @@ export function learningPathBankIssues(bank: PracticeBankV3): ValidationIssue[] 
       }
       for (const prerequisiteId of aspectById.get(aspectId)?.prerequisiteAspectIds ?? []) {
         const prerequisiteStep = earliestAspectStep.get(prerequisiteId);
-        if (prerequisiteStep === undefined || prerequisiteStep >= dependentStep) {
+        const sharedLessonStep = prerequisiteStep === dependentStep
+          && bank.learningPath.steps[dependentStep]?.kind === "lesson"
+          && (() => {
+            const step = bank.learningPath?.steps[dependentStep];
+            if (step?.kind !== "lesson") return false;
+            const lesson = lessonById.get(step.lessonId);
+            return lesson?.aspectIds.includes(prerequisiteId) === true
+              && lesson.aspectIds.includes(aspectId);
+          })();
+        if (
+          prerequisiteStep === undefined
+          || prerequisiteStep > dependentStep
+          || (prerequisiteStep === dependentStep && !sharedLessonStep)
+        ) {
           issue(
             issues,
             "learning-path",

@@ -15,7 +15,7 @@ import {
   buildPracticeSetPrompt,
   practiceSetDraftV1JsonSchema,
   practiceSetPayloadHash,
-  validatePracticeSetDraft,
+  validatePracticeSetDraftForWorkspace,
   validatePracticeSetReplacement,
   type PracticeSetDraftV1,
 } from "./learning-path-generation";
@@ -188,7 +188,7 @@ export class SavedSetGenerationController {
     const result = await layer.coordinator.generate(adapter, {
       prompt: buildPracticeSetPrompt(pending.context.payload),
       schema: practiceSetDraftV1JsonSchema,
-      validate: (value) => validatePracticeSetDraft(value, pending.context.payload),
+      validate: (value) => validatePracticeSetDraftForWorkspace(value, pending.context.payload),
       ...(request.configuration.model.length === 0
         ? {}
         : { model: request.configuration.model }),

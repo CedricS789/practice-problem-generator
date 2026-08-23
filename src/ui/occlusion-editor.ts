@@ -73,6 +73,7 @@ export class OcclusionEditor extends Component {
   private maskLayerEl: HTMLElement | null = null;
   private listEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
+  private acceptButton: ButtonComponent | null = null;
   private reviewed: boolean;
 
   public constructor(
@@ -189,7 +190,8 @@ export class OcclusionEditor extends Component {
         this.renderMasks();
         this.renderList();
       });
-    new ButtonComponent(footer)
+    this.acceptButton = new ButtonComponent(footer)
+      .setIcon(this.reviewed ? "check" : "scan")
       .setButtonText("Review and accept masks")
       .setCta()
       .onClick(() => this.acceptMasks());
@@ -524,6 +526,13 @@ export class OcclusionEditor extends Component {
         : "Review required before this exercise can be saved.",
     );
     this.statusEl.toggleClass("is-reviewed", this.reviewed);
+    this.acceptButton
+      ?.setIcon(this.reviewed ? "check" : "scan")
+      .setButtonText(this.reviewed ? "Masks accepted" : "Review and accept masks")
+      .setDisabled(this.reviewed)
+      .setTooltip(this.reviewed
+        ? "These masks are accepted. Editing any mask will require another review."
+        : "Validate and explicitly accept the current occlusion masks.");
   }
 
   private positionElement(

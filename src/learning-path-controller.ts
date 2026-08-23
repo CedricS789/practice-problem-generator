@@ -38,7 +38,7 @@ import {
   practiceSetPayloadHash,
   validateLearningBlueprintDraft,
   validatePracticeSetBatch,
-  validatePracticeSetDraft,
+  validatePracticeSetDraftForWorkspace,
   type LearningBlueprintDraftV1,
   type LearningBlueprintPlanningInputV1,
   type LearningPathSourceV1,
@@ -46,6 +46,7 @@ import {
   type PracticeSetDraftV1,
   type PracticeSetPayloadV1,
 } from "./learning-path-generation";
+import { reconcileLearningWorkspaceDrafts } from "./learning-path-reconciliation";
 import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   type LearningPathStepV1,
@@ -431,7 +432,11 @@ export class LearningPathController {
 
   public async saveLearningPath(
     request: LearningPathSaveRequestV1,
-  ): Promise<{ readonly path: string; readonly bank: PracticeBankV3 }> {
+  ): Promise<{
+    readonly path: string;
+    readonly bank: PracticeBankV3;
+    readonly reconciledLinkCount: number;
+  }> {
     const pendingBlueprint = this.pendingBlueprint;
     const pendingBatch = this.pendingBatch;
     if (pendingBlueprint === undefined || pendingBatch === undefined) {
@@ -477,8 +482,10 @@ export class LearningPathController {
     if (loaded.parsed.status !== "ok" && loaded.parsed.status !== "missing") {
       throw new Error(loaded.parsed.recoveryMessage);
     }
-    const practiceSets = buildPracticeSets(request.blueprint, finalDrafts);
-    const tutorLessons = finalDrafts.flatMap((draft) => draft.tutorLessons.map((lesson) => structuredClone(lesson)));
+    const reconciliation = reconcileLearningWorkspaceDrafts(request.blueprint, finalDrafts);
+    const workspaceDrafts = reconciliation.drafts;
+    const practiceSets = buildPracticeSets(request.blueprint, workspaceDrafts);
+    const tutorLessons = workspaceDrafts.flatMap((draft) => draft.tutorLessons.map((lesson) => structuredClone(lesson)));
     const steps = buildLearningPathSteps(request.blueprint, practiceSets);
     const preparedIds = new Set(pendingBlueprint.preparedVisuals.map((visual) => visual.source.id));
     const sourceMaterials = pendingBlueprint.bundle.materials.map((material) => ({
@@ -495,17 +502,21 @@ export class LearningPathController {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       source: {
-        vaultPath: pendingBlueprint.bundle.combined.path,
-        wikilink: sourceWikilink(pendingBlueprint.bundle.combined.path),
-        title: pendingBlueprint.bundle.combined.title,
-        scope: pendingBlueprint.bundle.combined.mode === "pdf"
+        vaultPath: primaryMaterial.vaultPath,
+        wikilink: primaryMaterial.wikilink,
+        title: sourceMaterials.length === 1
+          ? primaryMaterial.title
+          : pendingBlueprint.bundle.combined.title,
+        scope: primaryMaterial.scope.kind === "pdf-pages"
           ? "selection"
-          : pendingBlueprint.bundle.combined.mode,
-        hash: pendingBlueprint.bundle.bundleHash,
+          : primaryMaterial.scope.kind,
+        hash: sourceMaterials.length === 1
+          ? primaryMaterial.sourceHash
+          : pendingBlueprint.bundle.bundleHash,
       },
       segments: pendingBlueprint.bundle.combined.segments.map((segment) => structuredClone(segment)),
       visuals: pendingBlueprint.preparedVisuals.map((visual) => structuredClone(visual.source)),
-      exercises: finalDrafts.flatMap((draft) => draft.exercises.map((exercise) => structuredClone(exercise))),
+      exercises: workspaceDrafts.flatMap((draft) => draft.exercises.map((exercise) => structuredClone(exercise))),
       sessions: existing?.sessions.map((session) => structuredClone(session)) ?? [],
       generation: {
         provider: finalConfiguration?.provider ?? "codex",
@@ -516,16 +527,7 @@ export class LearningPathController {
           : { reasoningEffort: finalConfiguration.reasoningEffort }),
       },
       sourceMaterials,
-      aspects: request.blueprint.aspects
-        .filter((aspect) => aspect.status === "supported")
-        .map((aspect) => ({
-          id: aspect.id,
-          title: aspect.title,
-          purpose: aspect.purpose,
-          prerequisiteAspectIds: [...aspect.prerequisiteAspectIds],
-          sourceSegmentIds: [...aspect.sourceSegmentIds],
-          status: "supported" as const,
-        })),
+      aspects: reconciliation.aspects.map((aspect) => structuredClone(aspect)),
       practiceSets,
       tutorLessons,
       learningPath: {
@@ -547,7 +549,7 @@ export class LearningPathController {
       loaded.file,
       bank,
       request.configurations,
-      finalDrafts,
+      workspaceDrafts,
     );
     const saved = await this.options.repository.saveLearningWorkspace({
       bank,
@@ -560,7 +562,10 @@ export class LearningPathController {
         : { sourceImport: pendingBlueprint.bundle.primary.sourceImport }),
     });
     await this.clearRecoveryAfterSave();
-    return saved;
+    return {
+      ...saved,
+      reconciledLinkCount: reconciliation.reconciledLinkCount,
+    };
   }
 
   private async prepareBlueprint(
@@ -616,7 +621,7 @@ export class LearningPathController {
           const result = await layer.coordinator.generate(adapter, {
             prompt: buildPracticeSetPrompt(approved.payload),
             schema: practiceSetDraftV1JsonSchema,
-            validate: (value) => validatePracticeSetDraft(value, approved.payload),
+            validate: (value) => validatePracticeSetDraftForWorkspace(value, approved.payload),
             recovery: { mode: "resume", handle: resumedHandle },
             timeoutMs: this.options.timeoutMs(),
             onActivity: (event) => onActivity(setId, event),
@@ -684,7 +689,7 @@ export class LearningPathController {
         const result = await layer.coordinator.generate(adapter, {
           prompt: buildPracticeSetPrompt(payload),
           schema: practiceSetDraftV1JsonSchema,
-          validate: (value) => validatePracticeSetDraft(value, payload),
+          validate: (value) => validatePracticeSetDraftForWorkspace(value, payload),
           ...(payload.configuration.model.length === 0 ? {} : { model: payload.configuration.model }),
           reasoningEffort: payload.configuration.reasoningEffort,
           media,
@@ -1056,10 +1061,6 @@ function sourceKey(source: SourcePresentation): string {
     source.detail ?? "",
     source.excerpt,
   ]);
-}
-
-function sourceWikilink(path: string): string {
-  return `[[${path.replace(/\.md$/iu, "")}]]`;
 }
 
 function neutralFilename(index: number, mimeType: string): string {

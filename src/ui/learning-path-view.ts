@@ -42,6 +42,11 @@ import { renderCreationModeSwitch as renderSharedCreationModeSwitch } from "./cr
 import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
 import {
+  approveReadyLearningPathExercises,
+  learningPathSetReviewState,
+  type LearningPathReviewSetInput,
+} from "./review-state";
+import {
   renderSourceChoices,
   renderSourceSummaryCard,
   type SourceChoiceMode,
@@ -120,6 +125,7 @@ export interface LearningPathSaveRequestV1 {
 export interface LearningPathSavedWorkspaceV1 {
   readonly path: string;
   readonly bank: PracticeBankV3;
+  readonly reconciledLinkCount?: number;
 }
 
 export interface LearningPathViewCallbacks {
@@ -356,6 +362,7 @@ export class PracticeLearningPathView extends ItemView {
   private activity = new Map<string, CliActivityEvent[]>();
   private generatedSets: GeneratedLearningSetPresentationV1[] = [];
   private approvedBySet = new Map<string, Set<string>>();
+  private reviewFeedback: string | null = null;
   private activeReviewSetId: string | null = null;
   private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | "recovery" | null = null;
   private primarySourceChoiceBusy: SourceChoiceMode | null = null;
@@ -535,11 +542,18 @@ export class PracticeLearningPathView extends ItemView {
     this.renderStageNavigation(shell);
     const body = shell.createDiv({ cls: "practice-learning-path-body" });
     if (this.error !== null) {
+      const presentation = learningPathErrorPresentation(this.error);
       const error = body.createDiv({ cls: "practice-lab-callout is-error", attr: { role: "alert" } });
       setIcon(error.createSpan(), "circle-alert");
       const copy = error.createDiv({ cls: "practice-generation-error-copy" });
       copy.createEl("strong", { text: "This step did not finish" });
-      copy.createEl("p", { text: this.error });
+      copy.createEl("p", { text: presentation.summary });
+      if (presentation.details.length > 0) {
+        const details = copy.createEl("details", { cls: "practice-learning-path-error-details" });
+        details.createEl("summary", { text: `Show ${presentation.details.length} technical validation ${presentation.details.length === 1 ? "detail" : "details"}` });
+        const list = details.createEl("ol");
+        for (const detail of presentation.details) list.createEl("li", { text: detail });
+      }
     }
     if (this.stage === "source") this.renderSource(body);
     else if (this.stage === "map") this.renderMap(body);
@@ -1261,22 +1275,41 @@ export class PracticeLearningPathView extends ItemView {
     const brief = blueprint.draft.sets.find((set) => set.id === active.setId);
     const review = this.section(container, brief?.title ?? active.setId, brief?.purpose ?? "Review this generated set before saving.");
     const approved = this.approvedBySet.get(active.setId) ?? new Set<string>();
+    const activeOcclusions = active.exercises.filter((exercise) => (
+      !exercise.rejected && exercise.type === "image-occlusion"
+    ));
+    const acceptedOcclusions = activeOcclusions.filter((exercise) => (
+      exercise.occlusionReviewed && validateOcclusionMasks(exercise.masks ?? []).valid
+    )).length;
     const toolbar = review.createDiv({ cls: "practice-learning-path-review-toolbar" });
     new ButtonComponent(toolbar)
       .setIcon("list-checks")
-      .setButtonText("Approve all valid text exercises")
-      .setTooltip("Approve every kept non-occlusion exercise in this set. Image masks still require explicit acceptance.")
+      .setButtonText("Approve all ready exercises")
+      .setTooltip("Approve every ready exercise in every generated set. Occlusions are included only after their masks were explicitly accepted.")
       .onClick(() => {
-        for (const exercise of active.exercises) {
-          if (!exercise.rejected && exercise.type !== "image-occlusion") approved.add(exercise.id);
+        const result = approveReadyLearningPathExercises(this.reviewSetInputs(blueprint));
+        this.approvedBySet = new Map([...result.approvedBySet].map(([setId, ids]) => [
+          setId,
+          new Set(ids),
+        ]));
+        const blocker = result.blockers[0];
+        if (blocker === undefined) {
+          this.reviewFeedback = `All ${result.totalApprovedCount} kept exercises across ${this.generatedSets.length} sets are approved. The learning path is ready to save.`;
+        } else {
+          this.activeReviewSetId = blocker.setId;
+          this.reviewFeedback = `Approved ${result.newlyApprovedCount} ready ${result.newlyApprovedCount === 1 ? "exercise" : "exercises"}. Next: ${blocker.setTitle} — ${blocker.reason}`;
         }
-        this.approvedBySet.set(active.setId, approved);
-        this.render();
+        this.renderAndFocusReviewFeedback(result.blockers.length === 0);
       });
     new ButtonComponent(toolbar)
       .setIcon("scan")
-      .setButtonText("Accept valid occlusions")
+      .setButtonText(
+        activeOcclusions.length > 0 && acceptedOcclusions === activeOcclusions.length
+          ? `Occlusions accepted (${acceptedOcclusions})`
+          : `Accept valid occlusions (${acceptedOcclusions}/${activeOcclusions.length})`,
+      )
       .setTooltip("Accept every kept occlusion whose current masks are valid. Invalid or missing masks remain blocked.")
+      .setDisabled(activeOcclusions.length === 0 || acceptedOcclusions === activeOcclusions.length)
       .onClick(() => {
         const exercises = active.exercises.map((exercise) => {
           if (exercise.rejected || exercise.type !== "image-occlusion") return exercise;
@@ -1288,9 +1321,29 @@ export class PracticeLearningPathView extends ItemView {
           set.setId === active.setId ? { ...set, exercises } : set
         ));
         this.approvedBySet.set(active.setId, approved);
-        this.render();
+        const remaining = exercises.filter((exercise) => (
+          !exercise.rejected
+          && exercise.type === "image-occlusion"
+          && !exercise.occlusionReviewed
+        )).length;
+        this.reviewFeedback = remaining === 0
+          ? `All occlusion masks in ${brief?.title ?? active.setId} are accepted and their exercises are approved.`
+          : `${remaining} ${remaining === 1 ? "occlusion still needs" : "occlusions still need"} a valid mask in ${brief?.title ?? active.setId}.`;
+        this.renderAndFocusReviewFeedback(false);
       });
-    review.createEl("p", { cls: "practice-lab-muted", text: `${approved.size} of ${active.exercises.filter((exercise) => !exercise.rejected).length} kept exercises approved.` });
+    const activeState = learningPathSetReviewState(this.reviewSetInput(active, blueprint));
+    review.createEl("p", {
+      cls: "practice-lab-muted",
+      text: `${activeState.approvedCount} of ${activeState.keptCount} kept exercises approved in this set. Use the batch button above to approve every ready set at once.`,
+    });
+    if (this.reviewFeedback !== null) {
+      const feedback = review.createDiv({
+        cls: "practice-lab-callout is-info practice-learning-path-review-feedback",
+        attr: { role: "status", "aria-live": "polite", tabindex: "-1" },
+      });
+      setIcon(feedback.createSpan(), "info");
+      feedback.createSpan({ text: this.reviewFeedback });
+    }
     for (const [index, exercise] of active.exercises.entries()) {
       this.renderExerciseReview(review, active, exercise, index, approved);
     }
@@ -1300,12 +1353,21 @@ export class PracticeLearningPathView extends ItemView {
       setIcon(callout.createSpan(), "triangle-alert");
       callout.createSpan({ text: gate });
     }
-    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+    const actions = container.createDiv({
+      cls: "practice-learning-path-actions is-sticky practice-learning-path-save-actions",
+      attr: { tabindex: "-1" },
+    });
+    const saveGuidance = actions.createDiv({ cls: "practice-learning-path-save-guidance" });
+    saveGuidance.createEl("strong", { text: gate === null ? "Ready to save" : "Review still required" });
+    saveGuidance.createSpan({
+      text: gate ?? "All kept exercises and occlusion masks are approved across every set.",
+    });
     new ButtonComponent(actions)
       .setIcon("save")
       .setButtonText(this.busy === "save" ? "Saving workspace atomically…" : "Save guided learning path")
       .setCta()
       .setDisabled(gate !== null || this.busy !== null)
+      .setTooltip(gate ?? "Save the complete reviewed learning path to its Markdown workspace.")
       .onClick(() => void this.saveLearningPath());
   }
 
@@ -2071,7 +2133,11 @@ export class PracticeLearningPathView extends ItemView {
       const brief = blueprint.draft.sets.find((set) => set.id === state.id);
       if (brief === undefined) continue;
       const status = this.statuses.get(state.id) ?? { state: "queued" as const };
-      const available = this.generatedSets.some((set) => set.setId === state.id);
+      const generated = this.generatedSets.find((set) => set.setId === state.id);
+      const available = generated !== undefined;
+      const reviewState = generated === undefined
+        ? null
+        : learningPathSetReviewState(this.reviewSetInput(generated, blueprint));
       const button = container.createEl("button", {
         cls: `practice-learning-path-nav-item is-${status.state}`,
         attr: {
@@ -2094,7 +2160,9 @@ export class PracticeLearningPathView extends ItemView {
       });
       button.createSpan({
         cls: "practice-learning-path-nav-status",
-        text: statusLabel(status),
+        text: reviewState === null
+          ? statusLabel(status)
+          : `${statusLabel(status)} · ${reviewState.approvedCount}/${reviewState.keptCount} approved`,
       });
       button.addEventListener("click", () => {
         if (!available) return;
@@ -2342,7 +2410,13 @@ export class PracticeLearningPathView extends ItemView {
       this.stage = "saved";
       this.recoveryAvailable = false;
       for (const state of this.setStates) this.statuses.set(state.id, { state: "saved" });
-      new Notice("Guided learning path saved in the source practice workspace.", 8_000);
+      const reconciled = this.savedWorkspace.reconciledLinkCount ?? 0;
+      new Notice(
+        reconciled === 0
+          ? "Guided learning path saved in the source practice workspace."
+          : `Guided learning path saved. ${reconciled} generated source-to-aspect ${reconciled === 1 ? "link was" : "links were"} normalized against the approved map.`,
+        8_000,
+      );
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -2499,6 +2573,7 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private updateReviewExercise(setId: string, exerciseId: string, patch: Partial<EditableDraftExercise>): void {
+    this.reviewFeedback = null;
     this.generatedSets = this.generatedSets.map((set) => set.setId !== setId ? set : {
       ...set,
       exercises: set.exercises.map((exercise) => exercise.id === exerciseId ? { ...exercise, ...patch } : exercise),
@@ -2524,17 +2599,47 @@ export class PracticeLearningPathView extends ItemView {
   private reviewProblem(): string | null {
     if (this.busy === "batch") return "Wait for the current set generation to finish or cancel it.";
     if (this.generatedSets.length !== this.setStates.length) return "Every approved set must finish generation before the complete path can be saved.";
-    for (const set of this.generatedSets) {
-      const kept = set.exercises.filter((exercise) => !exercise.rejected);
-      if (kept.length === 0) return `Keep at least one exercise in ${set.setId}.`;
-      const approved = this.approvedBySet.get(set.setId) ?? new Set<string>();
-      for (const exercise of kept) {
-        if (exercise.prompt.trim().length === 0 || exercise.groundedAnswer.trim().length === 0) return "Every kept exercise needs a prompt and grounded answer.";
-        if (!approved.has(exercise.id)) return "Approve or reject every exercise in every set before saving.";
-        if (exercise.type === "image-occlusion" && (!exercise.occlusionReviewed || !validateOcclusionMasks(exercise.masks ?? []).valid)) return "Every kept image occlusion needs explicitly accepted valid masks.";
+    const blueprint = this.blueprint;
+    if (blueprint === null) return "Restore the approved aspect map before saving.";
+    for (const input of this.reviewSetInputs(blueprint)) {
+      const state = learningPathSetReviewState(input);
+      const blocker = state.blockers[0];
+      if (blocker !== undefined) return `${state.setTitle}: ${blocker.reason}`;
+      if (state.pendingApprovalCount > 0) {
+        return `${state.setTitle}: approve ${state.pendingApprovalCount} ready ${state.pendingApprovalCount === 1 ? "exercise" : "exercises"}, or use Approve all ready exercises.`;
       }
     }
     return null;
+  }
+
+  private reviewSetInput(
+    set: GeneratedLearningSetPresentationV1,
+    blueprint: LearningBlueprintPresentationV1,
+  ): LearningPathReviewSetInput {
+    return {
+      setId: set.setId,
+      setTitle: blueprint.draft.sets.find((brief) => brief.id === set.setId)?.title ?? set.setId,
+      exercises: set.exercises,
+      approvedExerciseIds: this.approvedBySet.get(set.setId) ?? new Set<string>(),
+    };
+  }
+
+  private reviewSetInputs(
+    blueprint: LearningBlueprintPresentationV1,
+  ): LearningPathReviewSetInput[] {
+    return this.generatedSets.map((set) => this.reviewSetInput(set, blueprint));
+  }
+
+  private renderAndFocusReviewFeedback(saveReady: boolean): void {
+    this.render();
+    window.setTimeout(() => {
+      const selector = saveReady
+        ? ".practice-learning-path-save-actions"
+        : ".practice-learning-path-review-feedback";
+      const target = this.contentEl.querySelector<HTMLElement>(selector);
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      target?.focus({ preventScroll: true });
+    }, 0);
   }
 
   private invalidatePlanningPreview(): void {
@@ -2552,6 +2657,7 @@ export class PracticeLearningPathView extends ItemView {
     this.activity.clear();
     this.generatedSets = [];
     this.approvedBySet.clear();
+    this.reviewFeedback = null;
     this.activeReviewSetId = null;
   }
 
@@ -2648,4 +2754,20 @@ function statusLabel(status: LearningSetGenerationStatusV1): string {
 
 function errorMessage(error: unknown): string {
   return formatCliErrorForUi(error, "The requested action failed.");
+}
+
+function learningPathErrorPresentation(message: string): {
+  readonly summary: string;
+  readonly details: readonly string[];
+} {
+  const prefix = "Cannot save an invalid learning workspace:";
+  if (!message.startsWith(prefix)) return { summary: message, details: [] };
+  const details = message.slice(prefix.length)
+    .split(";")
+    .map((detail) => detail.trim())
+    .filter((detail) => detail.length > 0);
+  return {
+    summary: `The generated workspace still contains ${details.length} inconsistent source or learning-path ${details.length === 1 ? "link" : "links"}. Nothing was written. Reload the updated plugin and retry the same recoverable batch; the approved source and reviewed exercises remain unchanged.`,
+    details,
+  };
 }

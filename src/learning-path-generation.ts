@@ -822,9 +822,9 @@ export function buildPracticeSetPrompt(payload: PracticeSetPayloadV1): string {
     `Difficulty intent: ${difficultyPromptGuidance(configuration.difficulty)}`,
     "Apply this profile to prompt complexity and every exercise's easy, medium, or hard label. Do not manufacture difficulty by withholding necessary evidence.",
     "Every exercise and every tutor claim must cite exact submitted source segment IDs. Tutor blocks with plausible but uncited or unsupported claims are invalid.",
-    "Each exercise must address one or more target-set aspect IDs. Do not create duplicate or substantially paraphrased exercises within this set or across sibling purposes.",
+    "Each exercise must address one or more target-set aspect IDs, and the union of those assigned aspects must own every sourceSegmentId cited by that exercise. Do not create duplicate or substantially paraphrased exercises within this set or across sibling purposes.",
     "A guided-check assignment must be the guidedExerciseId of exactly one tutor lesson. Independent and transfer attempts remain distinct from guided support.",
-    "Tutor lessons must proceed through why it matters, supported prerequisites, connected explanation, optional worked example when supported, self-explanation, two progressively stronger hints, and a source-grounded repair explanation.",
+    "Tutor lessons must proceed through why it matters, supported prerequisites, connected explanation, optional worked example when supported, self-explanation, two progressively stronger hints, and a source-grounded repair explanation. aspectIds and prerequisiteAspectIds must be disjoint. Every direct prerequisite of a taught aspect must either be taught in the same lesson or listed in prerequisiteAspectIds, and their combined evidence must own every tutor sourceSegmentId.",
     "Use canonical Obsidian LaTeX delimiters ($...$ and $$...$$) for all learner-visible mathematics. Balance delimiters and braces; never use \\(...\\) or \\[...\\]. JSON-escape every LaTeX backslash.",
     "Calculations, choices, cloze blanks, matching, ordering, and occlusion masks must satisfy the existing strict exercise contract. Occlusion visual IDs must come from the payload and masks must stay inside normalized [0,1] bounds.",
     "Return only the final JSON object. Do not reveal reasoning, use Markdown fences, or add commentary.",
@@ -951,6 +951,65 @@ export function validatePracticeSetDraft(
     : { valid: false, errors: deduplicated(errors) };
 }
 
+/**
+ * Strong relational validation used at the AI boundary and final regeneration
+ * boundary. Recovery parsing intentionally retains the structural validator so
+ * older, already generated batches can be reconciled without data loss.
+ */
+export function validatePracticeSetDraftForWorkspace(
+  value: unknown,
+  payload: PracticeSetPayloadV1,
+): StructuredValidationResult<PracticeSetDraftV1> {
+  const base = validatePracticeSetDraft(value, payload);
+  if (!base.valid || base.value === undefined) return base;
+  const draft = base.value;
+  const errors: string[] = [];
+  const aspectById = new Map(payload.aspects.map((aspect) => [aspect.id, aspect]));
+  const exerciseById = new Map(draft.exercises.map((exercise) => [exercise.id, exercise]));
+  for (const [index, assignment] of draft.assignments.entries()) {
+    const coveredSegments = new Set(assignment.aspectIds.flatMap(
+      (aspectId) => aspectById.get(aspectId)?.sourceSegmentIds ?? [],
+    ));
+    const exercise = exerciseById.get(assignment.exerciseId);
+    if (exercise?.sourceSegmentIds.some((segmentId) => !coveredSegments.has(segmentId))) {
+      errors.push(`/assignments/${index}: assigned aspects must own every exercise source reference.`);
+    }
+  }
+
+  for (const [index, lesson] of draft.tutorLessons.entries()) {
+    const path = `/tutorLessons/${index}`;
+    const citedAspectIds = [...lesson.aspectIds, ...lesson.prerequisiteAspectIds];
+    if (new Set(citedAspectIds).size !== citedAspectIds.length) {
+      errors.push(`${path}: lesson aspect and prerequisite references must be non-overlapping.`);
+    }
+    for (const aspectId of lesson.aspectIds) {
+      for (const prerequisiteId of aspectById.get(aspectId)?.prerequisiteAspectIds ?? []) {
+        if (
+          !lesson.aspectIds.includes(prerequisiteId)
+          && !lesson.prerequisiteAspectIds.includes(prerequisiteId)
+        ) {
+          errors.push(`${path}/prerequisiteAspectIds: lesson omits required prerequisite ${prerequisiteId}.`);
+        }
+      }
+    }
+    const allowedSegments = new Set(citedAspectIds.flatMap(
+      (aspectId) => aspectById.get(aspectId)?.sourceSegmentIds ?? [],
+    ));
+    const tutorReferences = [
+      ...lesson.teachingBlocks.flatMap((block) => block.sourceSegmentIds),
+      ...lesson.selfExplanationCheck.sourceSegmentIds,
+      ...lesson.hints.flatMap((hint) => hint.sourceSegmentIds),
+      ...lesson.repairExplanation.sourceSegmentIds,
+    ];
+    if (tutorReferences.some((segmentId) => !allowedSegments.has(segmentId))) {
+      errors.push(`${path}: tutor content must cite evidence owned by its taught or prerequisite aspects.`);
+    }
+  }
+  return errors.length === 0
+    ? { valid: true, value: structuredClone(draft) }
+    : { valid: false, errors: deduplicated(errors) };
+}
+
 export function asPracticeSetDraft(
   value: unknown,
   payload: PracticeSetPayloadV1,
@@ -1026,7 +1085,7 @@ export function validatePracticeSetReplacement(input: {
   readonly siblingDrafts: readonly PracticeSetDraftV1[];
 }): StructuredValidationResult<PracticeSetDraftV1> {
   const errors: string[] = [];
-  const target = validatePracticeSetDraft(input.replacement, input.payload);
+  const target = validatePracticeSetDraftForWorkspace(input.replacement, input.payload);
   if (!target.valid || target.value === undefined) {
     errors.push(...(target.errors ?? ["The replacement set is invalid."]));
   }

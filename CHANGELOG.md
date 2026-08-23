@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.15
+
+- Fixed Guided-path saving by validating source-to-aspect, assignment, tutor-citation, and prerequisite relationships before accepting new AI output.
+- Reconciled older recoverable batches at save time without changing learner-visible questions, answers, tutor explanations, or occlusion masks, and corrected single-source compatibility hashes.
+- Replaced set-local bulk approval with one batch-wide **Approve all ready exercises** action, exact per-set progress, automatic navigation to the next blocker, and an explicit ready-to-save state.
+- Made accepted occlusion controls visibly change to **Masks accepted**, disabled redundant re-acceptance, and summarized rare technical validation details behind an expandable error panel.
+
 ## 1.3.14
 
 - Rebuilt Guided-path batch navigator items as bounded two-row cards so titles and statuses no longer overlap the scrollbar or adjacent controls.

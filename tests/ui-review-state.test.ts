@@ -4,7 +4,9 @@ import test from "node:test";
 import type { EditableDraftExercise } from "../src/ui/contracts";
 import {
   acceptAllValidOcclusions,
+  approveReadyLearningPathExercises,
   getReviewGateState,
+  learningPathSetReviewState,
   reviewFingerprint,
 } from "../src/ui/review-state";
 
@@ -233,4 +235,54 @@ test("accept all defensively revokes an invalid preaccepted occlusion", () => {
   assert.equal(result.invalid.length, 1);
   assert.equal(result.drafts[0]?.occlusionReviewed, false);
   assert.equal(getReviewGateState(result.drafts, null).canSave, false);
+});
+
+test("guided bulk approval covers every set and includes only explicitly reviewed occlusions", () => {
+  const reviewedOcclusion = { ...occlusionDraft(), id: "reviewed-occlusion" };
+  const pendingOcclusion = {
+    ...occlusionDraft(),
+    id: "pending-occlusion",
+    occlusionReviewed: false,
+  };
+  const result = approveReadyLearningPathExercises([{
+    setId: "set-one",
+    setTitle: "Foundations",
+    exercises: [shortAnswerDraft("text-one"), reviewedOcclusion],
+    approvedExerciseIds: new Set<string>(),
+  }, {
+    setId: "set-two",
+    setTitle: "Transfer",
+    exercises: [shortAnswerDraft("text-two"), pendingOcclusion],
+    approvedExerciseIds: new Set(["text-two"]),
+  }]);
+
+  assert.deepEqual([...result.approvedBySet.get("set-one") ?? []], [
+    "text-one",
+    "reviewed-occlusion",
+  ]);
+  assert.deepEqual([...result.approvedBySet.get("set-two") ?? []], ["text-two"]);
+  assert.equal(result.newlyApprovedCount, 2);
+  assert.equal(result.totalApprovedCount, 3);
+  assert.equal(result.blockers.length, 1);
+  assert.equal(result.blockers[0]?.setId, "set-two");
+  assert.match(result.blockers[0]?.reason ?? "", /review and accept/iu);
+});
+
+test("guided set review reports exact approval progress and the next invalid action", () => {
+  const state = learningPathSetReviewState({
+    setId: "set-focused",
+    setTitle: "Focused mechanisms",
+    exercises: [
+      shortAnswerDraft("approved"),
+      shortAnswerDraft("pending"),
+      { ...shortAnswerDraft("broken"), groundedAnswer: "" },
+    ],
+    approvedExerciseIds: new Set(["approved"]),
+  });
+
+  assert.equal(state.keptCount, 3);
+  assert.equal(state.approvedCount, 1);
+  assert.equal(state.pendingApprovalCount, 1);
+  assert.equal(state.blockers.length, 1);
+  assert.match(state.blockers[0]?.reason ?? "", /prompt and a grounded answer/iu);
 });

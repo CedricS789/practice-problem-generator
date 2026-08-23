@@ -65,3 +65,22 @@ test("learning-path sidecars use explicit set-scoped recipe provenance", () => {
   assert.match(controllerSource, /batchId: pendingBatch\.batchId/u);
   assert.match(controllerSource, /blueprintId: pendingBatch\.blueprint\.draft\.blueprintId/u);
 });
+
+test("single-source guided saves use the primary compatibility snapshot", () => {
+  assert.match(controllerSource, /vaultPath: primaryMaterial\.vaultPath/u);
+  assert.match(controllerSource, /wikilink: primaryMaterial\.wikilink/u);
+  assert.match(
+    controllerSource,
+    /title: sourceMaterials\.length === 1[\s\S]*?primaryMaterial\.title/u,
+  );
+  assert.match(
+    controllerSource,
+    /hash: sourceMaterials\.length === 1[\s\S]*?primaryMaterial\.sourceHash/u,
+  );
+});
+
+test("legacy completed batches reconcile relationship links before final validation", () => {
+  assert.match(controllerSource, /reconcileLearningWorkspaceDrafts\(request\.blueprint, finalDrafts\)/u);
+  assert.match(controllerSource, /aspects: reconciliation\.aspects/u);
+  assert.match(controllerSource, /reconciledLinkCount: reconciliation\.reconciledLinkCount/u);
+});

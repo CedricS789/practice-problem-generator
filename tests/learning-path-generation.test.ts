@@ -14,6 +14,7 @@ import {
   validateLearningBlueprintDraft,
   validatePracticeSetBatch,
   validatePracticeSetDraft,
+  validatePracticeSetDraftForWorkspace,
   type LearningBlueprintDraftV1,
   type LearningBlueprintPlanningInputV1,
   type PracticeSetDraftV1,
@@ -527,6 +528,30 @@ test("set validation enforces grounded exercises, assignments, tutor checks, and
   assert.match(visualResult.errors?.join(" ") ?? "", /unknown visual/iu);
   assert.match(visualResult.errors?.join(" ") ?? "", /normalized bounds/iu);
   assert.match(visualResult.errors?.join(" ") ?? "", /unclosed brace/iu);
+});
+
+test("workspace-bound set validation rejects relationships that would fail only at save", () => {
+  const payload = payloads()[0]!;
+  const assignmentMismatch = structuredClone(draftFor(payload));
+  assignmentMismatch.exercises[0]!.sourceSegmentIds = ["support:seg-application"];
+  assert.equal(validatePracticeSetDraft(assignmentMismatch, payload).valid, true);
+  const assignmentResult = validatePracticeSetDraftForWorkspace(
+    assignmentMismatch,
+    payload,
+  );
+  assert.equal(assignmentResult.valid, false);
+  assert.match(assignmentResult.errors?.join(" ") ?? "", /assigned aspects must own/iu);
+
+  const tutorMismatch = structuredClone(draftFor(payload));
+  tutorMismatch.tutorLessons[0]!.prerequisiteAspectIds = ["aspect-foundation"];
+  tutorMismatch.tutorLessons[0]!.teachingBlocks[0]!.sourceSegmentIds = [
+    "support:seg-application",
+  ];
+  assert.equal(validatePracticeSetDraft(tutorMismatch, payload).valid, true);
+  const tutorResult = validatePracticeSetDraftForWorkspace(tutorMismatch, payload);
+  assert.equal(tutorResult.valid, false);
+  assert.match(tutorResult.errors?.join(" ") ?? "", /non-overlapping/iu);
+  assert.match(tutorResult.errors?.join(" ") ?? "", /evidence owned/iu);
 });
 
 test("whole-batch validation rejects duplicate exercises across otherwise valid sets", () => {

@@ -4549,11 +4549,50 @@ button.practice-learning-path-mode-card {
 
 .practice-learning-path-review-toolbar {
   align-items: flex-start;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   margin-bottom: var(--size-4-3);
   padding: var(--size-4-3);
   border: 1px solid var(--practice-lab-border);
   border-radius: var(--radius-m);
   background: var(--background-secondary);
+}
+
+.practice-learning-path-review-feedback {
+  margin: 0 0 var(--size-4-3);
+}
+
+.practice-learning-path-error-details {
+  margin-top: var(--size-4-2);
+}
+
+.practice-learning-path-error-details > summary {
+  cursor: pointer;
+  font-weight: var(--font-medium);
+}
+
+.practice-learning-path-error-details ol {
+  max-height: 240px;
+  margin-bottom: 0;
+  overflow: auto;
+}
+
+.practice-learning-path-save-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.practice-learning-path-save-guidance {
+  display: grid;
+  flex: 1 1 320px;
+  min-width: 0;
+  gap: var(--size-2-1);
+}
+
+.practice-learning-path-save-guidance > span {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
 }
 
 .practice-learning-path-exercise {
