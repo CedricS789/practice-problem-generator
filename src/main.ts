@@ -2579,13 +2579,14 @@ export default class PracticeLabPlugin extends Plugin {
   ): Promise<void> {
     if (mode === "guided") {
       let guidedSource: SourcePresentation | undefined;
+      let collectedSource: CollectedSource | undefined;
       if (source !== null) {
         if (!isRuntimeCollectedSource(source)) {
           throw new Error("Choose the source again before switching it to Guided path mode.");
         }
-        const prepared = await this.prepareGuidedSourceVisuals(source);
-        this.lastSource = prepared;
-        guidedSource = this.learningPathController.registerSource(prepared);
+        collectedSource = source;
+        this.lastSource = source;
+        guidedSource = this.learningPathController.registerSource(source);
       }
       await leaf.setViewState({
         type: PRACTICE_LEARNING_PATH_VIEW_TYPE,
@@ -2599,6 +2600,34 @@ export default class PracticeLabPlugin extends Plugin {
       leaf.view.setRecoveryAvailable(this.learningBatchRecoveryHandle !== undefined);
       leaf.view.setQuickGenerationRecovery(this.generationRecoveryPresentation());
       if (guidedSource !== undefined) leaf.view.setPrimarySource(guidedSource);
+      if (
+        collectedSource !== undefined
+        && guidedSource !== undefined
+        && collectedSource.visuals.some((visual) => (
+          visual.state === "frame-required" && visual.kind === "animated-gif"
+        ))
+      ) {
+        const preparationToken = leaf.view.beginPrimaryVisualPreparation(guidedSource);
+        if (preparationToken !== null) {
+          try {
+            const prepared = await this.prepareGuidedSourceVisuals(collectedSource);
+            this.lastSource = prepared;
+            const preparedPresentation = this.learningPathController.registerSource(prepared);
+            if (leaf.view instanceof PracticeLearningPathView) {
+              leaf.view.finishPrimaryVisualPreparation(
+                preparationToken,
+                guidedSource,
+                preparedPresentation,
+              );
+            }
+          } catch (error) {
+            if (leaf.view instanceof PracticeLearningPathView) {
+              leaf.view.finishPrimaryVisualPreparation(preparationToken, guidedSource);
+            }
+            this.showError(error);
+          }
+        }
+      }
       return;
     }
 

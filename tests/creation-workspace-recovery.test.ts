@@ -133,6 +133,24 @@ test("mode switching reuses the current leaf and carries an approved source", ()
   assert.match(mainSource, /learningPathController\.registerSource\(prepared\)/u);
 });
 
+test("guided mode navigation happens before slow default GIF-frame preparation", () => {
+  const switchStart = mainSource.indexOf("private async switchCreationMode(");
+  const switchEnd = mainSource.indexOf("private async resumeLearningPathBatch()", switchStart);
+  assert.ok(switchStart >= 0 && switchEnd > switchStart);
+  const implementation = mainSource.slice(switchStart, switchEnd);
+  const guidedViewChange = implementation.indexOf("await leaf.setViewState({");
+  const framePreparation = implementation.indexOf("await this.prepareGuidedSourceVisuals(collectedSource)");
+  assert.ok(guidedViewChange >= 0, "guided mode must set the current leaf view");
+  assert.ok(framePreparation > guidedViewChange, "GIF preparation must not block the mode change");
+  assert.match(implementation, /leaf\.view\.setPrimarySource\(guidedSource\);/u);
+  assert.match(implementation, /const preparationToken = leaf\.view\.beginPrimaryVisualPreparation\(guidedSource\);/u);
+  assert.match(
+    implementation,
+    /leaf\.view\.finishPrimaryVisualPreparation\(\s+preparationToken,\s+guidedSource,\s+preparedPresentation,/u,
+  );
+  assert.match(guidedViewSource, /Guided path is open\. Preparing the default GIF frames in the background/u);
+});
+
 test("recoverable quick generation is actionable where it blocks creation", () => {
   assert.match(quickViewSource, /Saved generation stopped/u);
   assert.match(quickViewSource, /Retry approved request/u);

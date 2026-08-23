@@ -358,6 +358,7 @@ export class PracticeLearningPathView extends ItemView {
   private gifFrameDefault: GifFramePosition;
   private visualSelectionBusy = false;
   private visualSelectionMessage: string | null = null;
+  private primaryVisualPreparationToken: symbol | null = null;
   private quickGenerationRecovery: GenerationRecoveryPresentation | null;
   private readonly expandedVisualSources = new Set<string>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
@@ -410,8 +411,43 @@ export class PracticeLearningPathView extends ItemView {
   public setPrimarySource(source: SourcePresentation): void {
     this.primary = source;
     this.supporting = [];
+    this.primaryVisualPreparationToken = null;
+    this.visualSelectionBusy = false;
+    this.visualSelectionMessage = null;
     this.resetAfterSourceChange();
     this.render();
+  }
+
+  public beginPrimaryVisualPreparation(source: SourcePresentation): symbol | null {
+    if (this.primary === null || !sameSourceScope(this.primary, source)) return null;
+    const token = Symbol("primary-visual-preparation");
+    this.primaryVisualPreparationToken = token;
+    this.visualSelectionBusy = true;
+    this.visualSelectionMessage = null;
+    this.render();
+    return token;
+  }
+
+  public finishPrimaryVisualPreparation(
+    token: symbol,
+    expected: SourcePresentation,
+    prepared?: SourcePresentation,
+  ): boolean {
+    if (
+      this.primaryVisualPreparationToken !== token
+      || this.primary === null
+      || !sameSourceScope(this.primary, expected)
+    ) {
+      return false;
+    }
+    this.primaryVisualPreparationToken = null;
+    this.visualSelectionBusy = false;
+    if (prepared !== undefined) {
+      this.primary = prepared;
+      this.invalidatePlanningPreview();
+    }
+    this.render();
+    return true;
   }
 
   public setProviders(providers: readonly ProviderPresentation[]): void {
@@ -658,9 +694,18 @@ export class PracticeLearningPathView extends ItemView {
     this.renderSourceCard(section, this.primary, "Primary", () => {
       this.primary = null;
       this.supporting = [];
+      this.primaryVisualPreparationToken = null;
+      this.visualSelectionBusy = false;
       this.resetAfterSourceChange();
       this.render();
     }, false);
+    if (this.primaryVisualPreparationToken !== null) {
+      section.createEl("p", {
+        cls: "practice-lab-muted practice-learning-path-visual-message",
+        text: "Guided path is open. Preparing the default GIF frames in the background…",
+        attr: { role: "status", "aria-live": "polite" },
+      });
+    }
     this.renderVisualBundleControls(section);
     if (this.primary.visuals.length > 0) {
       const primaryVisuals = section.createDiv({ cls: "practice-source-primary-visuals" });
@@ -728,7 +773,7 @@ export class PracticeLearningPathView extends ItemView {
       .setIcon("scan-eye")
       .setButtonText(this.busy === "preview" ? "Preparing exact payload…" : "Preview planning payload")
       .setCta()
-      .setDisabled(this.busy !== null)
+      .setDisabled(this.busy !== null || this.primaryVisualPreparationToken !== null)
       .onClick(() => void this.previewPlanningPayload());
     if (this.preview !== null) this.renderPlanningPreview(container);
   }

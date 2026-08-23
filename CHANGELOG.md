@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.4
+
+- Made Quick set to Guided path navigation immediate even when the approved source contains GIFs whose default frames still need extraction.
+- Continued default GIF-frame preparation visibly in the opened Guided path and prevented stale background results from replacing a newer source or mode choice.
+
 ## 1.3.3
 
 - Fixed Guided Path generation with the current Codex structured-output API by replacing unsupported provider-schema keywords while retaining duplicate and reference enforcement in the local validator.
