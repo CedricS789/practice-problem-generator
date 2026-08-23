@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.8
+
+- Fixed Guided-path exercise mixes so every rebalanced slider, percentage output, and zero/active row style refreshes together.
+- Removed the misleading grey Image occlusion label after its allocation increases above zero and prevented stale percentages from remaining beside rebalanced sliders.
+
 ## 1.3.7
 
 - Prevented exercise-percentage sliders from initiating a ghost-image drag of their containing Guided-path set card.

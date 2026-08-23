@@ -48,3 +48,24 @@ test("every exercise-mix range explicitly rejects native element dragging", () =
     /\.practice-learning-path-mix-row input\[type="range"\] \{[\s\S]*-webkit-user-drag: none;[\s\S]*user-select: none;/u,
   );
 });
+
+test("guided percentage rebalancing refreshes every row value, label state, and output", () => {
+  const start = guidedSource.indexOf("private renderSetAdvanced(");
+  const end = guidedSource.indexOf("private renderSetPayloadPreviews(", start);
+  assert.ok(start >= 0 && end > start);
+  const implementation = guidedSource.slice(start, end);
+  assert.match(
+    implementation,
+    /for \(const candidate of Array\.from\(mix\.querySelectorAll<HTMLInputElement>\("input\[type=range\]"\)\)\)/u,
+  );
+  assert.match(implementation, /candidate\.value = String\(value\)/u);
+  assert.match(
+    implementation,
+    /candidate\.closest\("label"\)\?\.classList\.toggle\("is-zero", value === 0\)/u,
+  );
+  assert.match(
+    implementation,
+    /candidate\.parentElement\?\.querySelector\("output"\)\?\.setText\(`\$\{value\}%`\)/u,
+  );
+  assert.doesNotMatch(implementation, /output\.setText\(`\$\{percentages\[type\]\}%`\)/u);
+});

@@ -1053,7 +1053,7 @@ export class PracticeLearningPathView extends ItemView {
         attr: { type: "range", min: "0", max: "100", step: "5", draggable: "false" },
       });
       slider.value = String(state.configuration.exerciseTypePercentages[type]);
-      const output = row.createEl("output", { text: `${slider.value}%` });
+      row.createEl("output", { text: `${slider.value}%` });
       slider.addEventListener("input", () => {
         const requested = Number.parseInt(slider.value, 10);
         if (requested === 0) state.intendedTypes.delete(type);
@@ -1069,10 +1069,13 @@ export class PracticeLearningPathView extends ItemView {
           state.rememberedPercentages,
         );
         this.updateSetConfiguration(state.id, { exerciseTypePercentages: percentages });
-        output.setText(`${percentages[type]}%`);
         for (const candidate of Array.from(mix.querySelectorAll<HTMLInputElement>("input[type=range]"))) {
           const candidateType = candidate.dataset.type as ExerciseType | undefined;
-          if (candidateType !== undefined) candidate.value = String(percentages[candidateType]);
+          if (candidateType === undefined) continue;
+          const value = percentages[candidateType];
+          candidate.value = String(value);
+          candidate.closest("label")?.classList.toggle("is-zero", value === 0);
+          candidate.parentElement?.querySelector("output")?.setText(`${value}%`);
         }
       });
       slider.dataset.type = type;
