@@ -446,7 +446,9 @@ export class PracticeLabView extends ItemView {
   }
 
   public getDisplayText(): string {
-    return "Practice creation - quick set";
+    return this.options.creationAvailable === false
+      ? "Practice"
+      : "Practice creation - quick set";
   }
 
   public getIcon(): string {
@@ -1060,6 +1062,12 @@ export class PracticeLabView extends ItemView {
       this.displayPreferences.practice.density === "compact",
     );
 
+    if (this.options.creationAvailable === false && this.stage !== "study") {
+      this.renderStudyOnlyHome();
+      applyHoverDescriptions(this.contentEl);
+      return;
+    }
+
     const header = this.contentEl.createDiv({ cls: "practice-lab-header" });
     const heading = header.createDiv();
     heading.createEl("h2", { text: "Practice Problem Generator" });
@@ -1100,6 +1108,23 @@ export class PracticeLabView extends ItemView {
         break;
     }
     applyHoverDescriptions(this.contentEl);
+  }
+
+  private renderStudyOnlyHome(): void {
+    const header = this.contentEl.createDiv({ cls: "practice-lab-header" });
+    const heading = header.createDiv();
+    heading.createEl("h2", { text: "Practice" });
+    heading.createEl("p", {
+      text: "Open a saved practice bank to begin an offline session.",
+    });
+    const icon = header.createDiv({ cls: "practice-lab-header-icon" });
+    setIcon(icon, "gamepad-2");
+    const body = this.contentEl.createDiv({ cls: "practice-lab-body" });
+    const empty = body.createDiv({ cls: "practice-lab-empty" });
+    empty.createEl("strong", { text: "No practice session is open" });
+    empty.createEl("p", {
+      text: "Open a saved practice note and start its practice session.",
+    });
   }
 
   private renderCreationModeSwitch(container: HTMLElement): void {

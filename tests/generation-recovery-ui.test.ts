@@ -17,6 +17,7 @@ test("interrupted generation reattaches before other desktop AI queues", () => {
     /await recovery;[\s\S]*initializeDesktopAnswerReviews\(\)/u,
   );
   assert.match(mainSource, /recovery: \{ mode: "resume", handle \}/u);
+  assert.match(mainSource, /coordinator\.generateWhenAvailable\(adapter/u);
   assert.match(mainSource, /readRecoveryDraftCheckpoint\(handle\)/u);
   assert.match(mainSource, /writeDurableRecoveryText/u);
 });

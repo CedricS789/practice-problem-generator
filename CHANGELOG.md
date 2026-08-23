@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2
+
+- Fixed false desktop `Codex (unavailable)` states by starting provider discovery independently of long interrupted-generation recovery, safely waiting for the shared CLI slot during reattachment, and publishing failures consistently to both creation modes.
+- Made Windows npm CLI shims work when Obsidian inherits a stale GUI `PATH` by locating Node in standard installation directories without enabling shell execution.
+- Removed practice-creation and provider controls from the mobile practice surface while preserving offline study and queue-for-desktop answer review.
+
 ## 1.3.1
 
 - Replaced the long, competing editor context-menu generation actions with one labeled Practice Problem Generator group and concise create/start-practice actions.

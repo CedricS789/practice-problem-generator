@@ -423,6 +423,8 @@ export interface PracticeLabCallbacks {
 
 export interface PracticeLabViewOptions {
   readonly callbacks: PracticeLabCallbacks;
+  /** False on mobile, where this surface is retained only for offline study. */
+  readonly creationAvailable?: boolean;
   readonly providers: readonly ProviderPresentation[];
   readonly initialSource?: SourcePresentation;
   readonly displayPreferences?: PracticeLabDisplayPreferences;

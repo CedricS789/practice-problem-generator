@@ -103,6 +103,42 @@ test("mobile registers review surfaces but hides desktop-only creation entry poi
   );
   assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*this\.addHeading\(\s*"Generation defaults"/su);
   assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*const advanced = this\.addSettingsGroup\(\s*"Advanced runtime"/su);
+  assert.match(mainSource, /creationAvailable: !Platform\.isMobileApp/u);
+  assert.match(
+    viewSource,
+    /if \(this\.options\.creationAvailable === false && this\.stage !== "study"\) \{\s*this\.renderStudyOnlyHome\(\)/su,
+  );
+  assert.match(viewSource, /private renderStudyOnlyHome\(\): void/u);
+  assert.match(viewSource, /Open a saved practice bank to begin an offline session\./u);
+  assert.doesNotMatch(
+    viewSource.slice(
+      viewSource.indexOf("private renderStudyOnlyHome"),
+      viewSource.indexOf("private renderCreationModeSwitch"),
+    ),
+    /provider|generate|creation/u,
+  );
+});
+
+test("desktop provider discovery never starts from or falls back to the mobile placeholder", () => {
+  assert.match(
+    mainSource,
+    /this\.providers = Platform\.isMobileApp\s*\? mobileProviderPresentations\(this\.settings\)\s*:\s*desktopPendingProviderPresentations\(this\.settings\)/u,
+  );
+  const initialization = mainSource.slice(
+    mainSource.indexOf("private async initializeDesktopWork"),
+    mainSource.indexOf("private async generateGuidedFrom", mainSource.indexOf("private async initializeDesktopWork")),
+  );
+  assert.ok(
+    initialization.indexOf("void this.refreshProviders()")
+      < initialization.indexOf("await recovery"),
+  );
+  const refresh = mainSource.slice(
+    mainSource.indexOf("private async performProviderRefresh"),
+    mainSource.indexOf("private async renderPracticeBlock"),
+  );
+  assert.match(refresh, /desktopPendingProviderPresentations/u);
+  assert.match(refresh, /this\.publishProvidersToOpenViews\(\)/u);
+  assert.doesNotMatch(refresh, /mobileProviderPresentations\(this\.settings\)\.map/u);
 });
 
 test("practice-bank storage exposes a guarded live path preview without moving existing banks", () => {

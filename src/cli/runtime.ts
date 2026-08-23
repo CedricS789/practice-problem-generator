@@ -1221,18 +1221,21 @@ function isSignalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
-interface SpawnTarget {
+export interface SpawnTarget {
   readonly executable: string;
   readonly prefixArgs: readonly string[];
 }
+
+type SpawnEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
  * Windows cannot execute npm `.cmd` shims with `shell: false`. Resolve a
  * standard npm shim to its JavaScript entry point and invoke Node directly;
  * arbitrary batch and PowerShell scripts are deliberately never executed.
  */
-async function resolveSpawnTarget(
+export async function resolveSpawnTarget(
   executable: string,
+  environment: SpawnEnvironment = process.env,
 ): Promise<SpawnTarget> {
   if (process.platform !== "win32") {
     return { executable, prefixArgs: [] };
@@ -1258,7 +1261,7 @@ async function resolveSpawnTarget(
     return { executable, prefixArgs: [] };
   }
 
-  const pathDirectories = (process.env.PATH ?? "")
+  const pathDirectories = (environment.PATH ?? "")
     .split(path.delimiter)
     .filter((entry) => entry.length > 0);
   const hasDirectory = path.dirname(executable) !== ".";
@@ -1292,6 +1295,29 @@ async function resolveSpawnTarget(
     if (nodeExecutable === undefined) {
       for (const nodeDirectory of pathDirectories) {
         const candidate = path.join(nodeDirectory, "node.exe");
+        if (await exists(candidate)) {
+          nodeExecutable = candidate;
+          break;
+        }
+      }
+    }
+    if (nodeExecutable === undefined) {
+      const standardNodeCandidates = new Set<string>();
+      for (const programFiles of [
+        environment.ProgramFiles,
+        environment.ProgramW6432,
+      ]) {
+        if (programFiles !== undefined && programFiles.length > 0) {
+          standardNodeCandidates.add(path.join(programFiles, "nodejs", "node.exe"));
+        }
+      }
+      const localAppData = environment.LOCALAPPDATA;
+      if (localAppData !== undefined && localAppData.length > 0) {
+        standardNodeCandidates.add(
+          path.join(localAppData, "Programs", "nodejs", "node.exe"),
+        );
+      }
+      for (const candidate of standardNodeCandidates) {
         if (await exists(candidate)) {
           nodeExecutable = candidate;
           break;

@@ -56,6 +56,31 @@ export class CliJobCoordinator {
     );
   }
 
+  /**
+   * Resume/recovery work must survive a provider check that won startup by a
+   * few milliseconds. Wait for the shared CLI slot without changing the
+   * selected provider, job identity, request, or cancellation signal.
+   */
+  async generateWhenAvailable<T>(
+    adapter: CliProviderAdapter,
+    request: StructuredGenerationRequest<T>,
+    identity?: CliJobIdentity,
+  ): Promise<StructuredGenerationResult<T>> {
+    if (identity !== undefined && identity.provider !== adapter.id) {
+      throw new CliProviderError(
+        "unsupported-capability",
+        "The selected CLI job provider does not match its adapter.",
+        { provider: adapter.id },
+      );
+    }
+    return await this.runWhenAvailable(
+      adapter.id,
+      async (signal) => await adapter.generate({ ...request, signal }),
+      request.signal,
+      identity,
+    );
+  }
+
   async runExclusive<T>(
     provider: ProviderId,
     task: (signal: AbortSignal) => Promise<T>,

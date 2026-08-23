@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { BaseCliProviderAdapter, type PreparedInvocation } from "../src/cli/base-adapter";
 import {
@@ -19,6 +28,7 @@ import {
   createCliProviderLayer,
   parseProviderOutput,
   removeDurableRecovery,
+  resolveSpawnTarget,
   type CliJobFileSystem,
   type CliJobWorkspace,
   type CliProcessRunner,
@@ -1125,6 +1135,47 @@ test("DesktopProcessRunner normalizes timeout, cancellation, and ENOENT", async 
     (error: unknown) =>
       error instanceof CliProviderError && error.code === "missing-executable",
   );
+});
+
+test("Windows npm shims find Node outside a stale GUI PATH", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "practice-lab-node-resolution-"));
+  try {
+    const shimDirectory = join(root, "npm");
+    const entry = join(
+      shimDirectory,
+      "node_modules",
+      "@openai",
+      "codex",
+      "bin",
+      "codex.js",
+    );
+    const programFiles = join(root, "Program Files");
+    const nodeExecutable = join(programFiles, "nodejs", "node.exe");
+    mkdirSync(join(shimDirectory, "node_modules", "@openai", "codex", "bin"), {
+      recursive: true,
+    });
+    mkdirSync(join(programFiles, "nodejs"), { recursive: true });
+    writeFileSync(entry, "// synthetic Codex entry\n", "utf8");
+    writeFileSync(nodeExecutable, "synthetic Node executable\n", "utf8");
+    const shim = join(shimDirectory, "codex.cmd");
+    writeFileSync(
+      shim,
+      '@ECHO off\r\n"%_prog%" "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n',
+      "utf8",
+    );
+
+    const target = await resolveSpawnTarget(shim, {
+      PATH: join(root, "System32"),
+      ProgramFiles: programFiles,
+    });
+
+    assert.equal(target.executable, nodeExecutable);
+    assert.deepEqual(target.prefixArgs, [entry]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("DesktopProcessRunner reports stdout and stderr incrementally", async () => {

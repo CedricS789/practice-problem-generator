@@ -250,6 +250,23 @@ function mobileProviderPresentations(
   }));
 }
 
+function desktopPendingProviderPresentations(
+  settings: PracticeLabSettings,
+  detail = "Checking installed desktop providers…",
+): readonly ProviderPresentation[] {
+  return (["codex", "claude", "agy"] as const).map((id) => ({
+    id,
+    label: id === "codex" ? "Codex" : id === "claude" ? "Claude" : "agy",
+    available: false,
+    executionMode: "unavailable" as const,
+    supportsVision: false,
+    reasoningEfforts: [...reasoningEffortsForProvider(id)],
+    models: modelsForProvider(id),
+    defaultModel: modelForProvider(settings, id),
+    detail,
+  }));
+}
+
 export default class PracticeLabPlugin extends Plugin {
   settings: PracticeLabSettings = {
     ...DEFAULT_SETTINGS,
@@ -262,6 +279,7 @@ export default class PracticeLabPlugin extends Plugin {
   private savedSetController!: SavedSetGenerationController;
   private dashboardRepository!: PracticeDashboardRepository;
   private cliLayer: CliProviderLayer | undefined;
+  private cliLayerPromise: Promise<CliProviderLayer> | undefined;
   private providers: readonly ProviderPresentation[] = [];
   private providerRefreshEpoch = 0;
   private providerRefreshPromise: Promise<void> | undefined;
@@ -303,7 +321,9 @@ export default class PracticeLabPlugin extends Plugin {
   override async onload(): Promise<void> {
     const storedData: unknown = await this.loadData();
     this.settings = normalizeSettings(storedData);
-    this.providers = mobileProviderPresentations(this.settings);
+    this.providers = Platform.isMobileApp
+      ? mobileProviderPresentations(this.settings)
+      : desktopPendingProviderPresentations(this.settings);
     this.generationRecoveryHandle = storedGenerationRecoveryHandle(storedData);
     this.learningBatchRecoveryHandle = storedLearningBatchRecoveryHandle(storedData);
     const storedCheckpoint = storedDataValue(storedData, STUDY_CHECKPOINT_DATA_KEY);
@@ -1097,6 +1117,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private createViewOptions(leaf: WorkspaceLeaf): PracticeLabViewOptions {
     return {
+      creationAvailable: !Platform.isMobileApp,
       providers: this.providers,
       displayPreferences: this.settings.display,
       callbacks: {
@@ -2740,6 +2761,10 @@ export default class PracticeLabPlugin extends Plugin {
   private async initializeDesktopWork(): Promise<void> {
     const recovery = this.restoreInterruptedGeneration();
     this.generationRecoveryTask = recovery;
+    // Provider discovery must not wait for a potentially three-hour restored
+    // generation. A restored creation view needs an accurate desktop state
+    // immediately, even while the durable job is still being inspected.
+    void this.refreshProviders();
     try {
       await recovery;
     } catch (error) {
@@ -2889,7 +2914,7 @@ export default class PracticeLabPlugin extends Plugin {
     try {
       const layer = await this.ensureCliLayer();
       const adapter = layer.adapters[context.configuration.provider];
-      const result = await layer.coordinator.generate(adapter, {
+      const result = await layer.coordinator.generateWhenAvailable(adapter, {
         prompt: context.prompt,
         schema: generationDraftV1JsonSchema,
         validate: (value) => validateGeneratedDraft(value, {
@@ -3896,15 +3921,24 @@ export default class PracticeLabPlugin extends Plugin {
   private async ensureCliLayer(): Promise<CliProviderLayer> {
     if (Platform.isMobileApp) throw new Error("CLI providers are not available on mobile.");
     if (this.cliLayer) return this.cliLayer;
-    const { createCliProviderLayer } = await import("./cli");
-    this.cliLayer = createCliProviderLayer({
-      executables: {
-        codex: this.settings.codexExecutable,
-        claude: this.settings.claudeExecutable,
-        agy: this.settings.agyExecutable
-      }
+    if (this.cliLayerPromise !== undefined) return this.cliLayerPromise;
+    const operation = import("./cli").then(({ createCliProviderLayer }) => {
+      const layer = createCliProviderLayer({
+        executables: {
+          codex: this.settings.codexExecutable,
+          claude: this.settings.claudeExecutable,
+          agy: this.settings.agyExecutable
+        }
+      });
+      this.cliLayer = layer;
+      return layer;
     });
-    return this.cliLayer;
+    this.cliLayerPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.cliLayerPromise === operation) this.cliLayerPromise = undefined;
+    }
   }
 
   private async refreshProviders(force = false): Promise<void> {
@@ -3933,6 +3967,11 @@ export default class PracticeLabPlugin extends Plugin {
     try {
       const layer = await this.ensureCliLayer();
       if (layer.coordinator.isBusy) {
+        this.providers = desktopPendingProviderPresentations(
+          this.settings,
+          "Provider check is waiting for the active desktop AI job to finish.",
+        );
+        this.publishProvidersToOpenViews();
         if (!this.providerRefreshAfterIdle) {
           this.providerRefreshAfterIdle = true;
           void layer.coordinator.whenIdle().then(() => {
@@ -3948,23 +3987,26 @@ export default class PracticeLabPlugin extends Plugin {
         providerPresentation(detection, this.settings),
       );
       this.providersRefreshedAt = Date.now();
-      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
-        if (leaf.view instanceof PracticeLabView) leaf.view.setProviders(this.providers);
-      }
-      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
-        if (leaf.view instanceof PracticeLearningPathView) leaf.view.setProviders(this.providers);
-      }
+      this.publishProvidersToOpenViews();
       this.queueWaitingAnswerReviews();
     } catch (error) {
       if (refreshEpoch !== this.providerRefreshEpoch) return;
-      this.providers = mobileProviderPresentations(this.settings).map((provider) => ({
-        ...provider,
-        executionMode: "unavailable" as const,
-        detail: error instanceof Error ? error.message : "Provider detection failed."
-      }));
+      this.providers = desktopPendingProviderPresentations(
+        this.settings,
+        error instanceof Error ? error.message : "Provider detection failed.",
+      );
       this.providersRefreshedAt = Date.now();
-      for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
-        if (leaf.view instanceof PracticeLearningPathView) leaf.view.setProviders(this.providers);
+      this.publishProvidersToOpenViews();
+    }
+  }
+
+  private publishProvidersToOpenViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLabView) leaf.view.setProviders(this.providers);
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LEARNING_PATH_VIEW_TYPE)) {
+      if (leaf.view instanceof PracticeLearningPathView) {
+        leaf.view.setProviders(this.providers);
       }
     }
   }
