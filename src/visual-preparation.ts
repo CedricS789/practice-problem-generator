@@ -139,7 +139,9 @@ export async function prepareSelectedVisuals(
     };
     prepared.push({
       source,
-      media: { bytes: new Uint8Array(bytes.slice(0)), mimeType }
+      // Vault.readBinary already returns a job-owned ArrayBuffer. Retain that
+      // exact buffer instead of duplicating every selected image in memory.
+      media: { bytes, mimeType }
     });
   }
   return prepared;

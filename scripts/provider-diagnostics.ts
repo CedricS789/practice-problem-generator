@@ -1,10 +1,29 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createCliProviderLayer, type ProviderId } from "../src/cli/index";
+import {
+  createCliProviderLayer,
+  DesktopProcessRunner,
+  type CliProcessRunner,
+  type ProcessRunRequest,
+  type ProcessRunResult,
+  type ProviderId,
+} from "../src/cli/index";
 import { generationDraftV1JsonSchema, validateGenerationDraft } from "../src/schema";
 
 const execFileAsync = promisify(execFile);
-const layer = createCliProviderLayer();
+class DiagnosticProcessRunner implements CliProcessRunner {
+  readonly delegate = new DesktopProcessRunner();
+  lastResult: ProcessRunResult | undefined;
+
+  async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
+    const result = await this.delegate.run(request);
+    this.lastResult = result;
+    return result;
+  }
+}
+
+const diagnosticRunner = new DiagnosticProcessRunner();
+const layer = createCliProviderLayer({ runner: diagnosticRunner });
 const detections = await layer.detectAll();
 const schema = {
   $schema: "http://json-schema.org/draft-07/schema#",
@@ -69,9 +88,7 @@ for (const detection of detections.filter((item) => requestedProvider === undefi
         status: "text-failed",
         version: detection.version,
         vision: detection.capabilities.vision,
-        detail: typeof error === "object" && error !== null && "detail" in error && typeof error.detail === "string"
-          ? error.detail
-          : error instanceof Error ? error.message : String(error)
+        ...diagnosticError(error, diagnosticRunner.lastResult),
       });
     }
     continue;
@@ -110,11 +127,59 @@ for (const detection of detections.filter((item) => requestedProvider === undefi
       provider,
       status: "failed",
       version: detection.version,
-      detail: typeof error === "object" && error !== null && "detail" in error && typeof error.detail === "string"
-        ? error.detail
-        : error instanceof Error ? error.message : String(error)
+      ...diagnosticError(error, diagnosticRunner.lastResult),
     });
   }
 }
 
 process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+
+function diagnosticError(error: unknown, result?: ProcessRunResult): {
+  readonly code?: string;
+  readonly message: string;
+  readonly detail?: string;
+  readonly process?: {
+    readonly exitCode: number;
+    readonly stdoutTail?: string;
+    readonly stderrTail?: string;
+  };
+} {
+  const record = typeof error === "object" && error !== null
+    ? error as Record<string, unknown>
+    : {};
+  const code = typeof record.code === "string" ? record.code : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = typeof record.detail === "string"
+    ? record.detail
+        .replace(/[A-Za-z]:\\[^\r\n"}]*practice-lab-[A-Za-z0-9_-]+/gu, "<neutral-job>")
+        .slice(-2_000)
+    : undefined;
+  return {
+    ...(code === undefined ? {} : { code }),
+    message,
+    ...(detail === undefined || detail.length === 0 ? {} : { detail }),
+    ...(result === undefined
+      ? {}
+      : {
+          process: {
+            exitCode: result.exitCode,
+            ...boundedTail("stdout", result.stdout),
+            ...boundedTail("stderr", result.stderr),
+          },
+        }),
+  };
+}
+
+function boundedTail(
+  stream: "stdout" | "stderr",
+  value: string,
+): Record<string, string> {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return {};
+  const key = stream === "stdout" ? "stdoutTail" : "stderrTail";
+  return {
+    [key]: trimmed
+      .replace(/[A-Za-z]:\\[^\r\n"}]*practice-lab-[A-Za-z0-9_-]+/gu, "<neutral-job>")
+      .slice(-2_000),
+  };
+}

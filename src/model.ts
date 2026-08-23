@@ -17,7 +17,8 @@ export type ReasoningEffortV1 =
   | "high"
   | "xhigh"
   | "max"
-  | "ultra";
+  | "ultra"
+  | "ultracode";
 export type GifFramePositionV1 = "first" | "middle" | "last";
 
 export interface SourceSegmentV1 {

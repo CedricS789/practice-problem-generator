@@ -87,6 +87,24 @@ test("mobile relocates persisted practice drawer leaves into the root workspace"
   );
 });
 
+test("mobile registers review surfaces but hides desktop-only creation entry points", () => {
+  assert.match(
+    mainSource,
+    /if \(!Platform\.isMobileApp\) \{\s*this\.registerView\(\s*PRACTICE_LEARNING_PATH_VIEW_TYPE/su,
+  );
+  assert.match(
+    mainSource,
+    /private registerCommands\(\): void \{\s*if \(!Platform\.isMobileApp\) \{[\s\S]*id: "open-practice-lab"[\s\S]*id: "discard-interrupted-generation"/u,
+  );
+  assert.match(mainSource, /if \(Platform\.isMobileApp \|\| view\.file === null\) return/u);
+  assert.match(
+    mainSource,
+    /Platform\.isMobileApp\s*\|\| !\(file instanceof TFile\)/u,
+  );
+  assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*this\.addHeading\(\s*"Generation defaults"/su);
+  assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*const advanced = this\.addSettingsGroup\(\s*"Advanced runtime"/su);
+});
+
 test("practice-bank storage exposes a guarded live path preview without moving existing banks", () => {
   assert.match(settingsSource, /Per-course practice folder/u);
   assert.match(settingsSource, /Custom folder and template/u);

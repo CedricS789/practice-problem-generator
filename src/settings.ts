@@ -387,10 +387,11 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       text: "Choose the defaults for new work and decide how much information each Practice Problem Generator surface shows. Safety, consent, validation, and repair controls always remain visible.",
     });
 
-    this.addHeading(
-      "Generation defaults",
-      "Applied when a new source is loaded. You can still override every value in Configure.",
-    );
+    if (!Platform.isMobileApp) {
+      this.addHeading(
+        "Generation defaults",
+        "Applied when a new source is loaded. You can still override every value in Configure.",
+      );
     new Setting(this.containerEl)
       .setName("Default AI provider")
       .setDesc("Practice Problem Generator never switches providers automatically.")
@@ -602,6 +603,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       .addButton((button) => button
         .setButtonText("Restore")
         .onClick(() => void this.restoreGenerationDefaults()));
+    }
 
     this.addHeading(
       "Study defaults",
@@ -704,10 +706,11 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addDashboardSettings();
     this.addDataManagementSettings();
 
-    const advanced = this.addSettingsGroup(
-      "Advanced runtime",
-      "Process limits and executable locations. Changing an executable refreshes provider detection after the active job finishes.",
-    );
+    if (!Platform.isMobileApp) {
+      const advanced = this.addSettingsGroup(
+        "Advanced runtime",
+        "Process limits and executable locations. Changing an executable refreshes provider detection after the active job finishes.",
+      );
     new Setting(advanced)
       .setName("Recover interrupted generations")
       .setDesc("Keep the exact ephemeral CLI job running in a detached local helper if Obsidian closes or reloads. Approved source and neutral media stay only in the operating-system temporary directory until the draft is saved, discarded, or expires.")
@@ -803,7 +806,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       .setDesc("Runs a synthetic one-pixel headless test. No note or vault attachment is used, and vision stays blocked unless the test passes.")
       .addButton((button) => button
         .setButtonText("Run test")
-        .setDisabled(Platform.isMobileApp)
+        .setDisabled(false)
         .onClick(async () => {
           button.setDisabled(true).setButtonText("Testing…");
           try {
@@ -811,9 +814,10 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           } catch (error) {
             new Notice(error instanceof Error ? error.message : "agy vision testing failed.", 10_000);
           } finally {
-            button.setDisabled(Platform.isMobileApp).setButtonText("Run test");
+            button.setDisabled(false).setButtonText("Run test");
           }
         }));
+    }
   }
 
   private addExecutableSetting(
@@ -1134,13 +1138,15 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
     this.addDisplayToggle("Show view introduction", "Show the short description below the Practice Problem Generator title.", "practice", "showHeaderDescription", group);
-    this.addDisplayToggle("Show generation stepper", "Show Source, Configure, and Review navigation steps.", "practice", "showGenerationStepper", group);
-    this.addDisplayToggle("Live agent activity", "Show safe provider events, elapsed time, and emitted reasoning status while AI work runs. Private chain-of-thought is never exposed or saved.", "practice", "showAgentActivity", group);
-    this.addDisplayToggle("Show source path", "Show the vault-relative source path.", "practice", "showSourcePath", group);
-    this.addDisplayToggle("Show source excerpt", "Show the source preview in the Source stage.", "practice", "showSourceExcerpt", group);
-    this.addDisplayToggle("Expand payload preview", "Open the exact provider payload by default. It always remains available.", "practice", "expandPayloadPreview", group);
-    this.addDisplayToggle("Show draft grounding", "Show cited segment IDs on draft cards.", "practice", "showDraftGrounding", group);
-    this.addDisplayToggle("Show draft rationale", "Show generated rationale text while reviewing drafts.", "practice", "showDraftRationale", group);
+    if (!Platform.isMobileApp) {
+      this.addDisplayToggle("Show generation stepper", "Show Source, Configure, and Review navigation steps.", "practice", "showGenerationStepper", group);
+      this.addDisplayToggle("Live agent activity", "Show safe provider events, elapsed time, and emitted reasoning status while AI work runs. Private chain-of-thought is never exposed or saved.", "practice", "showAgentActivity", group);
+      this.addDisplayToggle("Show source path", "Show the vault-relative source path.", "practice", "showSourcePath", group);
+      this.addDisplayToggle("Show source excerpt", "Show the source preview in the Source stage.", "practice", "showSourceExcerpt", group);
+      this.addDisplayToggle("Expand payload preview", "Open the exact provider payload by default. It always remains available.", "practice", "expandPayloadPreview", group);
+      this.addDisplayToggle("Show draft grounding", "Show cited segment IDs on draft cards.", "practice", "showDraftGrounding", group);
+      this.addDisplayToggle("Show draft rationale", "Show generated rationale text while reviewing drafts.", "practice", "showDraftRationale", group);
+    }
     this.addDisplayToggle("Show study progress", "Show question number and progress bar.", "practice", "showStudyProgress", group);
     this.addDisplayToggle("Keyboard study shortcuts", "Use Ctrl/Command + Enter for the current primary study action.", "practice", "enableStudyKeyboardShortcuts", group);
     this.addDisplayToggle("Focus the answer field", "Place keyboard focus in the first answer control when each desktop question opens.", "practice", "autoFocusStudyInput", group);

@@ -5,6 +5,7 @@ import {
   ClaudeCliProviderAdapter,
   CliProviderError,
   CodexCliProviderAdapter,
+  parseClaudeInstalledHelp,
   parseAgyModelCatalog,
   type CliJobFileSystem,
   type CliJobWorkspace,
@@ -108,9 +109,14 @@ test("a Codex catalog failure is non-fatal for an otherwise installed provider",
   assert.match(detection.modelCatalogDetail ?? "", /temporarily unavailable/iu);
 });
 
-test("Claude exposes installed-help aliases without launching a catalog child", async () => {
+test("Claude derives rolling aliases and every installed effort from local help", async () => {
   const runner = new QueueRunner([
     { stdout: "2.1.220\n", stderr: "", exitCode: 0 },
+    {
+      stdout: "--effort <level> (low, medium, high, xhigh, max, ultracode)\n--model <model> alias for latest (e.g. 'fable', 'opus', 'sonnet', or 'haiku') or a model's full name\n",
+      stderr: "",
+      exitCode: 0,
+    },
   ]);
   const adapter = new ClaudeCliProviderAdapter(runner, new UnusedJobFileSystem());
 
@@ -120,12 +126,23 @@ test("Claude exposes installed-help aliases without launching a catalog child", 
     "fable",
     "opus",
     "sonnet",
+    "haiku",
   ]);
   assert.ok(detection.models.every((model) =>
     model.defaultReasoningEffort === "medium"
-    && model.supportedReasoningEfforts?.join(",") === "low,medium,high,xhigh,max"));
-  assert.equal(runner.requests.length, 1);
+    && model.supportedReasoningEfforts?.join(",") === "low,medium,high,xhigh,max,ultracode"));
+  assert.deepEqual(detection.capabilities.reasoningEfforts, [
+    "low", "medium", "high", "xhigh", "max", "ultracode",
+  ]);
+  assert.equal(runner.requests.length, 2);
   assert.deepEqual(runner.requests[0]?.args, ["--version"]);
+  assert.deepEqual(runner.requests[1]?.args, ["--help"]);
+});
+
+test("Claude help parsing falls back conservatively when wording is incomplete", () => {
+  const parsed = parseClaudeInstalledHelp("Claude Code help without capability details");
+  assert.deepEqual(parsed.models.map((model) => model.id), ["fable", "opus", "sonnet"]);
+  assert.deepEqual(parsed.reasoningEfforts, ["low", "medium", "high", "xhigh", "max"]);
 });
 
 test("agy TSV models carry the reasoning variants available to their family", () => {

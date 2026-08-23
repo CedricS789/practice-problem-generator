@@ -17,6 +17,7 @@ export const CLAUDE_REASONING_EFFORTS = [
   "high",
   "xhigh",
   "max",
+  "ultracode",
 ] as const satisfies readonly ReasoningEffortV1[];
 
 export const AGY_REASONING_EFFORTS = [
@@ -61,6 +62,7 @@ export function displayReasoningEffort(value: ReasoningEffortV1): string {
   if (value === "xhigh") return "Extra high";
   if (value === "max") return "Maximum";
   if (value === "ultra") return "Ultra";
+  if (value === "ultracode") return "Ultracode";
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 

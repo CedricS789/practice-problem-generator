@@ -19,6 +19,10 @@ export {
   appendNeutralMediaManifest,
   DEFAULT_GENERATION_TIMEOUT_MS,
   GENERATION_RECOVERY_CONTEXT_FILENAME,
+  MAX_GENERATION_MEDIA_BYTES,
+  MAX_GENERATION_MEDIA_INPUTS,
+  MAX_GENERATION_PROMPT_CHARACTERS,
+  MAX_GENERATION_SCHEMA_CHARACTERS,
 } from "./base-adapter";
 export * from "./claude";
 export * from "./codex";

@@ -11,7 +11,7 @@ import type {
 import { CliProviderError } from "./errors";
 import type { ReasoningEffortV1 } from "../model";
 import { modelIdProblem } from "../model-selection";
-import { CODEX_REASONING_EFFORTS, isReasoningEffort } from "../reasoning";
+import { CODEX_REASONING_EFFORTS } from "../reasoning";
 
 const CAPABILITIES: ProviderCapabilities = {
   text: true,
@@ -69,6 +69,8 @@ export class CodexCliProviderAdapter extends BaseCliProviderAdapter {
     _timeoutMs: number,
   ): PreparedInvocation {
     const args: string[] = [
+      "--ask-for-approval",
+      "never",
       "exec",
       "--ephemeral",
       "--ignore-user-config",
@@ -122,11 +124,9 @@ function parseCodexModelCatalogResult(output: string): DetectedModelCatalog {
     const supportedReasoningEfforts = Array.isArray(value.supported_reasoning_levels)
       ? value.supported_reasoning_levels
           .map((level) => isRecord(level) ? level.effort : undefined)
-          .filter((effort): effort is ReasoningEffortV1 =>
-            isReasoningEffort(effort) && CODEX_REASONING_EFFORTS.includes(effort))
+          .filter(isCodexReasoningEffort)
       : [];
-    const defaultReasoningEffort = isReasoningEffort(value.default_reasoning_level)
-      && CODEX_REASONING_EFFORTS.includes(value.default_reasoning_level)
+    const defaultReasoningEffort = isCodexReasoningEffort(value.default_reasoning_level)
       ? value.default_reasoning_level
       : undefined;
     const label = boundedText(value.display_name, 160) ?? id;
@@ -148,6 +148,15 @@ function parseCodexModelCatalogResult(output: string): DetectedModelCatalog {
       ? { detail: `Model catalog limited to the first ${MAX_DETECTED_MODELS} safe entries.` }
       : {}),
   };
+}
+
+function isCodexReasoningEffort(
+  value: unknown,
+): value is (typeof CODEX_REASONING_EFFORTS)[number] {
+  return typeof value === "string"
+    && CODEX_REASONING_EFFORTS.includes(
+      value as (typeof CODEX_REASONING_EFFORTS)[number],
+    );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

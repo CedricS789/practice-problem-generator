@@ -9,44 +9,24 @@ import type {
   ProviderCapabilities,
 } from "./contracts";
 import type { ReasoningEffortV1 } from "../model";
-import { CLAUDE_REASONING_EFFORTS } from "../reasoning";
+import {
+  CLAUDE_REASONING_EFFORTS,
+  isReasoningEffort,
+} from "../reasoning";
+import { modelIdProblem } from "../model-selection";
 
-const CAPABILITIES: ProviderCapabilities = {
-  text: true,
-  structuredOutput: true,
-  sandboxed: true,
-  vision: "supported",
-  reasoningEfforts: CLAUDE_REASONING_EFFORTS,
-};
+const DEFAULT_CLAUDE_REASONING_EFFORTS = CLAUDE_REASONING_EFFORTS.filter(
+  (effort) => effort !== "ultracode",
+);
 
-const INSTALLED_HELP_MODEL_ALIASES = [
-  {
-    id: "fable",
-    label: "Claude Fable (latest)",
-    description: "Stable alias for the latest Claude Fable model supported by the installed CLI.",
-    defaultReasoningEffort: "medium",
-    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
-  },
-  {
-    id: "opus",
-    label: "Claude Opus (latest)",
-    description: "Stable alias for the latest Claude Opus model supported by the installed CLI.",
-    defaultReasoningEffort: "medium",
-    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
-  },
-  {
-    id: "sonnet",
-    label: "Claude Sonnet (latest)",
-    description: "Stable alias for the latest Claude Sonnet model supported by the installed CLI.",
-    defaultReasoningEffort: "medium",
-    supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS,
-  },
-] as const satisfies readonly DetectedProviderModel[];
+const DEFAULT_CLAUDE_MODEL_ALIASES = ["fable", "opus", "sonnet"] as const;
 
 export class ClaudeCliProviderAdapter extends BaseCliProviderAdapter {
   readonly id = "claude" as const;
   readonly label = "Claude";
   readonly executable: string;
+  private detectedReasoningEfforts: readonly ReasoningEffortV1[] =
+    DEFAULT_CLAUDE_REASONING_EFFORTS;
 
   constructor(
     runner: CliProcessRunner,
@@ -58,16 +38,25 @@ export class ClaudeCliProviderAdapter extends BaseCliProviderAdapter {
   }
 
   capabilities(): ProviderCapabilities {
-    return CAPABILITIES;
+    return {
+      text: true,
+      structuredOutput: true,
+      sandboxed: true,
+      vision: "supported",
+      reasoningEfforts: this.detectedReasoningEfforts,
+    };
   }
 
   protected async discoverModels(
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<DetectedModelCatalog> {
-    // The installed CLI's own --help documents these aliases. Claude does not
-    // expose a reliable prompt-free catalog command, so detection launches no
-    // additional child process.
-    return await Promise.resolve({ models: INSTALLED_HELP_MODEL_ALIASES });
+    // Claude has no prompt-free model catalog. Its local --help is authoritative
+    // for rolling aliases and effort levels, so capability drift is detected
+    // without sending a prompt or creating a provider session.
+    const result = await this.runModelCatalog(["--help"], signal);
+    const parsed = parseClaudeInstalledHelp(result.stdout || result.stderr);
+    this.detectedReasoningEfforts = parsed.reasoningEfforts;
+    return { models: parsed.models };
   }
 
   protected prepareInvocation(
@@ -92,6 +81,7 @@ export class ClaudeCliProviderAdapter extends BaseCliProviderAdapter {
       "--effort",
       reasoningEffort,
       "--safe-mode",
+      "--no-chrome",
       "--disable-slash-commands",
       "--permission-mode",
       "dontAsk",
@@ -108,5 +98,52 @@ export class ClaudeCliProviderAdapter extends BaseCliProviderAdapter {
 }
 
 export function claudeInstalledModelAliases(): readonly DetectedProviderModel[] {
-  return INSTALLED_HELP_MODEL_ALIASES;
+  return claudeModels(DEFAULT_CLAUDE_MODEL_ALIASES, DEFAULT_CLAUDE_REASONING_EFFORTS);
+}
+
+export function parseClaudeInstalledHelp(help: string): {
+  readonly models: readonly DetectedProviderModel[];
+  readonly reasoningEfforts: readonly ReasoningEffortV1[];
+} {
+  const effortClause = /--effort[\s\S]{0,300}?\(([^)]+)\)/u.exec(help)?.[1] ?? "";
+  const detectedEfforts = effortClause
+    .split(",")
+    .map((effort) => effort.trim())
+    .filter(isReasoningEffort);
+  const reasoningEfforts = CLAUDE_REASONING_EFFORTS.filter((effort) =>
+    detectedEfforts.includes(effort));
+
+  const modelSection = help.split("--model <model>")[1]?.slice(0, 700) ?? "";
+  const aliasClause = modelSection.split("or a model's full name")[0] ?? "";
+  const aliases: string[] = [];
+  for (const match of aliasClause.matchAll(/'([A-Za-z][A-Za-z0-9_-]{0,30})'/gu)) {
+    const alias = match[1];
+    if (alias !== undefined && modelIdProblem(alias) === null && !aliases.includes(alias)) {
+      aliases.push(alias);
+    }
+  }
+
+  const effectiveEfforts = reasoningEfforts.length > 0
+    ? reasoningEfforts
+    : DEFAULT_CLAUDE_REASONING_EFFORTS;
+  return {
+    models: claudeModels(
+      aliases.length > 0 ? aliases : DEFAULT_CLAUDE_MODEL_ALIASES,
+      effectiveEfforts,
+    ),
+    reasoningEfforts: effectiveEfforts,
+  };
+}
+
+function claudeModels(
+  aliases: readonly string[],
+  reasoningEfforts: readonly ReasoningEffortV1[],
+): readonly DetectedProviderModel[] {
+  return aliases.map((id) => ({
+    id,
+    label: `Claude ${id.charAt(0).toUpperCase()}${id.slice(1)} (latest)`,
+    description: `Rolling alias supported by the installed Claude CLI.`,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: reasoningEfforts,
+  }));
 }

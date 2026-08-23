@@ -104,8 +104,6 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
     await workspace.writeText("briefing.txt", prompt);
     return {
       args: [
-        "--print",
-        "Read briefing.txt in the current isolated directory, follow it exactly, and return only the JSON object required by --json-schema.",
         "--output-format",
         "stream-json",
         "--json-schema",
@@ -121,7 +119,8 @@ export class AgyCliProviderAdapter extends BaseCliProviderAdapter {
         printTimeout(timeoutMs),
         "--disable-slash-commands",
         "--new-project",
-        "--dangerously-skip-permissions",
+        "--print",
+        "Use view_file only to read briefing.txt in the current isolated directory, follow it exactly, and return only the JSON object required by --json-schema. Do not run commands, open a browser, use the network, read any other file, or perform tool-based schema validation; the CLI and caller validate the result.",
       ],
       stdin: "",
     };

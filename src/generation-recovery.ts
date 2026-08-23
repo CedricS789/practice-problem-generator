@@ -458,7 +458,8 @@ function isReasoningEffort(value: unknown): value is GenerationConfiguration["re
     || value === "high"
     || value === "xhigh"
     || value === "max"
-    || value === "ultra";
+    || value === "ultra"
+    || value === "ultracode";
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

@@ -17,7 +17,7 @@ import type {
   StructuredGenerationResult,
 } from "./contracts";
 import { CliProviderError, normalizeUnknownError } from "./errors";
-import { parseProviderOutput } from "./parse";
+import { parseProviderOutput, providerTerminalFailure } from "./parse";
 import type { ReasoningEffortV1 } from "../model";
 import { modelIdProblem } from "../model-selection";
 import { DEFAULT_AI_TIMEOUT_MS } from "../settings-values";
@@ -25,6 +25,10 @@ import { CliActivityDecoder, publishCliActivity } from "./activity";
 
 export const DEFAULT_GENERATION_TIMEOUT_MS = DEFAULT_AI_TIMEOUT_MS;
 export const GENERATION_RECOVERY_CONTEXT_FILENAME = "generation-context.json";
+export const MAX_GENERATION_PROMPT_CHARACTERS = 2_000_000;
+export const MAX_GENERATION_SCHEMA_CHARACTERS = 1_000_000;
+export const MAX_GENERATION_MEDIA_INPUTS = 200;
+export const MAX_GENERATION_MEDIA_BYTES = 256 * 1024 * 1024;
 const DETECTION_TIMEOUT_MS = 10_000;
 const MODEL_CATALOG_TIMEOUT_MS = 10_000;
 const MODEL_CATALOG_CACHE_MS = 10 * 60 * 1_000;
@@ -179,6 +183,7 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
   async generate<T>(
     request: StructuredGenerationRequest<T>,
   ): Promise<StructuredGenerationResult<T>> {
+    const requestSchemaJson = assertBoundedRequest(request);
     if (request.model !== undefined && modelIdProblem(request.model) !== null) {
       throw new CliProviderError(
         "unsupported-capability",
@@ -244,7 +249,7 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
           request.recovery.context,
         );
       }
-      const schemaJson = JSON.stringify(request.schema);
+      const schemaJson = requestSchemaJson;
       const resuming = request.recovery?.mode === "resume";
       if (
         resuming
@@ -483,17 +488,74 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     }
 
     if (result.exitCode !== 0) {
+      const providerFailure = providerTerminalFailure(result.stdout);
       throw new CliProviderError(
         "process-failed",
         `${this.label} exited without returning a structured result.`,
         {
           provider: this.id,
-          detail: conciseFailure(result),
+          detail: providerFailure ?? conciseFailure(result),
+        },
+      );
+    }
+    const providerFailure = providerTerminalFailure(result.stdout);
+    if (providerFailure !== null) {
+      throw new CliProviderError(
+        "process-failed",
+        `${this.label} reported an execution failure.`,
+        {
+          provider: this.id,
+          detail: providerFailure,
         },
       );
     }
     return result;
   }
+}
+
+function assertBoundedRequest<T>(request: StructuredGenerationRequest<T>): string {
+  if (request.prompt.length > MAX_GENERATION_PROMPT_CHARACTERS) {
+    throw new CliProviderError(
+      "unsupported-capability",
+      `The approved AI prompt exceeds the ${MAX_GENERATION_PROMPT_CHARACTERS.toLocaleString()} character safety limit. Narrow the source before generating.`,
+    );
+  }
+  let schemaJson: string;
+  try {
+    const serialized: unknown = JSON.stringify(request.schema);
+    if (typeof serialized !== "string") throw new Error("Schema is not serializable.");
+    schemaJson = serialized;
+  } catch (error) {
+    throw new CliProviderError(
+      "unsupported-capability",
+      "The structured-output schema is not valid serializable JSON.",
+      { cause: error },
+    );
+  }
+  if (schemaJson.length > MAX_GENERATION_SCHEMA_CHARACTERS) {
+    throw new CliProviderError(
+      "unsupported-capability",
+      "The structured-output schema exceeds the local safety limit.",
+    );
+  }
+  const media = request.media ?? [];
+  if (media.length > MAX_GENERATION_MEDIA_INPUTS) {
+    throw new CliProviderError(
+      "unsupported-capability",
+      `At most ${MAX_GENERATION_MEDIA_INPUTS} visual inputs can be sent in one AI job. Narrow the selection before generating.`,
+    );
+  }
+  const bytes = media.reduce((total, item) => {
+    if (item.bytes === undefined) return total;
+    return total + item.bytes.byteLength;
+  }, 0);
+  if (bytes > MAX_GENERATION_MEDIA_BYTES) {
+    throw new CliProviderError(
+      "unsupported-capability",
+      `The selected visual copies exceed the ${Math.round(MAX_GENERATION_MEDIA_BYTES / 1024 / 1024)} MB in-memory safety limit. Narrow the selection before generating.`,
+    );
+  }
+  return schemaJson;
 }
 
 export function appendNeutralMediaManifest(

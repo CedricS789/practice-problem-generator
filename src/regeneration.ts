@@ -565,7 +565,7 @@ function isSetId(value: string): boolean {
 }
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
-  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" || value === "ultra";
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" || value === "ultra" || value === "ultracode";
 }
 
 function yamlString(value: string): string {

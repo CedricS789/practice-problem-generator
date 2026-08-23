@@ -360,13 +360,15 @@ export default class PracticeLabPlugin extends Plugin {
       PRACTICE_LAB_VIEW_TYPE,
       (leaf) => new PracticeLabView(leaf, this.createViewOptions(leaf)),
     );
-    this.registerView(
-      PRACTICE_LEARNING_PATH_VIEW_TYPE,
-      (leaf) => new PracticeLearningPathView(
-        leaf,
-        this.createLearningPathViewOptions(leaf),
-      ),
-    );
+    if (!Platform.isMobileApp) {
+      this.registerView(
+        PRACTICE_LEARNING_PATH_VIEW_TYPE,
+        (leaf) => new PracticeLearningPathView(
+          leaf,
+          this.createLearningPathViewOptions(leaf),
+        ),
+      );
+    }
     this.registerView(
       PRACTICE_DASHBOARD_VIEW_TYPE,
       (leaf) => new PracticeDashboardView(leaf, this.createDashboardViewOptions())
@@ -774,126 +776,121 @@ export default class PracticeLabPlugin extends Plugin {
   }
 
   private registerCommands(): void {
-    this.addCommand({
-      id: "generate-from-selection",
-      name: "Generate from selection",
-      editorCheckCallback: (checking, editor) => {
-        const available = editor.getSelection().trim().length > 0;
-        if (!checking && available) void this.generateFrom("selection", editor.getSelection());
-        return available;
-      }
-    });
-    this.addCommand({
-      id: "generate-from-current-note",
-      name: "Generate from current note",
-      checkCallback: (checking) => {
-        const available = this.activeMarkdownFile() !== null;
-        if (!checking && available) void this.generateFrom("note");
-        return available;
-      }
-    });
-    this.addCommand({
-      id: "generate-from-current-pdf",
-      name: "Generate from current PDF",
-      checkCallback: (checking) => {
-        const file = this.activePdfFile();
-        const available = !Platform.isMobileApp && file !== null;
-        if (!checking && available && file !== null) void this.generateFromPdf(file);
-        return available;
-      }
-    });
-    this.addCommand({
-      id: "open-practice-lab",
-      name: "Open workspace",
-      callback: () => { void this.openView(); }
-    });
-    this.addCommand({
-      id: "build-guided-learning-path-from-selection",
-      name: "Build guided learning path from selection",
-      editorCheckCallback: (checking, editor) => {
-        const selection = editor.getSelection();
-        const available = !Platform.isMobileApp && selection.trim().length > 0;
-        if (!checking && available) void this.generateGuidedFrom("selection", selection);
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "build-guided-learning-path-from-current-note",
-      name: "Build guided learning path from current note",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp && this.activeMarkdownFile() !== null;
-        if (!checking && available) void this.generateGuidedFrom("note");
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "build-guided-learning-path-from-current-pdf",
-      name: "Build guided learning path from current PDF",
-      checkCallback: (checking) => {
-        const file = this.activePdfFile();
-        const available = !Platform.isMobileApp && file !== null;
-        if (!checking && available && file !== null) void this.generateGuidedFromPdf(file);
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "open-guided-learning-path",
-      name: "Open guided learning path builder",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp;
-        if (!checking && available) void this.openLearningPathView();
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "resume-guided-learning-path",
-      name: "Resume interrupted guided learning path",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp && this.learningBatchRecoveryHandle !== undefined;
-        if (!checking && available) void this.resumeLearningPathBatch();
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "discard-guided-learning-path-recovery",
-      name: "Discard interrupted guided learning path",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp && this.learningBatchRecoveryHandle !== undefined;
-        if (!checking && available) void this.requestDiscardLearningPathRecovery();
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "resume-interrupted-generation",
-      name: "Resume interrupted generation",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp
-          && this.generationRecoveryHandle !== undefined;
-        if (!checking && available) void this.requestResumeInterruptedGeneration();
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "retry-interrupted-generation",
-      name: "Retry interrupted generation from approved request",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp
-          && this.generationRecoveryHandle !== undefined
-          && this.generationRecoveryState === "failed";
-        if (!checking && available) void this.requestRetryInterruptedGeneration();
-        return available;
-      },
-    });
-    this.addCommand({
-      id: "discard-interrupted-generation",
-      name: "Discard interrupted generation",
-      checkCallback: (checking) => {
-        const available = !Platform.isMobileApp
-          && this.generationRecoveryHandle !== undefined;
-        if (!checking && available) void this.requestDiscardInterruptedGeneration();
-        return available;
-      },
-    });
+    if (!Platform.isMobileApp) {
+      this.addCommand({
+        id: "generate-from-selection",
+        name: "Generate from selection",
+        editorCheckCallback: (checking, editor) => {
+          const available = editor.getSelection().trim().length > 0;
+          if (!checking && available) void this.generateFrom("selection", editor.getSelection());
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "generate-from-current-note",
+        name: "Generate from current note",
+        checkCallback: (checking) => {
+          const available = this.activeMarkdownFile() !== null;
+          if (!checking && available) void this.generateFrom("note");
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "generate-from-current-pdf",
+        name: "Generate from current PDF",
+        checkCallback: (checking) => {
+          const file = this.activePdfFile();
+          const available = file !== null;
+          if (!checking && available && file !== null) void this.generateFromPdf(file);
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "open-practice-lab",
+        name: "Open workspace",
+        callback: () => { void this.openView(); },
+      });
+      this.addCommand({
+        id: "build-guided-learning-path-from-selection",
+        name: "Build guided learning path from selection",
+        editorCheckCallback: (checking, editor) => {
+          const selection = editor.getSelection();
+          const available = selection.trim().length > 0;
+          if (!checking && available) void this.generateGuidedFrom("selection", selection);
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "build-guided-learning-path-from-current-note",
+        name: "Build guided learning path from current note",
+        checkCallback: (checking) => {
+          const available = this.activeMarkdownFile() !== null;
+          if (!checking && available) void this.generateGuidedFrom("note");
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "build-guided-learning-path-from-current-pdf",
+        name: "Build guided learning path from current PDF",
+        checkCallback: (checking) => {
+          const file = this.activePdfFile();
+          const available = file !== null;
+          if (!checking && available && file !== null) void this.generateGuidedFromPdf(file);
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "open-guided-learning-path",
+        name: "Open guided learning path builder",
+        callback: () => { void this.openLearningPathView(); },
+      });
+      this.addCommand({
+        id: "resume-guided-learning-path",
+        name: "Resume interrupted guided learning path",
+        checkCallback: (checking) => {
+          const available = this.learningBatchRecoveryHandle !== undefined;
+          if (!checking && available) void this.resumeLearningPathBatch();
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "discard-guided-learning-path-recovery",
+        name: "Discard interrupted guided learning path",
+        checkCallback: (checking) => {
+          const available = this.learningBatchRecoveryHandle !== undefined;
+          if (!checking && available) void this.requestDiscardLearningPathRecovery();
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "resume-interrupted-generation",
+        name: "Resume interrupted generation",
+        checkCallback: (checking) => {
+          const available = this.generationRecoveryHandle !== undefined;
+          if (!checking && available) void this.requestResumeInterruptedGeneration();
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "retry-interrupted-generation",
+        name: "Retry interrupted generation from approved request",
+        checkCallback: (checking) => {
+          const available = this.generationRecoveryHandle !== undefined
+            && this.generationRecoveryState === "failed";
+          if (!checking && available) void this.requestRetryInterruptedGeneration();
+          return available;
+        },
+      });
+      this.addCommand({
+        id: "discard-interrupted-generation",
+        name: "Discard interrupted generation",
+        checkCallback: (checking) => {
+          const available = this.generationRecoveryHandle !== undefined;
+          if (!checking && available) void this.requestDiscardInterruptedGeneration();
+          return available;
+        },
+      });
+    }
     this.addCommand({
       id: "discard-saved-practice-session",
       name: "Discard saved practice session",
@@ -907,7 +904,7 @@ export default class PracticeLabPlugin extends Plugin {
     this.addCommand({
       id: "open-practice-dashboard",
       name: "Open practice dashboard",
-      callback: () => { void this.openDashboard(); }
+      callback: () => { void this.openDashboard(); },
     });
     this.addCommand({
       id: "prepare-for-offline-practice",
@@ -938,30 +935,26 @@ export default class PracticeLabPlugin extends Plugin {
   }
 
   private addEditorMenuItems(menu: Menu, editor: Editor, view: MarkdownView | MarkdownFileInfo): void {
-    if (view.file === null) return;
+    if (Platform.isMobileApp || view.file === null) return;
     const selection = editor.getSelection();
     if (selection.trim()) {
       menu.addItem((item) => item
         .setTitle("Practice Problem Generator: Generate from selection")
         .setIcon("text-select")
         .onClick(() => { void this.generateFrom("selection", selection); }));
-      if (!Platform.isMobileApp) {
-        menu.addItem((item) => item
-          .setTitle("Practice Problem Generator: Build guided path from selection")
-          .setIcon("route")
-          .onClick(() => { void this.generateGuidedFrom("selection", selection); }));
-      }
+      menu.addItem((item) => item
+        .setTitle("Practice Problem Generator: Build guided path from selection")
+        .setIcon("route")
+        .onClick(() => { void this.generateGuidedFrom("selection", selection); }));
     }
     menu.addItem((item) => item
       .setTitle("Practice Problem Generator: Generate from current note")
       .setIcon("flask-conical")
       .onClick(() => { void this.generateFrom("note"); }));
-    if (!Platform.isMobileApp) {
-      menu.addItem((item) => item
-        .setTitle("Practice Problem Generator: Build guided path from current note")
-        .setIcon("route")
-        .onClick(() => { void this.generateGuidedFrom("note"); }));
-    }
+    menu.addItem((item) => item
+      .setTitle("Practice Problem Generator: Build guided path from current note")
+      .setIcon("route")
+      .onClick(() => { void this.generateGuidedFrom("note"); }));
   }
 
   private addFileMenuItems(menu: Menu, file: TAbstractFile): void {

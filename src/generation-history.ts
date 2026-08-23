@@ -338,7 +338,8 @@ function provider(value: unknown): value is ProviderId {
 
 function reasoning(value: unknown): value is ReasoningEffort {
   return value === "low" || value === "medium" || value === "high"
-    || value === "xhigh" || value === "max" || value === "ultra";
+    || value === "xhigh" || value === "max" || value === "ultra"
+    || value === "ultracode";
 }
 
 function difficulty(value: unknown): value is Difficulty {

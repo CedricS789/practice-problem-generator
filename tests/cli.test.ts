@@ -12,6 +12,8 @@ import {
   DEFAULT_PROVIDER_ID,
   DesktopJobFileSystem,
   DesktopProcessRunner,
+  MAX_GENERATION_MEDIA_INPUTS,
+  MAX_GENERATION_PROMPT_CHARACTERS,
   appendNeutralMediaManifest,
   cancelDurableRecovery,
   createCliProviderLayer,
@@ -304,7 +306,9 @@ test("Codex uses fixed safe arguments, stdin, neutral media, and cleanup", async
   const request = runner.requests[0];
   assert.ok(request);
   assert.equal(request.executable, "codex");
-  assert.deepEqual(request.args.slice(0, 16), [
+  assert.deepEqual(request.args.slice(0, 18), [
+    "--ask-for-approval",
+    "never",
     "exec",
     "--ephemeral",
     "--ignore-user-config",
@@ -322,7 +326,7 @@ test("Codex uses fixed safe arguments, stdin, neutral media, and cleanup", async
     "--output-schema",
     "/neutral/job-1/schema.json",
   ]);
-  assert.deepEqual(request.args.slice(16), [
+  assert.deepEqual(request.args.slice(18), [
     "--model",
     "gpt-5.6",
     "--image",
@@ -376,6 +380,7 @@ test("Claude uses print, no-persistence, safe mode, schema, and scoped Read", as
     "claude-opus-4-6",
   );
   assert.ok(request.args.includes("--safe-mode"));
+  assert.ok(request.args.includes("--no-chrome"));
   assert.ok(request.args.includes("dontAsk"));
   assert.ok(request.args.includes("Read"));
   assert.ok(request.args.includes("Read(./**)"));
@@ -414,22 +419,26 @@ test("agy blocks authored media until its explicit synthetic probe passes", asyn
   assert.equal(jobs.jobs[0]?.writtenBinary.has("media-001.png"), true);
   assert.match(jobs.jobs[0]?.writtenText.get("briefing.txt") ?? "", /media-001\.png/u);
   assert.equal(runner.requests[0]?.stdin, "");
+  assert.deepEqual(runner.requests[0]?.args.slice(-2), [
+    "--print",
+    "Use view_file only to read briefing.txt in the current isolated directory, follow it exactly, and return only the JSON object required by --json-schema. Do not run commands, open a browser, use the network, read any other file, or perform tool-based schema validation; the CLI and caller validate the result.",
+  ]);
   assert.ok(runner.requests[0]?.args.includes("--sandbox"));
-  assert.ok(runner.requests[0]?.args.includes("--dangerously-skip-permissions"));
+  assert.equal(runner.requests[0]?.args.includes("--dangerously-skip-permissions"), false);
   assert.ok(runner.requests[0]?.args.includes("--new-project"));
-  assert.deepEqual(
-    runner.requests[0]?.args.slice(
-      (runner.requests[0]?.args.indexOf("--model") ?? -1) + 1,
-      (runner.requests[0]?.args.indexOf("--model") ?? -1) + 2,
-    ),
-    ["gemini-3.6-flash-low"],
-  );
   assert.deepEqual(
     runner.requests[0]?.args.slice(
       (runner.requests[0]?.args.indexOf("--mode") ?? -1) + 1,
       (runner.requests[0]?.args.indexOf("--mode") ?? -1) + 2,
     ),
     ["accept-edits"],
+  );
+  assert.deepEqual(
+    runner.requests[0]?.args.slice(
+      (runner.requests[0]?.args.indexOf("--model") ?? -1) + 1,
+      (runner.requests[0]?.args.indexOf("--model") ?? -1) + 2,
+    ),
+    ["gemini-3.6-flash-low"],
   );
   assert.equal(
     runner.requests[0]?.args[(runner.requests[0]?.args.indexOf("--effort") ?? -1) + 1],
@@ -555,6 +564,99 @@ test("malformed JSON receives exactly one schema-repair retry", async () => {
   assert.match(runner.requests[1]?.stdin ?? "", /previous response was rejected/u);
   assert.match(runner.requests[1]?.stdin ?? "", /not-json/u);
   assert.equal(jobs.jobs[0]?.cleanupCalls, 1);
+});
+
+test("provider-declared terminal failures stop without a schema-repair call", async () => {
+  const runner = new QueueRunner([{
+    stdout: JSON.stringify({
+      type: "turn.failed",
+      error: { message: "synthetic provider failure" },
+    }),
+    stderr: "",
+    exitCode: 0,
+  }]);
+  const jobs = new FakeJobFileSystem();
+  const adapter = new CodexCliProviderAdapter(runner, jobs);
+  await assert.rejects(
+    adapter.generate({ prompt: "Generate.", schema: SCHEMA, validate: validateOk }),
+    (error: unknown) =>
+      error instanceof CliProviderError
+      && error.code === "process-failed"
+      && error.detail === "synthetic provider failure",
+  );
+  assert.equal(runner.requests.length, 1);
+  assert.equal(jobs.jobs[0]?.cleanupCalls, 1);
+});
+
+test("an agy schema-error envelope with structured output receives one repair", async () => {
+  const runner = new QueueRunner([
+    {
+      stdout: JSON.stringify({
+        event: "result",
+        result: {
+          status: "ERROR",
+          error: "invalid arguments",
+          structured_output: { ok: "not-boolean" },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    },
+    {
+      stdout: JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", structured_output: { ok: true } },
+      }),
+      stderr: "",
+      exitCode: 0,
+    },
+  ]);
+  const adapter = new AgyCliProviderAdapter(runner, new FakeJobFileSystem());
+  const result = await adapter.generate<{ ok: boolean }>({
+    prompt: "Generate.",
+    schema: SCHEMA,
+    validate: validateOk,
+  });
+  assert.equal(result.attempts, 2);
+  assert.equal(result.value.ok, true);
+  assert.equal(runner.requests.length, 2);
+});
+
+test("oversized or unserializable generation inputs fail before job creation", async () => {
+  const runner = new QueueRunner([]);
+  const jobs = new FakeJobFileSystem();
+  const adapter = new CodexCliProviderAdapter(runner, jobs);
+
+  await assert.rejects(
+    adapter.generate({
+      prompt: "x".repeat(MAX_GENERATION_PROMPT_CHARACTERS + 1),
+      schema: SCHEMA,
+      validate: validateOk,
+    }),
+    /prompt exceeds/iu,
+  );
+  await assert.rejects(
+    adapter.generate({
+      prompt: "Synthetic",
+      schema: { invalid: 1n },
+      validate: validateOk,
+    }),
+    /not valid serializable JSON/iu,
+  );
+  await assert.rejects(
+    adapter.generate({
+      prompt: "Synthetic",
+      schema: SCHEMA,
+      validate: validateOk,
+      media: Array.from(
+        { length: MAX_GENERATION_MEDIA_INPUTS + 1 },
+        () => ({ bytes: new Uint8Array(), mimeType: "image/png" }),
+      ),
+    }),
+    /At most/iu,
+  );
+  assert.equal(runner.requests.length, 0);
+  assert.equal(jobs.jobs.length, 0);
 });
 
 test("agy-style diagnostic lines before the final JSON envelope are tolerated", async () => {
@@ -697,6 +799,26 @@ test("non-zero CLI exits do not trigger schema repair", async () => {
   assert.equal(jobs.jobs[0]?.cleanupCalls, 1);
 });
 
+test("non-zero JSONL exits prefer the provider's terminal error over raw event output", async () => {
+  const runner = new QueueRunner([{
+    stdout: [
+      '{"event":"init","init":{"cwd":"C:/neutral/job"}}',
+      '{"event":"result","result":{"status":"ERROR","error":"synthetic schema is unsupported"}}',
+    ].join("\n"),
+    stderr: "",
+    exitCode: 1,
+  }]);
+  const adapter = new AgyCliProviderAdapter(runner, new FakeJobFileSystem());
+  await assert.rejects(
+    adapter.generate({ prompt: "Generate.", schema: SCHEMA, validate: validateOk }),
+    (error: unknown) =>
+      error instanceof CliProviderError
+      && error.code === "process-failed"
+      && error.detail === "synthetic schema is unsupported",
+  );
+  assert.equal(runner.requests.length, 1);
+});
+
 test("temporary-job cleanup failures surface instead of being hidden", async () => {
   const adapter = new CodexCliProviderAdapter(
     new QueueRunner([{ stdout: '{"ok":true}', stderr: "", exitCode: 0 }]),
@@ -729,6 +851,11 @@ test("provider detection preserves versions and capability state", async () => {
     { stdout: "codex-cli 0.146.0\n", stderr: "", exitCode: 0 },
     { stdout: '{"models":[]}', stderr: "", exitCode: 0 },
     { stdout: "2.1.220\n", stderr: "", exitCode: 0 },
+    {
+      stdout: "--effort <level> (low, medium, high, xhigh, max)\n--model <model> alias (e.g. 'fable', 'opus', or 'sonnet') or a model's full name\n",
+      stderr: "",
+      exitCode: 0,
+    },
     { stdout: "agy version 1.1.11\n", stderr: "", exitCode: 0 },
     { stdout: "", stderr: "", exitCode: 0 },
   ]);
@@ -778,6 +905,13 @@ test("provider refresh waits for an active review and never overlaps CLI childre
         if (request.args[0] === "models") {
           assert.deepEqual(request.args, ["models"]);
           return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        if (request.args[0] === "--help") {
+          return {
+            stdout: "--effort <level> (low, medium, high, xhigh, max)\n--model <model> alias (e.g. 'fable', 'opus', or 'sonnet') or a model's full name\n",
+            stderr: "",
+            exitCode: 0,
+          };
         }
         assert.deepEqual(request.args, ["--version"]);
         return {
@@ -831,7 +965,7 @@ test("provider refresh waits for an active review and never overlaps CLI childre
   );
   assert.deepEqual(
     runner.requests.slice(1).map((request) => request.executable),
-    ["codex", "codex", "claude", "agy", "agy"],
+    ["codex", "codex", "claude", "claude", "agy", "agy"],
   );
   assert.deepEqual(
     ownedJobs.map((job) => [job.kind, job.provider]),

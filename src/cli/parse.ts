@@ -9,6 +9,50 @@ export interface ParsedAndValidated<T> {
   readonly value: T;
 }
 
+/**
+ * Detect a provider-declared terminal failure even when the CLI exits zero.
+ * Some headless CLIs use a machine-readable error envelope for policy,
+ * authentication, or model failures. Those are execution failures, not schema
+ * mistakes, and must not spend the single structured-output repair attempt.
+ */
+export function providerTerminalFailure(stdout: string): string | null {
+  const records = parseJsonRecords(stdout);
+  for (const record of [...records].reverse()) {
+    if (!isRecord(record)) continue;
+
+    if (record.event === "result" && isRecord(record.result)) {
+      const status = boundedString(record.result.status);
+      if (status !== null && status !== "SUCCESS") {
+        // Agy can return status ERROR when its own schema check rejects an
+        // otherwise present structured_output. Let the shared local validator
+        // classify that value so the single bounded repair attempt can run.
+        if ("structured_output" in record.result) return null;
+        return boundedString(record.result.error)
+          ?? `The provider reported terminal status ${status}.`;
+      }
+    }
+
+    if (record.type === "result") {
+      const subtype = boundedString(record.subtype);
+      const failedSubtype = subtype !== null
+        && /(?:error|fail|cancel|interrupt)/iu.test(subtype);
+      if (record.is_error === true || failedSubtype) {
+        return boundedString(record.error)
+          ?? boundedString(record.result)
+          ?? "The provider reported a terminal error.";
+      }
+    }
+
+    if (record.type === "turn.failed") {
+      const error = isRecord(record.error) ? record.error : {};
+      return boundedString(error.message)
+        ?? boundedString(record.message)
+        ?? "The provider turn failed.";
+    }
+  }
+  return null;
+}
+
 export function parseProviderOutput<T>(
   stdout: string,
   validate: StructuredOutputValidator<T>,
@@ -104,16 +148,7 @@ function formatIssue(issue: unknown): string {
 }
 
 function parseStreamingEnvelope(text: string): unknown {
-  const records: unknown[] = [];
-  for (const line of text.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || !trimmed.startsWith("{")) continue;
-    try {
-      records.push(JSON.parse(trimmed) as unknown);
-    } catch {
-      // JSONL diagnostics may contain non-JSON lines; ignore them here.
-    }
-  }
+  const records = parseJsonRecords(text);
 
   for (const record of [...records].reverse()) {
     if (
@@ -135,6 +170,34 @@ function parseStreamingEnvelope(text: string): unknown {
     }
   }
   return records.at(-1);
+}
+
+function parseJsonRecords(text: string): unknown[] {
+  const trimmedText = text.trim();
+  if (trimmedText.length === 0) return [];
+  try {
+    return [JSON.parse(trimmedText) as unknown];
+  } catch {
+    // Streaming providers emit one JSON object per line.
+  }
+
+  const records: unknown[] = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || !trimmed.startsWith("{")) continue;
+    try {
+      records.push(JSON.parse(trimmed) as unknown);
+    } catch {
+      // JSONL diagnostics may contain non-JSON lines; ignore them here.
+    }
+  }
+  return records;
+}
+
+function boundedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text.length === 0 ? null : text.slice(0, 2_000);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

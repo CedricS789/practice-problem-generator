@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+- Hardened Codex, Claude, and agy execution with bounded requests, installed-capability discovery, fail-fast terminal-error handling, fixed non-shell argument contracts, and least-privilege isolated jobs.
+- Hid every creation, generation, guided-path, regeneration, recovery, PDF-extraction, and media-extraction entry point on mobile while retaining offline study, saved paths, dashboards, checkpoints, and queued answer review.
+- Reduced selected-image memory pressure by retaining Obsidian's existing binary buffer instead of cloning every approved visual before its neutral job copy is written.
+- Added the complete Claude reasoning vocabulary to persisted contracts while exposing only the levels reported by the installed CLI; newly supported aliases and levels can appear without a plugin update.
+- Included the unreleased 1.2.4–1.2.9 interface fixes: unified creation modes and recovery controls, reliable mode switching, in-place guided progress, complete hover descriptions, bulk exercise-mix selection, and streamed-generation UI stability.
+
 ## 1.2.9
 
 - Stopped guided batch generation and saved-set regeneration from rebuilding their full UI on every streamed agent event.
