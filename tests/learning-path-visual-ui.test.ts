@@ -78,3 +78,24 @@ test("guided and tutor UI classes have a Border-theme-aware responsive style sur
   assert.match(styles, /var\(--background-primary\)/u);
   assert.match(styles, /var\(--interactive-accent\)/u);
 });
+
+test("map and configure responds to the Obsidian pane width without overlapping controls", () => {
+  assert.match(
+    styles,
+    /\.practice-learning-path-shell \{[\s\S]*container-name: practice-learning-path;[\s\S]*container-type: inline-size;/u,
+  );
+  assert.match(styles, /@container practice-learning-path \(max-width: 720px\)/u);
+  assert.match(styles, /@container practice-learning-path \(max-width: 560px\)/u);
+  assert.match(
+    styles,
+    /\.practice-learning-path-set-heading \{[\s\S]*display: grid;[\s\S]*grid-template-columns: auto minmax\(0, 1fr\) auto;/u,
+  );
+  assert.match(
+    styles,
+    /@container practice-learning-path \(max-width: 720px\) \{[\s\S]*\.practice-learning-path-provider-grid,[\s\S]*grid-template-columns: minmax\(0, 1fr\);/u,
+  );
+  assert.match(
+    styles,
+    /@container practice-learning-path \(max-width: 560px\) \{[\s\S]*\.practice-learning-path-card-actions \{[\s\S]*grid-column: 2;[\s\S]*\.practice-learning-path-mix-row \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) 44px;/u,
+  );
+});

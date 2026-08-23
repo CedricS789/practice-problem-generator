@@ -22,6 +22,21 @@ test("guided batch resume preserves the durable job identity in provenance", () 
   );
 });
 
+test("guided recovery inspection restores tabs without running an AI job", () => {
+  const inspectStart = controllerSource.indexOf("public async inspectRecoverableBatch()");
+  const resumeStart = controllerSource.indexOf("public async resumeRecoverableBatch(", inspectStart);
+  assert.ok(inspectStart >= 0 && resumeStart > inspectStart);
+  const inspection = controllerSource.slice(inspectStart, resumeStart);
+  assert.match(inspection, /restorePendingBatchFromRecovery\(\)/u);
+  assert.match(inspection, /presentRecoveredBatch\(\)/u);
+  assert.doesNotMatch(inspection, /runPendingBatch/u);
+
+  const restoreStart = controllerSource.indexOf("private async restorePendingBatchFromRecovery()", resumeStart);
+  const resume = controllerSource.slice(resumeStart, restoreStart);
+  assert.match(resume, /restorePendingBatchFromRecovery\(\)/u);
+  assert.match(resume, /runPendingBatch\(pending, onStatus, onActivity, true\)/u);
+});
+
 test("guided batch unload detaches only the matching active durable job", () => {
   assert.match(controllerSource, /public detachActive\(\): boolean/u);
   assert.match(

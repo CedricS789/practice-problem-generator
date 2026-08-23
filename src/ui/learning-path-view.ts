@@ -193,6 +193,7 @@ export interface LearningPathViewCallbacks {
     onStatus: (setId: string, status: LearningSetGenerationStatusV1) => void,
     onActivity: (setId: string, event: CliActivityEvent) => void,
   ) => Promise<LearningPathRecoveredBatchV1>;
+  readonly inspectRecoverableBatch?: () => Promise<LearningPathRecoveredBatchV1>;
   readonly discardRecoverableBatch?: () => Promise<boolean>;
 }
 
@@ -205,6 +206,10 @@ export interface LearningPathRecoveredBatchV1 {
     readonly configuration: GenerationConfiguration;
   }[];
   readonly generated: readonly GeneratedLearningSetPresentationV1[];
+  readonly statuses: readonly {
+    readonly setId: string;
+    readonly status: LearningSetGenerationStatusV1;
+  }[];
 }
 
 export interface LearningPathViewOptions {
@@ -352,7 +357,7 @@ export class PracticeLearningPathView extends ItemView {
   private generatedSets: GeneratedLearningSetPresentationV1[] = [];
   private approvedBySet = new Map<string, Set<string>>();
   private activeReviewSetId: string | null = null;
-  private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | null = null;
+  private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | "recovery" | null = null;
   private primarySourceChoiceBusy: SourceChoiceMode | null = null;
   private error: string | null = null;
   private recoveryAvailable: boolean;
@@ -489,6 +494,11 @@ export class PracticeLearningPathView extends ItemView {
     this.activity.clear();
     this.render();
     try {
+      if (this.options.callbacks.inspectRecoverableBatch !== undefined) {
+        this.applyRecoveredBatch(await this.options.callbacks.inspectRecoverableBatch());
+        this.stage = "review";
+        this.render();
+      }
       const result = await this.options.callbacks.resumeRecoverableBatch(
         (setId, status) => {
           this.statuses.set(setId, status);
@@ -499,21 +509,7 @@ export class PracticeLearningPathView extends ItemView {
           this.refreshBatchActivity();
         },
       );
-      this.primary = result.primary;
-      this.supporting = [...result.supporting];
-      this.blueprint = result.blueprint;
-      this.setStates = result.blueprint.draft.sets.flatMap((brief) => {
-        const entry = result.configurations.find((candidate) => candidate.setId === brief.id);
-        return entry === undefined ? [] : [this.editableSetState(brief.id, entry.configuration, false)];
-      });
-      this.generatedSets = result.generated.map((set) => ({
-        ...set,
-        exercises: set.exercises.map(editableDraft),
-      }));
-      this.approvedBySet = new Map(result.generated.map((set) => [set.setId, new Set<string>()]));
-      this.activeReviewSetId = result.generated[0]?.setId ?? null;
-      for (const set of result.generated) this.statuses.set(set.setId, { state: "review" });
-      this.recoveryAvailable = true;
+      this.applyRecoveredBatch(result);
     } catch (error) {
       this.error = errorMessage(error);
       if (this.blueprint === null) this.stage = "source";
@@ -653,11 +649,7 @@ export class PracticeLearningPathView extends ItemView {
         item.setAttribute("role", "button");
         item.setAttribute("aria-label", `Open ${label}`);
         item.setAttribute("title", `Open ${label}`);
-        const navigate = (): void => {
-          this.stage = stage;
-          this.error = null;
-          this.render();
-        };
+        const navigate = (): void => { void this.navigateToStage(stage); };
         item.addEventListener("click", navigate);
         item.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -673,9 +665,80 @@ export class PracticeLearningPathView extends ItemView {
 
   private stageAvailable(stage: Stage): boolean {
     if (stage === "source") return true;
-    if (stage === "map") return this.blueprint !== null;
-    if (stage === "review") return this.statuses.size > 0 || this.generatedSets.length > 0;
+    const recoveryCanRestore = this.recoveryAvailable
+      && this.options.callbacks.inspectRecoverableBatch !== undefined;
+    if (stage === "map") return this.blueprint !== null || recoveryCanRestore;
+    if (stage === "review") {
+      return this.statuses.size > 0 || this.generatedSets.length > 0 || recoveryCanRestore;
+    }
     return this.savedWorkspace !== null;
+  }
+
+  private async navigateToStage(stage: Stage): Promise<void> {
+    if (this.busy !== null || stage === this.stage) return;
+    const hasLocalState = stage === "source"
+      || (stage === "map" && this.blueprint !== null)
+      || (stage === "review" && (this.statuses.size > 0 || this.generatedSets.length > 0))
+      || (stage === "saved" && this.savedWorkspace !== null);
+    if (hasLocalState) {
+      this.stage = stage;
+      this.error = null;
+      this.render();
+      return;
+    }
+    if (
+      (stage === "map" || stage === "review")
+      && this.recoveryAvailable
+      && this.options.callbacks.inspectRecoverableBatch !== undefined
+    ) {
+      await this.restoreRecoverableWorkspace(stage);
+    }
+  }
+
+  private async restoreRecoverableWorkspace(stage: "map" | "review"): Promise<void> {
+    const inspect = this.options.callbacks.inspectRecoverableBatch;
+    if (inspect === undefined || this.busy !== null) return;
+    this.busy = "recovery";
+    this.error = null;
+    this.render();
+    try {
+      this.applyRecoveredBatch(await inspect());
+      this.stage = stage;
+    } catch (error) {
+      this.error = `The saved guided-path workspace could not be restored. ${errorMessage(error)}`;
+      this.stage = "source";
+    } finally {
+      this.busy = null;
+      this.render();
+    }
+  }
+
+  private applyRecoveredBatch(result: LearningPathRecoveredBatchV1): void {
+    const existingStates = new Map(this.setStates.map((state) => [state.id, state]));
+    const existingGenerated = new Map(this.generatedSets.map((set) => [set.setId, set]));
+    const existingApprovals = this.approvedBySet;
+    this.primary = result.primary;
+    this.supporting = [...result.supporting];
+    this.blueprint = result.blueprint;
+    this.setStates = result.blueprint.draft.sets.flatMap((brief) => {
+      const current = existingStates.get(brief.id);
+      if (current !== undefined) return [current];
+      const entry = result.configurations.find((candidate) => candidate.setId === brief.id);
+      return entry === undefined ? [] : [this.editableSetState(brief.id, entry.configuration, false)];
+    });
+    this.generatedSets = result.generated.map((set) => existingGenerated.get(set.setId) ?? ({
+      ...set,
+      exercises: set.exercises.map(editableDraft),
+    }));
+    this.approvedBySet = new Map(result.generated.map((set) => [
+      set.setId,
+      existingApprovals.get(set.setId) ?? new Set<string>(),
+    ]));
+    this.statuses = new Map(result.statuses.map((entry) => [entry.setId, entry.status]));
+    this.activeReviewSetId = this.generatedSets.some((set) => set.setId === this.activeReviewSetId)
+      ? this.activeReviewSetId
+      : (this.generatedSets[0]?.setId ?? null);
+    this.recoveryAvailable = true;
   }
 
   private stageUnavailableReason(stage: Stage, label: string): string {

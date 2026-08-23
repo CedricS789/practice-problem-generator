@@ -1484,6 +1484,8 @@ export default class PracticeLabPlugin extends Plugin {
         },
         resumeRecoverableBatch: async (onStatus, onActivity) =>
           this.learningPathController.resumeRecoverableBatch(onStatus, onActivity),
+        inspectRecoverableBatch: async () =>
+          this.learningPathController.inspectRecoverableBatch(),
         discardRecoverableBatch: async () => this.requestDiscardLearningPathRecovery(),
       },
     };

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.12
+
+- Restored recoverable Guided-path maps and queue state when their tabs are opened, without starting or retrying an AI generation job.
+- Kept completed Guided-path steps freely navigable after returning to Source & intent, including after a view or plugin reload.
+- Made Map & configure respond to the actual Obsidian pane width, stacking set actions, provider controls, and exercise-mix sliders before they can overlap.
+
 ## 1.3.11
 
 - Fixed recoverable Guided-path helpers exiting immediately in Obsidian builds that do not support `ELECTRON_RUN_AS_NODE`.

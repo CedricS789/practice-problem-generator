@@ -171,17 +171,28 @@ test("guided creation steps navigate backward and forward once their work exists
   const navigation = guidedViewSource.slice(navigationStart, navigationEnd);
   assert.match(navigation, /const available = this\.stageAvailable\(stage\)/u);
   assert.match(navigation, /else if \(available && this\.busy === null\)/u);
-  assert.match(navigation, /this\.stage = stage/u);
+  assert.match(navigation, /this\.navigateToStage\(stage\)/u);
   assert.match(navigation, /item\.addEventListener\("click", navigate\)/u);
   assert.match(navigation, /event\.key !== "Enter" && event\.key !== " "/u);
-  assert.match(navigation, /stage === "map"\) return this\.blueprint !== null/u);
+  assert.match(navigation, /const recoveryCanRestore = this\.recoveryAvailable/u);
+  assert.match(navigation, /stage === "map"\) return this\.blueprint !== null \|\| recoveryCanRestore/u);
   assert.match(
     navigation,
-    /stage === "review"\) return this\.statuses\.size > 0 \|\| this\.generatedSets\.length > 0/u,
+    /return this\.statuses\.size > 0 \|\| this\.generatedSets\.length > 0 \|\| recoveryCanRestore/u,
   );
   assert.match(navigation, /return this\.savedWorkspace !== null/u);
+  assert.match(navigation, /private async restoreRecoverableWorkspace\(stage: "map" \| "review"\)/u);
+  assert.match(navigation, /this\.applyRecoveredBatch\(await inspect\(\)\)/u);
   assert.doesNotMatch(navigation, /stage === "source" && this\.stage !== "source"/u);
   assert.match(stylesSource, /\.practice-learning-path-steps li\.is-clickable:focus-visible/u);
+});
+
+test("restoring guided tabs reads the durable workspace without starting generation", () => {
+  assert.match(guidedViewSource, /readonly inspectRecoverableBatch\?: \(\) => Promise<LearningPathRecoveredBatchV1>/u);
+  assert.match(mainSource, /inspectRecoverableBatch: async \(\) =>\s+this\.learningPathController\.inspectRecoverableBatch\(\)/u);
+  assert.match(guidedViewSource, /this\.statuses = new Map\(result\.statuses/u);
+  assert.match(guidedViewSource, /this\.generatedSets = result\.generated\.map/u);
+  assert.match(guidedViewSource, /this\.stage = stage/u);
 });
 
 test("mode switching reuses the current leaf and carries an approved source", () => {

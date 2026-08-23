@@ -76,6 +76,7 @@ import type {
   LearningBlueprintPresentationV1,
   LearningPathSaveRequestV1,
   LearningPayloadPreviewV1,
+  LearningPathRecoveredBatchV1,
   LearningSetGenerationStatusV1,
   LearningSetPayloadPreviewV1,
 } from "./ui/learning-path-view";
@@ -337,17 +338,26 @@ export class LearningPathController {
     return this.presentGeneratedSets(pending.generated);
   }
 
+  public async inspectRecoverableBatch(): Promise<LearningPathRecoveredBatchV1> {
+    this.assertDesktop();
+    await this.restorePendingBatchFromRecovery();
+    return this.presentRecoveredBatch();
+  }
+
   public async resumeRecoverableBatch(
     onStatus: (setId: string, status: LearningSetGenerationStatusV1) => void,
     onActivity: (setId: string, event: CliActivityEvent) => void,
-  ): Promise<{
-    readonly primary: SourcePresentation;
-    readonly supporting: readonly SourcePresentation[];
-    readonly blueprint: LearningBlueprintPresentationV1;
-    readonly configurations: readonly PracticeSetConfigurationV1[];
-    readonly generated: readonly GeneratedLearningSetPresentationV1[];
-  }> {
+  ): Promise<LearningPathRecoveredBatchV1> {
     this.assertDesktop();
+    await this.restorePendingBatchFromRecovery();
+    const pending = this.pendingBatch;
+    if (pending === undefined) throw new Error("There is no recoverable guided-path batch.");
+    for (const entry of recoveryStatuses(pending.recovery)) onStatus(entry.setId, entry.status);
+    await this.runPendingBatch(pending, onStatus, onActivity, true);
+    return this.presentRecoveredBatch();
+  }
+
+  private async restorePendingBatchFromRecovery(): Promise<void> {
     const handle = this.recoveryHandle;
     if (handle === undefined) throw new Error("There is no recoverable guided-path batch.");
     const cli = await import("./cli");
@@ -390,13 +400,21 @@ export class LearningPathController {
       })),
       generated: recovery.completedDrafts.map((entry) => entry.draft),
     };
-    await this.runPendingBatch(this.pendingBatch, onStatus, onActivity, true);
+  }
+
+  private presentRecoveredBatch(): LearningPathRecoveredBatchV1 {
+    const pendingBlueprint = this.pendingBlueprint;
+    const pendingBatch = this.pendingBatch;
+    if (pendingBlueprint === undefined || pendingBatch === undefined) {
+      throw new Error("There is no recovered guided-path workspace to present.");
+    }
     return {
-      primary: context.primaryPresentation,
-      supporting: context.supportingPresentations,
-      blueprint: context.blueprint,
-      configurations: context.configurations,
-      generated: this.presentGeneratedSets(this.pendingBatch.generated),
+      primary: pendingBlueprint.primaryPresentation,
+      supporting: pendingBlueprint.supportingPresentations,
+      blueprint: pendingBatch.blueprint,
+      configurations: pendingBatch.configurations,
+      generated: this.presentGeneratedSets(pendingBatch.generated),
+      statuses: recoveryStatuses(pendingBatch.recovery),
     };
   }
 
@@ -1141,6 +1159,29 @@ async function preparedVisualsFromSources(
     });
   }
   return prepared;
+}
+
+function recoveryStatuses(
+  recovery: GenerationBatchRecoveryV1,
+): LearningPathRecoveredBatchV1["statuses"] {
+  return recovery.queue.map((entry) => {
+    let status: LearningSetGenerationStatusV1;
+    if (entry.status === "completed") {
+      status = { state: "review" };
+    } else if (entry.status === "running") {
+      status = { state: "generating", message: "The local agent can be reattached when you resume." };
+    } else if (entry.status === "failed") {
+      status = {
+        state: "failed",
+        message: entry.lastError ?? "Generation stopped before completing this set.",
+      };
+    } else if (entry.status === "cancelled") {
+      status = { state: "failed", message: "Generation was cancelled before completing this set." };
+    } else {
+      status = { state: "queued" };
+    }
+    return { setId: entry.setId, status };
+  });
 }
 
 function errorMessage(error: unknown): string {

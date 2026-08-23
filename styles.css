@@ -3728,6 +3728,8 @@ button.practice-lab-heatmap-day.is-future {
 .practice-learning-path-shell {
   width: min(100%, var(--practice-lab-content-width));
   margin-inline: auto;
+  container-name: practice-learning-path;
+  container-type: inline-size;
 }
 
 .practice-learning-path-source-icon {
@@ -4332,6 +4334,8 @@ button.practice-learning-path-mode-card {
 }
 
 .practice-learning-path-set-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   margin-bottom: var(--size-4-3);
 }
@@ -4339,8 +4343,14 @@ button.practice-learning-path-mode-card {
 .practice-learning-path-set-heading > div:nth-child(2) {
   display: grid;
   min-width: 0;
-  flex: 1 1 auto;
   gap: var(--size-2-2);
+}
+
+.practice-learning-path-set-heading > *,
+.practice-learning-path-card-heading > *,
+.practice-learning-path-aspect-chips > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .practice-learning-path-set-order {
@@ -4828,6 +4838,117 @@ button.practice-learning-path-mode-card {
   .practice-lab-tutor-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+/* Obsidian panes can be narrow inside a wide desktop window. These component
+   queries keep Guided path responsive to the pane itself, not the viewport. */
+@container practice-learning-path (max-width: 720px) {
+  .practice-learning-path-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .practice-learning-path-steps li:nth-child(2) {
+    border-right: 0;
+  }
+
+  .practice-learning-path-steps li:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--practice-lab-border);
+  }
+
+  .practice-learning-path-provider-grid,
+  .practice-source-choice-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-learning-path-recovery,
+  .practice-learning-path-review-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .practice-learning-path-recovery .practice-learning-path-actions {
+    justify-content: flex-start;
+  }
+}
+
+@container practice-learning-path (max-width: 560px) {
+  .practice-learning-path-steps li {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: var(--size-4-2);
+    font-size: var(--font-ui-smaller);
+  }
+
+  .practice-learning-path-section {
+    padding: var(--size-4-3);
+  }
+
+  .practice-learning-path-source-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .practice-source-summary-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .practice-learning-path-visual-toolbar,
+  .practice-learning-path-actions,
+  .practice-lab-tutor-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .practice-learning-path-gif-default {
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .practice-learning-path-gif-default select,
+  .practice-learning-path-visual-toolbar button,
+  .practice-learning-path-actions button,
+  .practice-lab-tutor-actions button {
+    width: 100%;
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .practice-learning-path-actions.is-sticky {
+    position: static;
+  }
+
+  .practice-learning-path-set-heading {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .practice-learning-path-card-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .practice-learning-path-card-actions {
+    grid-column: 2;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .practice-learning-path-set-compact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-learning-path-mix-row {
+    grid-template-columns: minmax(0, 1fr) 44px;
+    gap: var(--size-2-2) var(--size-4-2);
+  }
+
+  .practice-learning-path-mix-row input[type="range"] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .practice-learning-path-mix-row output {
+    grid-column: 2;
+    grid-row: 1;
   }
 }
 
