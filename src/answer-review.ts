@@ -144,7 +144,7 @@ export const answerReviewV1JsonSchema = {
       const: ANSWER_REVIEW_SCHEMA_VERSION,
     },
     requestId: ID_SCHEMA,
-    verdict: { enum: ["incorrect", "partial", "correct"] },
+    verdict: { type: "string", enum: ["incorrect", "partial", "correct"] },
     feedback: { type: "string", minLength: 1, maxLength: 1_200 },
     criterionResults: {
       type: "array",
@@ -161,13 +161,12 @@ export const answerReviewV1JsonSchema = {
         ],
         properties: {
           criterionId: ID_SCHEMA,
-          state: { enum: ["met", "partial", "missed"] },
+          state: { type: "string", enum: ["met", "partial", "missed"] },
           feedback: { type: "string", minLength: 1, maxLength: 500 },
           sourceSegmentIds: {
             type: "array",
             minItems: 1,
             maxItems: 64,
-            uniqueItems: true,
             items: ID_SCHEMA,
           },
         },
@@ -289,6 +288,9 @@ export function validateAnswerReviewOutput(
     const resultLatexProblem = latexMarkupProblem(result.feedback);
     if (resultLatexProblem !== null) {
       errors.push(`/criterionResults/${index}/feedback: ${resultLatexProblem}`);
+    }
+    if (new Set(result.sourceSegmentIds).size !== result.sourceSegmentIds.length) {
+      errors.push(`/criterionResults/${index}/sourceSegmentIds: source segment IDs must be unique`);
     }
     for (const segmentId of result.sourceSegmentIds) {
       if (!segmentIds.has(segmentId)) {

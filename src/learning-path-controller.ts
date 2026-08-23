@@ -6,6 +6,7 @@ import type {
   DurableProcessHandle,
   MediaInput,
 } from "./cli/contracts";
+import { formatCliErrorForUi } from "./cli/errors";
 import type { PracticeBankRepository } from "./bank-repository";
 import {
   GENERATION_BATCH_RECOVERY_FILENAME,
@@ -1142,7 +1143,7 @@ async function preparedVisualsFromSources(
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return formatCliErrorForUi(error, "The guided generation step failed.");
 }
 
 function cliErrorCode(error: unknown): string | undefined {

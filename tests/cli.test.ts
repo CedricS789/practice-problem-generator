@@ -26,6 +26,7 @@ import {
   appendNeutralMediaManifest,
   cancelDurableRecovery,
   createCliProviderLayer,
+  formatCliErrorForUi,
   parseProviderOutput,
   removeDurableRecovery,
   resolveSpawnTarget,
@@ -827,6 +828,53 @@ test("non-zero JSONL exits prefer the provider's terminal error over raw event o
       && error.detail === "synthetic schema is unsupported",
   );
   assert.equal(runner.requests.length, 1);
+});
+
+test("Codex error envelopes preserve the actionable API reason", async () => {
+  const runner = new QueueRunner([{
+    stdout: JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_json_schema",
+        message: "Synthetic provider schema is unsupported.",
+      },
+      status: 400,
+    }),
+    stderr: "",
+    exitCode: 1,
+  }]);
+  const adapter = new CodexCliProviderAdapter(runner, new FakeJobFileSystem());
+  await assert.rejects(
+    adapter.generate({ prompt: "Generate.", schema: SCHEMA, validate: validateOk }),
+    (error: unknown) =>
+      error instanceof CliProviderError
+      && error.code === "process-failed"
+      && error.detail === "Synthetic provider schema is unsupported. (invalid_json_schema)",
+  );
+});
+
+test("provider error presentation is bounded, actionable, and path-safe", () => {
+  const message = formatCliErrorForUi(
+    new CliProviderError(
+      "process-failed",
+      "Codex exited without returning a structured result.",
+      {
+        provider: "codex",
+        detail: JSON.stringify({
+          error: {
+            code: "invalid_json_schema",
+            message: "Invalid schema in C:\\Users\\person\\AppData\\Local\\Temp\\practice-lab-job\\schema.json.",
+          },
+        }),
+      },
+    ),
+    "Generation failed.",
+  );
+  assert.match(message, /Invalid schema/iu);
+  assert.match(message, /update or reload the plugin/iu);
+  assert.doesNotMatch(message, /Users\\person|practice-lab-job/iu);
+  assert.ok(message.length < 1_000);
 });
 
 test("temporary-job cleanup failures surface instead of being hidden", async () => {

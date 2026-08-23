@@ -8,6 +8,7 @@ import {
 } from "obsidian";
 
 import type { CliActivityEvent } from "../cli/contracts";
+import { formatCliErrorForUi } from "../cli/errors";
 import {
   balanceExerciseTypes,
   copyExerciseTypePercentages,
@@ -852,5 +853,5 @@ export class SavedSetGenerationModal extends Modal {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return formatCliErrorForUi(error, "The requested generation step failed.");
 }

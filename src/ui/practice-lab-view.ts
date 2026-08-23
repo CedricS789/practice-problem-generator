@@ -15,6 +15,7 @@ import {
 } from "../answer-review";
 import type { DetectedVisual, OcclusionMaskCandidate } from "../visuals";
 import type { CliActivityEvent, CliActivityPhase } from "../cli/contracts";
+import { formatCliErrorForUi } from "../cli/errors";
 import {
   displayReasoningEffort,
   reasoningEffortDescription,
@@ -101,6 +102,13 @@ import {
   applyHoverDescriptions,
   installHoverDescriptions,
 } from "./hover-descriptions";
+import { renderCreationModeSwitch as renderSharedCreationModeSwitch } from "./creation-mode-switch";
+import {
+  renderSourceChoices,
+  renderSourceSummaryCard,
+  sourceModeLabel,
+  type SourceChoiceMode,
+} from "./source-picker";
 import { OcclusionEditor } from "./occlusion-editor";
 import {
   acceptAllValidOcclusions,
@@ -1129,45 +1137,25 @@ export class PracticeLabView extends ItemView {
 
   private renderCreationModeSwitch(container: HTMLElement): void {
     if (Platform.isMobileApp || this.options.callbacks.openGuidedLearningPath === undefined) return;
-    const switcher = container.createDiv({
-      cls: "practice-creation-mode-switch",
-      attr: {
-        role: "group",
-        "aria-label": "Practice creation mode",
-      },
-    });
-    const quick = switcher.createEl("button", {
-      cls: "is-selected",
-      text: "Quick set",
-      attr: {
-        type: "button",
-        "aria-pressed": "true",
-        title: "Create one configurable practice set from the selected source.",
-      },
-    });
-    quick.disabled = true;
-    const guided = switcher.createEl("button", {
-      text: "Guided path",
-      attr: {
-        type: "button",
-        "aria-pressed": "false",
-        title: "Create a prerequisite-aware sequence of tutor lessons and practice sets.",
-      },
-    });
     const switchBlocked = this.stage === "review"
       || this.stage === "study"
       || this.job.state === "running"
       || this.job.state === "cancelling";
-    guided.disabled = switchBlocked;
-    if (switchBlocked) {
-      guided.title = this.stage === "study"
-        ? "Finish or leave the current practice session before changing creation mode."
-        : "Finish the current generation or draft review before changing creation mode.";
-    }
-    guided.addEventListener("click", () => {
-      if (!guided.disabled) {
+    renderSharedCreationModeSwitch(container, {
+      active: "quick",
+      quickDisabled: true,
+      guidedDisabled: switchBlocked,
+      ...(switchBlocked
+        ? {
+            guidedDisabledReason: this.stage === "study"
+              ? "Finish or leave the current practice session before changing creation mode."
+              : "Finish the current generation or draft review before changing creation mode.",
+          }
+        : {}),
+      onQuick: () => undefined,
+      onGuided: () => {
         void this.options.callbacks.openGuidedLearningPath?.(this.source);
-      }
+      },
     });
   }
 
@@ -1234,19 +1222,20 @@ export class PracticeLabView extends ItemView {
       attr: { "aria-label": "Practice generation steps" },
     });
     const definitions: ReadonlyArray<readonly [Exclude<MainStage, "study">, string]> = [
-      ["source", "1. Source"],
-      ["configure", "2. Configure"],
-      ["review", "3. Review"],
+      ["source", "Source"],
+      ["configure", "Configure"],
+      ["review", "Review"],
     ];
-    for (const [stage, label] of definitions) {
+    for (const [index, [stage, label]] of definitions.entries()) {
       const button = steps.createEl("button", {
-        text: label,
         cls: this.stage === stage ? "is-active" : "",
         attr: {
           type: "button",
           "aria-current": this.stage === stage ? "step" : "false",
         },
       });
+      button.createSpan({ cls: "practice-step-number", text: String(index + 1) });
+      button.createSpan({ text: label });
       const unavailable = stage === "configure" ? this.source === null : stage === "review" ? this.drafts.length === 0 : false;
       button.disabled = unavailable;
       button.addEventListener("click", () => {
@@ -1257,50 +1246,41 @@ export class PracticeLabView extends ItemView {
   }
 
   private renderSource(container: HTMLElement): void {
-    const top = container.createDiv({ cls: "practice-lab-section-heading" });
-    top.createEl("h3", { text: "Choose the source" });
-    top.createEl("p", {
-      text: "Practice Problem Generator reads an active selection, note, or explicit PDF page range. Source material is never rewritten.",
+    const section = container.createEl("section", {
+      cls: "practice-learning-path-section practice-source-stage",
     });
-
+    const top = section.createDiv({ cls: "practice-learning-path-section-heading" });
+    top.createEl("h3", { text: "Primary source" });
+    top.createEl("p", {
+      text: "Choose exactly what this set may use. Source material is read only and never rewritten.",
+    });
+    const availableModes = new Set<SourceChoiceMode>();
     if (this.options.callbacks.requestSource !== undefined) {
-      const sourceButtons = container.createDiv({ cls: "practice-lab-button-row" });
-      new ButtonComponent(sourceButtons)
-        .setIcon("text-select")
-        .setButtonText(
-          this.sourceRequestMode === "selection"
-            ? "Loading selection…"
-            : "Use editor selection",
-        )
-        .setDisabled(this.sourceRequestMode !== null)
-        .onClick(() => void this.requestSource("selection"));
-      new ButtonComponent(sourceButtons)
-        .setIcon("file-text")
-        .setButtonText(
-          this.sourceRequestMode === "note"
-            ? "Loading note…"
-            : "Use current note",
-        )
-        .setDisabled(this.sourceRequestMode !== null)
-        .onClick(() => void this.requestSource("note"));
+      availableModes.add("note");
+      availableModes.add("selection");
     }
     if (this.options.callbacks.requestPdfSource !== undefined) {
-      const sourceButtons = container.querySelector<HTMLElement>(
-        ".practice-lab-button-row",
-      ) ?? container.createDiv({ cls: "practice-lab-button-row" });
-      new ButtonComponent(sourceButtons)
-        .setIcon("file-scan")
-        .setButtonText(
-          this.sourceRequestMode === "pdf"
-            ? "Loading PDF…"
-            : "Use active PDF",
-        )
-        .setDisabled(this.sourceRequestMode !== null)
-        .onClick(() => void this.requestPdfSource());
+      availableModes.add("pdf");
+    }
+    renderSourceChoices(section, {
+      availableModes,
+      busyMode: this.sourceRequestMode,
+      disabled: this.sourceRequestMode !== null,
+      onChoose: (mode) => {
+        if (mode === "pdf") void this.requestPdfSource();
+        else void this.requestSource(mode);
+      },
+    });
+
+    if (this.source !== null) {
+      section.createEl("p", {
+        cls: "practice-source-replace-note",
+        text: "Choosing another option replaces this source and clears the unsaved configuration for it.",
+      });
     }
 
     if (this.sourceRequestMode !== null) {
-      const status = container.createDiv({
+      const status = section.createDiv({
         cls: "practice-lab-source-loading",
         attr: { role: "status", "aria-live": "polite" },
       });
@@ -1314,69 +1294,47 @@ export class PracticeLabView extends ItemView {
     }
 
     if (this.source === null) {
-      this.renderEmptyState(
-        container,
-        "No source loaded",
-        "Open a note or PDF, then choose the current note, an editor selection, or a PDF page range.",
-        "file-search",
-      );
+      const empty = section.createDiv({ cls: "practice-source-empty-inline" });
+      const emptyIcon = empty.createSpan();
+      setIcon(emptyIcon, "file-search");
+      empty.createSpan({
+        text: "No source is loaded yet. Open a note or PDF, then choose one option above.",
+      });
       return;
     }
 
-    const sourceCard = container.createDiv({ cls: "practice-lab-source-card" });
-    const badge = sourceCard.createSpan({
-      cls: "practice-lab-badge",
-      text: this.source.mode === "selection"
-        ? "Editor selection"
-        : this.source.mode === "pdf" ? "PDF pages" : "Current note",
-    });
-    badge.setAttribute("aria-label", `Source mode: ${badge.textContent ?? ""}`);
-    sourceCard.createEl("h4", { text: this.source.title });
-    if (this.displayPreferences.practice.showSourcePath) {
-      sourceCard.createDiv({
-        cls: "practice-lab-path",
-        text: this.source.path,
-      });
-    }
-    if (this.source.detail !== undefined) {
-      sourceCard.createDiv({
-        cls: "practice-lab-source-detail",
-        text: this.source.detail,
-      });
-    }
-    if (this.displayPreferences.practice.showSourceExcerpt) {
-      sourceCard.createEl("p", {
-        cls: "practice-lab-excerpt",
-        text: this.source.excerpt,
-      });
-    }
-    sourceCard.createDiv({
-      cls: "practice-lab-source-meta",
-      text: `${this.source.characterCount.toLocaleString()} characters`,
+    renderSourceSummaryCard(section, this.source, {
+      badge: sourceModeLabel(this.source),
+      showPath: this.displayPreferences.practice.showSourcePath,
+      showExcerpt: this.displayPreferences.practice.showSourceExcerpt,
     });
 
-    const visualHeading = container.createDiv({ cls: "practice-lab-section-heading" });
-    visualHeading.createEl("h4", { text: "Detected visuals" });
-    visualHeading.createEl("p", {
+    const visualHeading = section.createDiv({ cls: "practice-source-subheading" });
+    const visualCopy = visualHeading.createDiv();
+    visualCopy.createEl("strong", { text: "Detected visuals" });
+    visualCopy.createEl("p", {
       text: "Select only visuals that should be sent. GIFs use your default frame automatically; videos and remote images still require explicit review.",
     });
     if (this.source.visuals.length === 0) {
-      container.createEl("p", {
-        cls: "practice-lab-muted",
+      section.createEl("p", {
+        cls: "practice-lab-muted practice-learning-path-visual-empty",
         text: this.source.mode === "pdf"
           ? "No separate visual was selected. PDF text is page-grounded; embedded page images are not uploaded automatically."
           : "No supported visuals were detected in this source.",
       });
     } else {
-      const bulkControls = container.createDiv({
-        cls: "practice-lab-visual-bulk-controls",
+      const bulkControls = section.createDiv({
+        cls: "practice-learning-path-visual-toolbar practice-lab-visual-bulk-controls",
       });
       const defaultLabel = bulkControls.createEl("label", {
-        cls: "practice-lab-gif-default",
+        cls: "practice-learning-path-gif-default practice-lab-gif-default",
       });
       defaultLabel.createSpan({ text: "Default GIF frame" });
       const defaultSelect = defaultLabel.createEl("select", {
-        attr: { "aria-label": "Default GIF frame" },
+        attr: {
+          "aria-label": "Default GIF frame for newly selected animations",
+          "aria-description": "Select all images uses this frame automatically. You can still override an individual GIF.",
+        },
       });
       for (const position of ["first", "middle", "last"] as const) {
         defaultSelect.createEl("option", {
@@ -1397,22 +1355,27 @@ export class PracticeLabView extends ItemView {
       });
       new ButtonComponent(bulkControls)
         .setIcon("list-checks")
-        .setButtonText(this.visualSelectionBusy ? "Selecting…" : "Select all images")
+        .setButtonText(this.visualSelectionBusy ? "Updating images…" : "Select all images")
+        .setTooltip("Select every available local image. GIFs use the configured default unless you choose a different frame for that GIF.")
         .setDisabled(this.visualSelectionBusy)
         .onClick(() => void this.selectAllImages());
       new ButtonComponent(bulkControls)
-        .setIcon("x")
-        .setButtonText("Clear selection")
+        .setIcon("square-x")
+        .setButtonText("Deselect all")
+        .setTooltip("Remove every visual from the generation payload without changing any source file.")
         .setDisabled(
           this.visualSelectionBusy
             || !this.source.visuals.some((visual) => visual.selected),
         )
         .onClick(() => this.clearVisualSelection());
       bulkControls.createSpan({
-        cls: "practice-lab-muted",
-        text: `${selectedVisualIds(this.source).length} selected`,
+        cls: "practice-learning-path-visual-count",
+        text: `${selectedVisualIds(this.source).length} of ${this.source.visuals.length} selected`,
+        attr: { "aria-live": "polite" },
       });
-      const visualList = container.createDiv({ cls: "practice-lab-visual-grid" });
+      const visualList = section.createDiv({
+        cls: "practice-lab-visual-grid practice-source-visual-grid",
+      });
       for (const visual of this.source.visuals) this.renderVisualCard(visualList, visual);
     }
 
@@ -5514,9 +5477,7 @@ export class PracticeLabView extends ItemView {
   }
 
   private errorMessage(error: unknown, fallback: string): string {
-    return error instanceof Error && error.message.trim().length > 0
-      ? error.message
-      : fallback;
+    return formatCliErrorForUi(error, fallback);
   }
 }
 

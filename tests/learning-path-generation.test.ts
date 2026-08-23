@@ -285,11 +285,49 @@ function draftFor(payload: PracticeSetPayloadV1): PracticeSetDraftV1 {
   };
 }
 
+function schemaContainsKey(value: unknown, key: string): boolean {
+  if (Array.isArray(value)) return value.some((entry) => schemaContainsKey(entry, key));
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return key in record || Object.values(record).some((entry) => schemaContainsKey(entry, key));
+}
+
+function objectSchemasWithOptionalProperties(
+  value: unknown,
+  path = "$",
+): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => objectSchemasWithOptionalProperties(entry, `${path}/${index}`));
+  }
+  if (typeof value !== "object" || value === null) return [];
+  const record = value as Record<string, unknown>;
+  const failures: string[] = [];
+  if (
+    record.type === "object"
+    && typeof record.properties === "object"
+    && record.properties !== null
+    && !Array.isArray(record.properties)
+  ) {
+    const properties = Object.keys(record.properties);
+    const required = new Set(Array.isArray(record.required) ? record.required : []);
+    const missing = properties.filter((property) => !required.has(property));
+    if (missing.length > 0) failures.push(`${path}: ${missing.join(", ")}`);
+  }
+  for (const [key, entry] of Object.entries(record)) {
+    failures.push(...objectSchemasWithOptionalProperties(entry, `${path}/${key}`));
+  }
+  return failures;
+}
+
 test("learning blueprint and set schemas are strict draft-07 provider contracts", () => {
   assert.equal(learningBlueprintDraftV1JsonSchema.$schema, "http://json-schema.org/draft-07/schema#");
   assert.equal(practiceSetDraftV1JsonSchema.$schema, "http://json-schema.org/draft-07/schema#");
   assert.equal(learningBlueprintDraftV1JsonSchema.additionalProperties, false);
   assert.equal(practiceSetDraftV1JsonSchema.additionalProperties, false);
+  assert.equal(schemaContainsKey(learningBlueprintDraftV1JsonSchema, "uniqueItems"), false);
+  assert.equal(schemaContainsKey(practiceSetDraftV1JsonSchema, "uniqueItems"), false);
+  assert.deepEqual(objectSchemasWithOptionalProperties(learningBlueprintDraftV1JsonSchema), []);
+  assert.deepEqual(objectSchemasWithOptionalProperties(practiceSetDraftV1JsonSchema), []);
 });
 
 test("blueprint prompt carries the exact approved multi-source payload without vault paths", () => {
@@ -342,6 +380,16 @@ test("blueprint validator accepts disclosed inactive gaps and rejects forward, g
   const mathResult = validateLearningBlueprintDraft(malformedMath, planningInput);
   assert.equal(mathResult.valid, false);
   assert.match(mathResult.errors?.join(" ") ?? "", /Unclosed inline LaTeX/u);
+
+  const duplicateReference: LearningBlueprintDraftV1 = {
+    ...blueprint,
+    aspects: blueprint.aspects.map((aspect, index) => index === 0
+      ? { ...aspect, sourceSegmentIds: ["seg-foundation", "seg-foundation"] }
+      : aspect),
+  };
+  const duplicateResult = validateLearningBlueprintDraft(duplicateReference, planningInput);
+  assert.equal(duplicateResult.valid, false);
+  assert.match(duplicateResult.errors?.join(" ") ?? "", /sourceSegmentIds.*unique/iu);
 });
 
 test("supporting segment and visual IDs must be namespaced", () => {
@@ -439,11 +487,13 @@ test("set validation enforces grounded exercises, assignments, tutor checks, and
   brokenTutor.tutorLessons[0]!.guidedExerciseId = "missing-exercise";
   brokenTutor.tutorLessons[0]!.hints[1]!.level = 1;
   brokenTutor.tutorLessons[0]!.repairExplanation.sourceSegmentIds = ["seg-missing"];
+  brokenTutor.tutorLessons[0]!.selfExplanationCheck.keyPoints = ["Premise", "Premise"];
   const brokenResult = validatePracticeSetDraft(brokenTutor, payload);
   assert.equal(brokenResult.valid, false);
   assert.match(brokenResult.errors?.join(" ") ?? "", /unknown exercise/iu);
   assert.match(brokenResult.errors?.join(" ") ?? "", /hint levels/iu);
   assert.match(brokenResult.errors?.join(" ") ?? "", /unknown source segment/iu);
+  assert.match(brokenResult.errors?.join(" ") ?? "", /keyPoints.*unique/iu);
 
   const brokenVisual: PracticeSetDraftV1 = {
     ...draft,

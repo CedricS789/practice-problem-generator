@@ -2,30 +2,41 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [mainSource, quickViewSource, guidedViewSource, stylesSource] = await Promise.all([
+const [
+  mainSource,
+  quickViewSource,
+  guidedViewSource,
+  modeSwitchSource,
+  sourcePickerSource,
+  stylesSource,
+] = await Promise.all([
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/practice-lab-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/learning-path-view.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/ui/creation-mode-switch.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/ui/source-picker.ts", import.meta.url), "utf8"),
   readFile(new URL("../styles.css", import.meta.url), "utf8"),
 ]);
 
 test("quick and guided creation use one clearly related mode vocabulary", () => {
   assert.match(quickViewSource, /Practice creation - quick set/u);
   assert.match(guidedViewSource, /Practice creation - guided path/u);
-  assert.match(quickViewSource, /aria-label": "Practice creation mode"/u);
-  assert.match(guidedViewSource, /aria-label": "Practice creation mode"/u);
-  assert.match(quickViewSource, /text: "Quick set"/u);
-  assert.match(quickViewSource, /text: "Guided path"/u);
-  assert.match(guidedViewSource, /text: "Quick set"/u);
-  assert.match(guidedViewSource, /text: "Guided path"/u);
+  assert.match(modeSwitchSource, /"aria-label": "Practice creation mode"/u);
+  assert.match(modeSwitchSource, /label: "Quick set"/u);
+  assert.match(modeSwitchSource, /label: "Guided path"/u);
+  assert.match(quickViewSource, /active: "quick"/u);
+  assert.match(guidedViewSource, /active: "guided"/u);
   assert.match(stylesSource, /\.practice-creation-mode-switch/u);
+  assert.match(stylesSource, /\.practice-lab-view > \.practice-creation-mode-row/u);
 });
 
-test("editor context menu exposes one concise creation entry point instead of competing modes", () => {
-  assert.match(mainSource, /\.setTitle\("Practice Problem Generator"\)[\s\S]*\.setIsLabel\(true\)/u);
+test("context menus expose concise actions without an unnecessary product-name label", () => {
+  assert.doesNotMatch(mainSource, /\.setIsLabel\(true\)/u);
   assert.match(mainSource, /\.setTitle\("Create practice from selection…"\)/u);
   assert.match(mainSource, /\.setTitle\("Create practice from this note…"\)/u);
   assert.match(mainSource, /\.setTitle\("Start saved practice for this note"\)/u);
+  assert.match(mainSource, /\.setTitle\("Create practice from selected pages…"\)/u);
+  assert.match(mainSource, /\.setTitle\("Start saved practice for this PDF"\)/u);
   assert.doesNotMatch(mainSource, /Practice Problem Generator: Build guided path from selection/u);
   assert.doesNotMatch(mainSource, /Practice Problem Generator: Build guided path from current note/u);
 });
@@ -35,14 +46,36 @@ test("guided creation can always return to an empty quick set", () => {
     guidedViewSource,
     /openQuickPractice: \(source: SourcePresentation \| null\)/u,
   );
-  assert.match(guidedViewSource, /quick\.disabled = switchBlocked;/u);
   assert.match(
     guidedViewSource,
-    /if \(!quick\.disabled\) \{\s+void this\.options\.callbacks\.openQuickPractice\(this\.primary\);/u,
+    /onQuick: \(\) => \{\s+void this\.options\.callbacks\.openQuickPractice\(this\.primary\);/u,
   );
   assert.doesNotMatch(
     guidedViewSource,
-    /quick\.disabled = switchBlocked \|\| this\.primary === null/u,
+    /quickDisabled: switchBlocked \|\| this\.primary === null/u,
+  );
+});
+
+test("quick and guided source stages share one selector and consistent source cards", () => {
+  assert.match(quickViewSource, /renderSourceChoices\(section/u);
+  assert.match(guidedViewSource, /renderSourceChoices\(container/u);
+  assert.match(quickViewSource, /renderSourceSummaryCard\(section/u);
+  assert.match(guidedViewSource, /renderSourceSummaryCard\(container/u);
+  assert.match(sourcePickerSource, /label: "Current note"/u);
+  assert.match(sourcePickerSource, /label: "Editor selection"/u);
+  assert.match(sourcePickerSource, /label: "PDF pages"/u);
+  assert.match(stylesSource, /\.practice-source-choice-grid/u);
+  assert.match(stylesSource, /\.practice-source-summary-card/u);
+});
+
+test("guided visual defaults appear before supporting-material controls", () => {
+  const sourceStart = guidedViewSource.indexOf("private renderSource(container");
+  const sourceEnd = guidedViewSource.indexOf("private renderPlanningPreview", sourceStart);
+  const implementation = guidedViewSource.slice(sourceStart, sourceEnd);
+  assert.ok(implementation.indexOf("this.renderVisualBundleControls(section)") >= 0);
+  assert.ok(
+    implementation.indexOf("this.renderVisualBundleControls(section)")
+      < implementation.indexOf("const supportHeading"),
   );
 });
 

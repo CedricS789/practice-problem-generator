@@ -960,12 +960,6 @@ export default class PracticeLabPlugin extends Plugin {
     const selection = editor.getSelection();
 
     menu.addSeparator();
-    menu.addItem((item) => item
-      .setTitle("Practice Problem Generator")
-      .setIcon("flask-conical")
-      .setIsLabel(true)
-      .setSection(CONTEXT_MENU_SECTION));
-
     if (selection.trim()) {
       menu.addItem((item) => item
         .setTitle("Create practice from selection…")
@@ -993,11 +987,6 @@ export default class PracticeLabPlugin extends Plugin {
     ) return;
 
     menu.addSeparator();
-    menu.addItem((item) => item
-      .setTitle("Practice Problem Generator")
-      .setIcon("flask-conical")
-      .setIsLabel(true)
-      .setSection(CONTEXT_MENU_SECTION));
     menu.addItem((item) => item
       .setTitle("Create practice from selected pages…")
       .setIcon("file-scan")

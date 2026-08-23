@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.3
+
+- Fixed Guided Path generation with the current Codex structured-output API by replacing unsupported provider-schema keywords while retaining duplicate and reference enforcement in the local validator.
+- Preserved and safely summarized provider error details, including actionable schema, authentication, quota, context, and model failures, instead of showing only a generic CLI exit message.
+- Unified Quick set and Guided path headers, mode controls, source selectors, source cards, step styling, visual defaults, and responsive widths; visual defaults now appear beside the visuals they govern.
+- Removed redundant product-name labels from note and PDF context menus so only the relevant practice actions appear.
+
 ## 1.3.2
 
 - Fixed false desktop `Codex (unavailable)` states by starting provider discovery independently of long interrupted-generation recovery, safely waiting for the shared CLI slot during reattachment, and publishing failures consistently to both creation modes.

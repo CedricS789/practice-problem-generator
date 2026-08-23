@@ -17,6 +17,7 @@ import {
   type PracticeSetDraftV1,
 } from "../learning-path-generation";
 import type { CliActivityEvent } from "../cli/contracts";
+import { formatCliErrorForUi } from "../cli/errors";
 import {
   RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
   balanceExerciseTypes,
@@ -37,8 +38,14 @@ import {
 } from "../visuals";
 import { OcclusionEditor } from "./occlusion-editor";
 import { installHoverDescriptions } from "./hover-descriptions";
+import { renderCreationModeSwitch as renderSharedCreationModeSwitch } from "./creation-mode-switch";
 import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
+import {
+  renderSourceChoices,
+  renderSourceSummaryCard,
+  type SourceChoiceMode,
+} from "./source-picker";
 import { isGifVisual } from "./visual-selection";
 import type {
   Difficulty,
@@ -343,6 +350,7 @@ export class PracticeLearningPathView extends ItemView {
   private approvedBySet = new Map<string, Set<string>>();
   private activeReviewSetId: string | null = null;
   private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | null = null;
+  private primarySourceChoiceBusy: SourceChoiceMode | null = null;
   private error: string | null = null;
   private recoveryAvailable: boolean;
   private savedWorkspace: LearningPathSavedWorkspaceV1 | null = null;
@@ -492,7 +500,9 @@ export class PracticeLearningPathView extends ItemView {
     if (this.error !== null) {
       const error = body.createDiv({ cls: "practice-lab-callout is-error", attr: { role: "alert" } });
       setIcon(error.createSpan(), "circle-alert");
-      error.createSpan({ text: this.error });
+      const copy = error.createDiv({ cls: "practice-generation-error-copy" });
+      copy.createEl("strong", { text: "This step did not finish" });
+      copy.createEl("p", { text: this.error });
     }
     if (this.stage === "source") this.renderSource(body);
     else if (this.stage === "map") this.renderMap(body);
@@ -501,52 +511,32 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private renderHeader(container: HTMLElement): void {
-    const header = container.createDiv({ cls: "practice-learning-path-header" });
-    const icon = header.createDiv({ cls: "practice-learning-path-header-icon" });
-    setIcon(icon, "route");
+    const header = container.createDiv({ cls: "practice-lab-header" });
     const text = header.createDiv();
     text.createEl("h2", { text: "Practice Problem Generator" });
     text.createEl("p", {
       text: "Guided path mode builds connected tutor lessons and distinct practice sets from only the material you approve.",
     });
+    const icon = header.createDiv({ cls: "practice-lab-header-icon" });
+    setIcon(icon, "route");
   }
 
   private renderCreationModeSwitch(container: HTMLElement): void {
-    const switcher = container.createDiv({
-      cls: "practice-creation-mode-switch",
-      attr: {
-        role: "group",
-        "aria-label": "Practice creation mode",
-      },
-    });
-    const quick = switcher.createEl("button", {
-      text: "Quick set",
-      attr: {
-        type: "button",
-        "aria-pressed": "false",
-        title: "Create one configurable practice set from the selected source.",
-      },
-    });
     const switchBlocked = this.busy !== null || this.stage === "review";
-    quick.disabled = switchBlocked;
-    if (switchBlocked) {
-      quick.title = "Finish the current guided generation or review before changing creation mode.";
-    }
-    quick.addEventListener("click", () => {
-      if (!quick.disabled) {
+    renderSharedCreationModeSwitch(container, {
+      active: "guided",
+      quickDisabled: switchBlocked,
+      guidedDisabled: true,
+      ...(switchBlocked
+        ? {
+            quickDisabledReason: "Finish the current guided generation or review before changing creation mode.",
+          }
+        : {}),
+      onQuick: () => {
         void this.options.callbacks.openQuickPractice(this.primary);
-      }
-    });
-    const guided = switcher.createEl("button", {
-      cls: "is-selected",
-      text: "Guided path",
-      attr: {
-        type: "button",
-        "aria-pressed": "true",
-        title: "Create a prerequisite-aware sequence of tutor lessons and practice sets.",
       },
+      onGuided: () => undefined,
     });
-    guided.disabled = true;
   }
 
   private renderQuickGenerationRecovery(container: HTMLElement): void {
@@ -651,19 +641,31 @@ export class PracticeLearningPathView extends ItemView {
       }
     }
     const section = this.section(container, "Approved source bundle", "Nothing is crawled. The primary source and every supporting range must be selected explicitly.");
+    this.renderSourceChoiceButtons(section);
     if (this.primary === null) {
-      const empty = section.createDiv({ cls: "practice-lab-empty" });
-      empty.createEl("h3", { text: "Choose the primary source" });
-      empty.createEl("p", { text: "Use the active note, its current selection, or an exact PDF page range." });
-      this.renderSourceChoiceButtons(empty, true);
+      const empty = section.createDiv({ cls: "practice-source-empty-inline" });
+      const icon = empty.createSpan();
+      setIcon(icon, "file-search");
+      empty.createSpan({
+        text: "No primary source is loaded yet. Open a note or PDF, then choose one option above.",
+      });
       return;
     }
+    section.createEl("p", {
+      cls: "practice-source-replace-note",
+      text: "Choosing another option replaces the primary source and removes the current supporting bundle.",
+    });
     this.renderSourceCard(section, this.primary, "Primary", () => {
       this.primary = null;
       this.supporting = [];
       this.resetAfterSourceChange();
       this.render();
-    });
+    }, false);
+    this.renderVisualBundleControls(section);
+    if (this.primary.visuals.length > 0) {
+      const primaryVisuals = section.createDiv({ cls: "practice-source-primary-visuals" });
+      this.renderSourceVisuals(primaryVisuals, this.primary);
+    }
     const supportHeading = section.createDiv({ cls: "practice-learning-path-subheading" });
     supportHeading.createEl("strong", { text: "Supporting material" });
     supportHeading.createSpan({ text: `${this.supporting.length} of 4 selected` });
@@ -680,7 +682,6 @@ export class PracticeLearningPathView extends ItemView {
       .setTooltip("Add one explicitly selected note or exact PDF page range. Linked material is never added automatically.")
       .setDisabled(this.busy !== null || this.visualSelectionBusy || this.supporting.length >= 4)
       .onClick(() => void this.addSupportingSource());
-    this.renderVisualBundleControls(section);
 
     const level = this.section(container, "Starting level", "This changes the proposed teaching depth, never the approved source boundary.");
     const levelGrid = level.createDiv({ cls: "practice-learning-path-level-grid" });
@@ -1389,33 +1390,31 @@ export class PracticeLearningPathView extends ItemView {
     });
   }
 
-  private renderSourceChoiceButtons(container: HTMLElement, cta = false): void {
-    const actions = container.createDiv({ cls: "practice-learning-path-actions" });
-    const choices: ReadonlyArray<readonly ["note" | "selection" | "pdf", string, string]> = [
-      ["note", "Use current note", "file-text"],
-      ["selection", "Use current selection", "text-select"],
-      ["pdf", "Choose PDF pages", "file-scan"],
-    ];
-    choices.forEach(([mode, label, icon], index) => {
-      const button = new ButtonComponent(actions)
-        .setIcon(icon)
-        .setButtonText(label)
-        .setDisabled(this.busy !== null)
-        .onClick(() => void this.choosePrimarySource(mode));
-      if (cta && index === 0) button.setCta();
+  private renderSourceChoiceButtons(container: HTMLElement): void {
+    renderSourceChoices(container, {
+      availableModes: new Set<SourceChoiceMode>(["note", "selection", "pdf"]),
+      busyMode: this.primarySourceChoiceBusy,
+      disabled: this.busy !== null,
+      onChoose: (mode) => {
+        void this.choosePrimarySource(mode);
+      },
     });
   }
 
-  private renderSourceCard(container: HTMLElement, source: SourcePresentation, role: string, remove: () => void): void {
-    const card = container.createDiv({ cls: "practice-learning-path-source-card" });
-    const icon = card.createDiv({ cls: "practice-learning-path-source-icon" });
-    setIcon(icon, source.mode === "pdf" ? "file-scan" : "file-text");
-    const text = card.createDiv({ cls: "practice-learning-path-source-copy" });
-    text.createSpan({ cls: "practice-lab-badge", text: role });
-    text.createEl("strong", { text: source.title });
-    text.createEl("p", { text: source.detail ?? `${source.characterCount.toLocaleString()} submitted characters` });
-    this.iconButton(card, "x", `Remove ${role.toLowerCase()} source`, this.busy !== null || this.visualSelectionBusy, remove);
-    this.renderSourceVisuals(card, source);
+  private renderSourceCard(
+    container: HTMLElement,
+    source: SourcePresentation,
+    role: string,
+    remove: () => void,
+    includeVisuals = true,
+  ): void {
+    const card = renderSourceSummaryCard(container, source, {
+      badge: role,
+      removeLabel: `Remove ${role.toLowerCase()} source`,
+      removeDisabled: this.busy !== null || this.visualSelectionBusy,
+      onRemove: remove,
+    });
+    if (includeVisuals) this.renderSourceVisuals(card, source);
   }
 
   private renderVisualBundleControls(container: HTMLElement): void {
@@ -1941,6 +1940,7 @@ export class PracticeLearningPathView extends ItemView {
   private async choosePrimarySource(mode: "note" | "selection" | "pdf"): Promise<void> {
     if (this.busy !== null) return;
     this.busy = "source";
+    this.primarySourceChoiceBusy = mode;
     this.error = null;
     this.render();
     try {
@@ -1950,6 +1950,7 @@ export class PracticeLearningPathView extends ItemView {
       this.error = errorMessage(error);
     } finally {
       this.busy = null;
+      this.primarySourceChoiceBusy = null;
       this.render();
     }
   }
@@ -2418,5 +2419,5 @@ function statusLabel(status: LearningSetGenerationStatusV1): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return formatCliErrorForUi(error, "The requested action failed.");
 }

@@ -199,7 +199,6 @@ const ID_STRING: JsonSchema = {
 const ID_LIST: JsonSchema = {
   type: "array",
   minItems: 1,
-  uniqueItems: true,
   items: ID_STRING,
 };
 
@@ -215,33 +214,46 @@ function objectSchema(
   };
 }
 
-const aspectSchema = objectSchema(
-  {
-    id: ID_STRING,
-    title: NON_EMPTY_STRING,
-    purpose: BOUNDED_TEXT,
-    status: { enum: ["supported", "source-gap"] },
-    prerequisiteAspectIds: {
-      type: "array",
-      uniqueItems: true,
-      items: ID_STRING,
-    },
-    sourceSegmentIds: {
-      type: "array",
-      uniqueItems: true,
-      items: ID_STRING,
-    },
-    gapReason: BOUNDED_TEXT,
+const aspectBaseProperties = {
+  id: ID_STRING,
+  title: NON_EMPTY_STRING,
+  purpose: BOUNDED_TEXT,
+  prerequisiteAspectIds: {
+    type: "array",
+    items: ID_STRING,
   },
-  [
-    "id",
-    "title",
-    "purpose",
-    "status",
-    "prerequisiteAspectIds",
-    "sourceSegmentIds",
+  sourceSegmentIds: {
+    type: "array",
+    items: ID_STRING,
+  },
+} satisfies Record<string, JsonSchema>;
+const aspectRequired = [
+  "id",
+  "title",
+  "purpose",
+  "status",
+  "prerequisiteAspectIds",
+  "sourceSegmentIds",
+] as const;
+const aspectSchema: JsonSchema = {
+  anyOf: [
+    objectSchema(
+      {
+        ...aspectBaseProperties,
+        status: { type: "string", const: "supported" },
+      },
+      aspectRequired,
+    ),
+    objectSchema(
+      {
+        ...aspectBaseProperties,
+        status: { type: "string", const: "source-gap" },
+        gapReason: BOUNDED_TEXT,
+      },
+      [...aspectRequired, "gapReason"],
+    ),
   ],
-);
+};
 
 const lessonBriefSchema = objectSchema(
   {
@@ -251,7 +263,6 @@ const lessonBriefSchema = objectSchema(
     aspectIds: ID_LIST,
     prerequisiteAspectIds: {
       type: "array",
-      uniqueItems: true,
       items: ID_STRING,
     },
     sourceSegmentIds: ID_LIST,
@@ -284,7 +295,6 @@ const setBriefSchema = objectSchema(
     aspectIds: ID_LIST,
     tutorLessonBriefIds: {
       type: "array",
-      uniqueItems: true,
       items: ID_STRING,
     },
     recommendedQuantity: { type: "integer", minimum: 1, maximum: 30 },
@@ -374,7 +384,6 @@ const tutorCheckSchema = objectSchema(
       type: "array",
       minItems: 1,
       maxItems: 20,
-      uniqueItems: true,
       items: BOUNDED_TEXT,
     },
     sourceSegmentIds: ID_LIST,
@@ -408,7 +417,6 @@ const tutorLessonSchema = objectSchema(
     aspectIds: ID_LIST,
     prerequisiteAspectIds: {
       type: "array",
-      uniqueItems: true,
       items: ID_STRING,
     },
     guidedExerciseId: ID_STRING,
@@ -1358,6 +1366,11 @@ function validateTutorLesson(
     ],
     context.segmentIds,
   );
+  pushDuplicateErrors(
+    errors,
+    lesson.selfExplanationCheck.keyPoints,
+    `${path}/selfExplanationCheck/keyPoints`,
+  );
   if (!context.exerciseIds.has(lesson.guidedExerciseId)) {
     errors.push(`${path}/guidedExerciseId: unknown exercise ${lesson.guidedExerciseId}.`);
   }
@@ -1470,6 +1483,7 @@ function pushUnknownReferences(
   known: ReadonlySet<string>,
   label: string,
 ): void {
+  pushDuplicateErrors(errors, references, path);
   for (const reference of references) {
     if (!known.has(reference)) errors.push(`${path}: unknown ${label} ${reference}.`);
   }

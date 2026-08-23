@@ -49,6 +49,15 @@ export function providerTerminalFailure(stdout: string): string | null {
         ?? boundedString(record.message)
         ?? "The provider turn failed.";
     }
+
+    if (record.type === "error") {
+      const error = isRecord(record.error) ? record.error : {};
+      const code = boundedString(error.code);
+      const message = boundedString(error.message)
+        ?? boundedString(record.message)
+        ?? "The provider reported an execution error.";
+      return code === null ? message : `${message} (${code})`;
+    }
   }
   return null;
 }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [view, main, pdfRange, pdfProgress, dashboard, preferences, settings] =
+const [view, main, pdfRange, pdfProgress, dashboard, preferences, settings, sourcePicker] =
   await Promise.all([
     readFile(new URL("../src/ui/practice-lab-view.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
@@ -17,6 +17,7 @@ const [view, main, pdfRange, pdfProgress, dashboard, preferences, settings] =
     ),
     readFile(new URL("../src/preferences.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/settings.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/ui/source-picker.ts", import.meta.url), "utf8"),
   ]);
 
 test("source loading is single-flight and stale source results cannot win", () => {
@@ -25,7 +26,7 @@ test("source loading is single-flight and stale source results cannot win", () =
   assert.match(view, /this\.sourceRequestMode !== null\) return/u);
   assert.match(view, /if \(epoch !== this\.sourceRequestEpoch\) return/u);
   assert.match(view, /role: "status", "aria-live": "polite"/u);
-  assert.match(view, /Loading PDF…/u);
+  assert.match(sourcePicker, /loadingLabel: "Choosing pages…"/u);
 });
 
 test("provider failures are explained and recoverable without reopening the view", () => {

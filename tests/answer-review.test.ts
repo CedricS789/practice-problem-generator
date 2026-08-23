@@ -159,6 +159,7 @@ test("answer-review payload is source-bounded, path-free, and injection resistan
 test("review schema is a strict standalone draft-07 contract", () => {
   assert.equal(answerReviewV1JsonSchema.$schema, "http://json-schema.org/draft-07/schema#");
   assert.equal(answerReviewV1JsonSchema.additionalProperties, false);
+  assert.doesNotMatch(JSON.stringify(answerReviewV1JsonSchema), /uniqueItems/u);
   const contract = createAnswerReviewStructuredRequest(reviewInput());
   assert.equal(contract.schema, answerReviewV1JsonSchema);
   assert.equal(contract.validate(validOutput()).valid, true);
@@ -211,6 +212,21 @@ test("semantic validation requires exact IDs, criteria, sources, and verdict", (
   assert.match(
     validateAnswerReviewOutput(inventedSegment, input).errors?.join("\n") ?? "",
     /unknown source segment ID/u,
+  );
+
+  const duplicateSegmentReference: AnswerReviewOutputV1 = {
+    ...baseOutput,
+    criterionResults: [
+      {
+        ...firstCriterion,
+        sourceSegmentIds: ["segment-001", "segment-001"],
+      },
+      ...baseOutput.criterionResults.slice(1),
+    ],
+  };
+  assert.match(
+    validateAnswerReviewOutput(duplicateSegmentReference, input).errors?.join("\n") ?? "",
+    /source segment IDs must be unique/iu,
   );
 
   const inconsistentVerdict = { ...validOutput(), verdict: "correct" as const };

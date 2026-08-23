@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [main, view, modal, source, persistence] = await Promise.all([
+const [main, view, modal, source, persistence, sourcePicker] = await Promise.all([
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/practice-lab-view.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/ui/pdf-page-range-modal.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/source.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/persistence.ts", import.meta.url), "utf8"),
+  readFile(new URL("../src/ui/source-picker.ts", import.meta.url), "utf8"),
 ]);
 
 test("PDF generation is explicit through commands, active-source UI, or file menu", () => {
@@ -17,7 +18,7 @@ test("PDF generation is explicit through commands, active-source UI, or file men
   assert.match(main, /Create practice from selected pages…/u);
   assert.match(main, /Start saved practice for this PDF/u);
   assert.doesNotMatch(main, /Practice Problem Generator: Build guided path from PDF/u);
-  assert.match(view, /Use active PDF/u);
+  assert.match(sourcePicker, /Choose an exact page or page range from the active PDF/u);
   assert.doesNotMatch(main, /resolveLinks|linked PDFs|scan.*PDF/iu);
 });
 
@@ -58,6 +59,6 @@ test("PDF regeneration reuses page provenance and external PDFs save under Notes
 test("PDF extraction stays desktop-only while saved banks remain mobile-capable", () => {
   assert.match(main, /PDF source extraction is available in Obsidian desktop only/u);
   assert.match(main, /Platform\.isMobileApp/u);
-  assert.match(view, /PDF pages/u);
+  assert.match(sourcePicker, /label: "PDF pages"/u);
   assert.match(main, /Saved Practice Problem Generator bank/u);
 });
