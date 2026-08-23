@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.14
+
+- Rebuilt Guided-path batch navigator items as bounded two-row cards so titles and statuses no longer overlap the scrollbar or adjacent controls.
+- Animated the active generation icon as an actual loading spinner while retaining explicit text status and reduced-motion behavior.
+- Kept queued, validating, completed, and failed states visually stable, readable, and announced through a polite live region.
+
 ## 1.3.13
 
 - Scrolled the newly prepared Guided-path planning payload into view so the result cannot appear unnoticed below the viewport.

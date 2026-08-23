@@ -99,3 +99,23 @@ test("map and configure responds to the Obsidian pane width without overlapping 
     /@container practice-learning-path \(max-width: 560px\) \{[\s\S]*\.practice-learning-path-card-actions \{[\s\S]*grid-column: 2;[\s\S]*\.practice-learning-path-mix-row \{[\s\S]*grid-template-columns: minmax\(0, 1fr\) 44px;/u,
   );
 });
+
+test("batch navigator cards bound their status text and animate active generation", () => {
+  assert.match(viewSource, /"aria-label": "Set generation status"/u);
+  assert.match(viewSource, /"aria-live": "polite"/u);
+  assert.match(viewSource, /practice-learning-path-nav-icon/u);
+  assert.match(viewSource, /status\.state === "generating" \? " practice-lab-spinner" : ""/u);
+  assert.match(viewSource, /practice-learning-path-nav-title/u);
+  assert.match(viewSource, /practice-learning-path-nav-status/u);
+  assert.match(
+    styles,
+    /\.practice-learning-path-set-navigator \{[\s\S]*overflow-y: hidden;[\s\S]*padding: var\(--size-2-2\) var\(--size-2-2\) var\(--size-4-3\);/u,
+  );
+  assert.match(
+    styles,
+    /\.practice-learning-path-nav-item \{[\s\S]*grid-template-rows: auto auto;[\s\S]*height: auto;[\s\S]*min-height: 68px;/u,
+  );
+  assert.match(styles, /\.practice-learning-path-nav-icon \{[\s\S]*grid-row: 1 \/ span 2;/u);
+  assert.match(styles, /\.practice-learning-path-nav-status \{[\s\S]*grid-row: 2;/u);
+  assert.match(styles, /\.practice-lab-spinner svg \{\s+animation: practice-lab-spin/u);
+});

@@ -1216,7 +1216,13 @@ export class PracticeLearningPathView extends ItemView {
     const blueprint = this.blueprint;
     if (blueprint === null) return;
     const navigator = this.section(container, "Batch navigator", "Sets run sequentially through one provider job coordinator. Completed drafts remain available if a later set fails.");
-    const nav = navigator.createDiv({ cls: "practice-learning-path-set-navigator" });
+    const nav = navigator.createDiv({
+      cls: "practice-learning-path-set-navigator",
+      attr: {
+        "aria-label": "Set generation status",
+        "aria-live": "polite",
+      },
+    });
     this.batchNavigatorHost = nav;
     this.renderBatchNavigator(nav, blueprint);
     const activityHost = navigator.createDiv({
@@ -2077,9 +2083,19 @@ export class PracticeLearningPathView extends ItemView {
         },
       });
       button.disabled = !available;
-      setIcon(button.createSpan(), statusIcon(status.state));
-      button.createEl("strong", { text: brief.title });
-      button.createSpan({ text: statusLabel(status) });
+      const icon = button.createSpan({
+        cls: `practice-learning-path-nav-icon${status.state === "generating" ? " practice-lab-spinner" : ""}`,
+        attr: { "aria-hidden": "true" },
+      });
+      setIcon(icon, statusIcon(status.state));
+      button.createEl("strong", {
+        cls: "practice-learning-path-nav-title",
+        text: brief.title,
+      });
+      button.createSpan({
+        cls: "practice-learning-path-nav-status",
+        text: statusLabel(status),
+      });
       button.addEventListener("click", () => {
         if (!available) return;
         this.activeReviewSetId = state.id;
