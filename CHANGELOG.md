@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.10
+
+- Made every unlocked Guided-path progress step clickable so users can move backward and forward without losing retained work.
+- Added Enter/Space navigation, current/locked accessibility state, focus styling, and hover explanations for unavailable steps.
+- Invalidated stale review results when map or set settings change, preventing old generated exercises from being saved against a revised configuration.
+
 ## 1.3.9
 
 - Fixed Guided-path set generation failing after launch when its durable recovery context tried to serialize Obsidian's circular live file object.

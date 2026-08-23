@@ -3805,6 +3805,16 @@ button.practice-lab-heatmap-day.is-future {
   background: var(--background-modifier-hover);
 }
 
+.practice-learning-path-steps li.is-clickable:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -3px;
+}
+
+.practice-learning-path-steps li.is-locked {
+  cursor: not-allowed;
+}
+
 .practice-learning-path-body {
   display: grid;
   gap: var(--size-4-5);

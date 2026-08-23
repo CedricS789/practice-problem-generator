@@ -632,29 +632,58 @@ export class PracticeLearningPathView extends ItemView {
     ];
     const current = stages.findIndex(([stage]) => stage === this.stage);
     stages.forEach(([stage, label], index) => {
+      const available = this.stageAvailable(stage);
+      const isCurrent = stage === this.stage;
+      const isComplete = !isCurrent && (stage === "source" ? index < current : available);
       const item = navigation.createEl("li", {
-        cls: index === current ? "is-current" : index < current ? "is-complete" : "",
+        cls: [
+          isCurrent ? "is-current" : "",
+          isComplete ? "is-complete" : "",
+          !available ? "is-locked" : "",
+        ].filter(Boolean).join(" "),
       });
       item.createSpan({ text: String(index + 1) });
       item.createDiv({ text: label });
-      if (stage === "source" && this.stage !== "source" && this.busy === null) {
+      if (isCurrent) {
+        item.setAttribute("aria-current", "step");
+        item.setAttribute("title", `Current step: ${label}`);
+      } else if (available && this.busy === null) {
         item.addClass("is-clickable");
         item.tabIndex = 0;
         item.setAttribute("role", "button");
-        item.setAttribute("aria-label", "Return to source and intent");
-        item.setAttribute("title", "Return to source and intent");
-        const returnToSource = (): void => {
-          this.stage = "source";
+        item.setAttribute("aria-label", `Open ${label}`);
+        item.setAttribute("title", `Open ${label}`);
+        const navigate = (): void => {
+          this.stage = stage;
+          this.error = null;
           this.render();
         };
-        item.addEventListener("click", returnToSource);
+        item.addEventListener("click", navigate);
         item.addEventListener("keydown", (event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
-          returnToSource();
+          navigate();
         });
+      } else {
+        item.setAttribute("aria-disabled", "true");
+        item.setAttribute("title", this.stageUnavailableReason(stage, label));
       }
     });
+  }
+
+  private stageAvailable(stage: Stage): boolean {
+    if (stage === "source") return true;
+    if (stage === "map") return this.blueprint !== null;
+    if (stage === "review") return this.statuses.size > 0 || this.generatedSets.length > 0;
+    return this.savedWorkspace !== null;
+  }
+
+  private stageUnavailableReason(stage: Stage, label: string): string {
+    if (this.busy !== null) return `Wait for the current operation before opening ${label}.`;
+    if (stage === "map") return "Create the aspect map to unlock this step.";
+    if (stage === "review") return "Start set generation to unlock this step.";
+    if (stage === "saved") return "Save the guided path to unlock this step.";
+    return `Open ${label}`;
   }
 
   private renderSource(container: HTMLElement): void {
@@ -2419,6 +2448,11 @@ export class PracticeLearningPathView extends ItemView {
   private invalidateSetPayloads(): void {
     this.setPayloadPreviews = [];
     this.setPayloadsAccepted = false;
+    this.statuses.clear();
+    this.activity.clear();
+    this.generatedSets = [];
+    this.approvedBySet.clear();
+    this.activeReviewSetId = null;
   }
 
   private resetAfterSourceChange(): void {

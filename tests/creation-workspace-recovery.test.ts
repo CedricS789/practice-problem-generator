@@ -164,6 +164,26 @@ test("guided progress navigation supports keyboard activation and honest disable
   assert.match(stylesSource, /\[role="button"\]/u);
 });
 
+test("guided creation steps navigate backward and forward once their work exists", () => {
+  const navigationStart = guidedViewSource.indexOf("private renderStageNavigation(");
+  const navigationEnd = guidedViewSource.indexOf("private renderSource(", navigationStart);
+  assert.ok(navigationStart >= 0 && navigationEnd > navigationStart);
+  const navigation = guidedViewSource.slice(navigationStart, navigationEnd);
+  assert.match(navigation, /const available = this\.stageAvailable\(stage\)/u);
+  assert.match(navigation, /else if \(available && this\.busy === null\)/u);
+  assert.match(navigation, /this\.stage = stage/u);
+  assert.match(navigation, /item\.addEventListener\("click", navigate\)/u);
+  assert.match(navigation, /event\.key !== "Enter" && event\.key !== " "/u);
+  assert.match(navigation, /stage === "map"\) return this\.blueprint !== null/u);
+  assert.match(
+    navigation,
+    /stage === "review"\) return this\.statuses\.size > 0 \|\| this\.generatedSets\.length > 0/u,
+  );
+  assert.match(navigation, /return this\.savedWorkspace !== null/u);
+  assert.doesNotMatch(navigation, /stage === "source" && this\.stage !== "source"/u);
+  assert.match(stylesSource, /\.practice-learning-path-steps li\.is-clickable:focus-visible/u);
+});
+
 test("mode switching reuses the current leaf and carries an approved source", () => {
   assert.match(
     mainSource,
