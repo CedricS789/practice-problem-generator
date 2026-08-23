@@ -68,6 +68,7 @@ import {
   type ApprovedSourceBundleV1,
 } from "./source-bundle";
 import type { CollectedSource } from "./source";
+import { snapshotSourcePresentation } from "./source-presentation";
 import { applyDraftEdits, presentExercises } from "./ui/presenters";
 import type {
   GeneratedLearningSetPresentationV1,
@@ -566,8 +567,8 @@ export class LearningPathController {
       sources,
     };
     return {
-      primaryPresentation,
-      supportingPresentations: [...supportingPresentations],
+      primaryPresentation: snapshotSourcePresentation(primaryPresentation),
+      supportingPresentations: supportingPresentations.map(snapshotSourcePresentation),
       bundle,
       preparedVisuals: includeVisuals ? preparedVisuals : [],
       planningInput,
@@ -815,8 +816,8 @@ export class LearningPathController {
     if (pending === undefined || batch === undefined) return;
     const context: PersistedLearningBatchContextV1 = {
       schemaVersion: LEARNING_BATCH_CONTEXT_VERSION,
-      primaryPresentation: pending.primaryPresentation,
-      supportingPresentations: pending.supportingPresentations,
+      primaryPresentation: snapshotSourcePresentation(pending.primaryPresentation),
+      supportingPresentations: pending.supportingPresentations.map(snapshotSourcePresentation),
       primary: persistCollectedSource(pending.bundle.primary),
       supporting: pending.bundle.supporting.map(persistCollectedSource),
       materials: pending.bundle.materials,

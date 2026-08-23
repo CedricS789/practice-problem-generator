@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.9
+
+- Fixed Guided-path set generation failing after launch when its durable recovery context tried to serialize Obsidian's circular live file object.
+- Snapshot source metadata and visual selections into an explicit JSON-safe contract before storing batch recovery data, without weakening generation resume support.
+- Added a regression covering circular source and visual runtime fields.
+
 ## 1.3.8
 
 - Fixed Guided-path exercise mixes so every rebalanced slider, percentage output, and zero/active row style refreshes together.
