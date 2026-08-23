@@ -906,9 +906,8 @@ export class PracticeLearningPathView extends ItemView {
     if (brief === undefined) return;
     const card = container.createEl("article", {
       cls: "practice-learning-path-set-card",
-      attr: { draggable: "true", "data-set-id": state.id },
+      attr: { "data-set-id": state.id },
     });
-    card.addEventListener("dragstart", (event) => event.dataTransfer?.setData("text/plain", state.id));
     card.addEventListener("dragover", (event) => event.preventDefault());
     card.addEventListener("drop", (event) => {
       event.preventDefault();
@@ -916,8 +915,21 @@ export class PracticeLearningPathView extends ItemView {
       if (dragged !== undefined && dragged.length > 0) this.moveSet(dragged, index);
     });
     const heading = card.createDiv({ cls: "practice-learning-path-set-heading" });
-    const order = heading.createSpan({ cls: "practice-learning-path-set-order", text: String(index + 1) });
-    order.title = "Drag this card to change the learning sequence.";
+    const order = heading.createSpan({
+      cls: "practice-learning-path-set-order",
+      text: String(index + 1),
+      attr: {
+        draggable: "true",
+        title: "Drag this handle to change the learning sequence.",
+        "aria-label": `Drag set ${index + 1} to change the learning sequence`,
+        "data-practice-lab-description": "Drag this handle to reorder the set. The adjacent arrow buttons provide keyboard-accessible reordering.",
+      },
+    });
+    order.addEventListener("dragstart", (event) => {
+      if (event.dataTransfer === null) return;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", state.id);
+    });
     const identity = heading.createDiv();
     const title = identity.createEl("input", { cls: "practice-learning-path-set-title", attr: { type: "text", "aria-label": `Set ${index + 1} title` } });
     title.value = brief.title;
@@ -1037,7 +1049,9 @@ export class PracticeLearningPathView extends ItemView {
     for (const [type, label] of Object.entries(EXERCISE_LABELS) as Array<[ExerciseType, string]>) {
       const row = mix.createEl("label", { cls: `practice-learning-path-mix-row${state.configuration.exerciseTypePercentages[type] === 0 ? " is-zero" : ""}` });
       row.createSpan({ text: label });
-      const slider = row.createEl("input", { attr: { type: "range", min: "0", max: "100", step: "5" } });
+      const slider = row.createEl("input", {
+        attr: { type: "range", min: "0", max: "100", step: "5", draggable: "false" },
+      });
       slider.value = String(state.configuration.exerciseTypePercentages[type]);
       const output = row.createEl("output", { text: `${slider.value}%` });
       slider.addEventListener("input", () => {

@@ -2023,6 +2023,7 @@ export class PracticeLabView extends ItemView {
           min: "1",
           max: "100",
           step: "1",
+          draggable: "false",
           "aria-label": `${EXERCISE_LABELS[type]} percentage slider`,
         },
       });

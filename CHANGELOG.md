@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.7
+
+- Prevented exercise-percentage sliders from initiating a ghost-image drag of their containing Guided-path set card.
+- Limited mouse drag reordering to the numbered set-order handle while retaining the existing keyboard-accessible move buttons.
+- Marked percentage sliders as explicitly non-draggable across Quick set, Guided path, and saved-set regeneration.
+
 ## 1.3.6
 
 - Added a searchable **Choose another note…** action directly to the selected primary-source card in both Quick set and Guided path creation.

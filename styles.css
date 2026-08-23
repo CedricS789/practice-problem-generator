@@ -1022,6 +1022,8 @@
   margin: 0;
   accent-color: var(--interactive-accent);
   cursor: pointer;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .practice-lab-percentage-slider:disabled {
@@ -4310,11 +4312,12 @@ button.practice-learning-path-mode-card {
   background: var(--background-secondary);
 }
 
-.practice-learning-path-set-card[draggable="true"] {
+.practice-learning-path-set-order[draggable="true"] {
   cursor: grab;
+  user-select: none;
 }
 
-.practice-learning-path-set-card[draggable="true"]:active {
+.practice-learning-path-set-order[draggable="true"]:active {
   cursor: grabbing;
 }
 
@@ -4418,6 +4421,8 @@ button.practice-learning-path-mode-card {
   width: 100%;
   min-width: 0;
   accent-color: var(--interactive-accent);
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .practice-learning-path-mix-row output {

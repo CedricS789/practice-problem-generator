@@ -424,7 +424,7 @@ export class SavedSetGenerationModal extends Modal {
       });
       row.createSpan({ text: EXERCISE_LABELS[type] });
       const slider = row.createEl("input", {
-        attr: { type: "range", min: "0", max: "100", step: "5" },
+        attr: { type: "range", min: "0", max: "100", step: "5", draggable: "false" },
       });
       slider.value = String(this.request.configuration.exerciseTypePercentages[type]);
       const output = row.createEl("output", { text: `${slider.value}%` });
