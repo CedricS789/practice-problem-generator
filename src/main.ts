@@ -30,6 +30,7 @@ import { retryAsync } from "./async-retry";
 import { generationDifficultyFromSetting } from "./difficulty";
 import { enabledExerciseTypes } from "./exercise-distribution";
 import { auditOfflineReadiness } from "./offline-readiness";
+import { hiddenPracticeMetadataEditorExtension } from "./hidden-practice-metadata-editor";
 import { PracticeBankRepository, createSessionSummary } from "./bank-repository";
 import { renderBankStatistics } from "./bank-statistics-view";
 import { LearningPathController } from "./learning-path-controller";
@@ -339,6 +340,7 @@ export default class PracticeLabPlugin extends Plugin {
     if (JSON.stringify(storedData) !== JSON.stringify(this.storedDataSnapshot())) {
       await this.saveData(this.storedDataSnapshot());
     }
+    this.registerEditorExtension(hiddenPracticeMetadataEditorExtension);
     this.dashboardRepository = new PracticeDashboardRepository(this.app, {
       hasPracticeBankMarker: (file) =>
         this.app.metadataCache.getFileCache(file)?.frontmatter?.["practice-lab"] === true,

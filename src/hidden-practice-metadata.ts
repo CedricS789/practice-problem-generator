@@ -1,7 +1,12 @@
 export const HIDDEN_PRACTICE_METADATA_VERSION = 1 as const;
 
-const HIDDEN_METADATA_START = "<!-- practice-problem-generator-metadata-v1";
+export const HIDDEN_PRACTICE_METADATA_START = "<!-- practice-problem-generator-metadata-v1";
 const HIDDEN_METADATA_END = "-->";
+
+export interface HiddenPracticeMetadataRange {
+  readonly from: number;
+  readonly to: number;
+}
 
 export interface HiddenPracticeMetadataV1 {
   readonly schemaVersion: typeof HIDDEN_PRACTICE_METADATA_VERSION;
@@ -42,7 +47,33 @@ export function serializeHiddenPracticeMetadata(
     throw new Error("Practice Problem Generator metadata could not be serialized.");
   }
   const commentSafeJson = json.replace(/-/gu, "\\u002d");
-  return `${HIDDEN_METADATA_START}\n${commentSafeJson}\n${HIDDEN_METADATA_END}`;
+  return `${HIDDEN_PRACTICE_METADATA_START}\n${commentSafeJson}\n${HIDDEN_METADATA_END}`;
+}
+
+/**
+ * Finds complete plugin-owned metadata comments without parsing their payload.
+ * The returned offsets use the original Markdown string so they can be applied
+ * directly to an Obsidian editor document.
+ */
+export function findHiddenPracticeMetadataRanges(
+  markdown: string,
+): readonly HiddenPracticeMetadataRange[] {
+  const open = `${HIDDEN_PRACTICE_METADATA_START}\n`;
+  const close = `\n${HIDDEN_METADATA_END}`;
+  const ranges: HiddenPracticeMetadataRange[] = [];
+  let cursor = 0;
+  while (cursor < markdown.length) {
+    const from = markdown.indexOf(open, cursor);
+    if (from < 0) break;
+    const startsOnOwnLine = from === 0 || markdown[from - 1] === "\n";
+    const closeFrom = markdown.indexOf(close, from + open.length);
+    if (closeFrom < 0) break;
+    const to = closeFrom + close.length;
+    const endsOnOwnLine = to === markdown.length || markdown[to] === "\n";
+    if (startsOnOwnLine && endsOnOwnLine) ranges.push({ from, to });
+    cursor = to;
+  }
+  return ranges;
 }
 
 export function parseHiddenPracticeMetadata(

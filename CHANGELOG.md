@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.16
+
+- Collapsed plugin-managed generation, recovery, and provenance JSON into one compact row in Live Preview without changing the portable Practice Markdown.
+- Made the row keyboard-accessible and temporarily reveal the exact metadata on demand; moving the editor cursor outside the block collapses it again.
+- Kept Reading view clean and deliberate Source mode fully transparent for manual inspection or recovery.
+
 ## 1.3.15
 
 - Fixed Guided-path saving by validating source-to-aspect, assignment, tutor-citation, and prerequisite relationships before accepting new AI output.
