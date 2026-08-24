@@ -538,6 +538,15 @@
   color: var(--text-warning);
 }
 
+.practice-lab-study-recovery-status {
+  margin: var(--size-4-3) 0 var(--size-4-2);
+  padding: var(--size-4-2) var(--size-4-3);
+  border: 1px solid color-mix(in srgb, var(--color-orange) 45%, var(--background-modifier-border));
+  border-left: 3px solid var(--color-orange);
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--color-orange) 8%, var(--background-primary));
+}
+
 .practice-lab-pdf-source-history {
   margin-block: var(--size-4-2);
   color: var(--text-muted);

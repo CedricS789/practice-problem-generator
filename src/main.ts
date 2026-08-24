@@ -83,6 +83,11 @@ import {
   updateStudySessionCheckpoint,
   type StudySessionCheckpointV1,
 } from "./study-checkpoint";
+import {
+  rebaseLatestStudySessionCheckpointBankPath,
+  resolveStudyCheckpointBankCandidate,
+  summarizeStudyCheckpointProgress,
+} from "./study-checkpoint-recovery";
 import type {
   AiReviewSessionItemResultV2,
   PracticeBankV2,
@@ -202,6 +207,24 @@ interface ActiveBank {
   bank: PracticeBankV3;
 }
 
+type StudyCheckpointRestoreOutcome =
+  | { readonly status: "none" }
+  | { readonly status: "resumed" }
+  | { readonly status: "merged" }
+  | {
+      readonly status: "invalid" | "unavailable" | "ambiguous" | "blocked" | "conflict" | "failed";
+      readonly message: string;
+    };
+
+type StudyCheckpointBankLookup =
+  | {
+      readonly status: "resolved";
+      readonly active: ActiveBank;
+      readonly checkpoint: StudySessionCheckpointV1;
+      readonly relocated: boolean;
+    }
+  | { readonly status: "unavailable" | "ambiguous"; readonly message: string };
+
 type BankStudySelection =
   | { readonly kind: "quick" }
   | { readonly kind: "set"; readonly setId: string }
@@ -319,7 +342,8 @@ export default class PracticeLabPlugin extends Plugin {
   private discardingGenerationRecovery = false;
   private studyCheckpoint: StudySessionCheckpointV1 | undefined;
   private invalidStudyCheckpointRaw: unknown;
-  private restoringStudyCheckpoint = false;
+  private studyCheckpointRestoreTask: Promise<StudyCheckpointRestoreOutcome> | undefined;
+  private bankStudyStartTask: Promise<void> | undefined;
   private storedDataSaveChain: Promise<void> = Promise.resolve();
 
   override async onload(): Promise<void> {
@@ -543,108 +567,238 @@ export default class PracticeLabPlugin extends Plugin {
     await this.persistStoredData();
   }
 
-  private async restoreStudyCheckpoint(): Promise<void> {
-    if (this.restoringStudyCheckpoint) return;
-    if (this.invalidStudyCheckpointRaw !== undefined) {
-      new Notice(
-        "Practice Problem Generator preserved an invalid device-local study checkpoint. No data was discarded; use “discard saved practice session” only if recovery is unnecessary.",
-        12_000,
-      );
-      return;
-    }
-    const checkpoint = this.studyCheckpoint;
-    if (checkpoint === undefined) return;
-    this.restoringStudyCheckpoint = true;
+  private async restoreStudyCheckpoint(
+    preferred?: ActiveBank,
+    notifyFailure = true,
+  ): Promise<StudyCheckpointRestoreOutcome> {
+    const running = this.studyCheckpointRestoreTask;
+    if (running !== undefined) return await running;
+    const task = this.performStudyCheckpointRestore(preferred);
+    this.studyCheckpointRestoreTask = task;
     try {
-      if (checkpoint.phase === "merging") {
-        await this.resumeMergingStudyCheckpoint(checkpoint);
-        return;
-      }
-      const file = this.app.vault.getAbstractFileByPath(checkpoint.bankPath);
-      if (!(file instanceof TFile)) {
-        throw new Error(
-          `The saved practice bank ${checkpoint.bankPath} is not available on this device. The checkpoint was retained.`,
+      const outcome = await task;
+      if (
+        notifyFailure
+        && outcome.status !== "none"
+        && outcome.status !== "resumed"
+        && outcome.status !== "merged"
+        && outcome.status !== "conflict"
+      ) {
+        new Notice(
+          `Practice Problem Generator: ${outcome.message} Start a saved practice bank to resolve this session, or use “Discard saved practice session” if it is no longer needed.`,
+          14_000,
         );
       }
-      const current = await this.loadPracticeBank(checkpoint.bankPath);
-      if (current.bankId !== checkpoint.bankId) {
-        throw new Error("The saved practice bank changed identity. The checkpoint was retained for explicit recovery or discard.");
+      return outcome;
+    } finally {
+      if (this.studyCheckpointRestoreTask === task) {
+        this.studyCheckpointRestoreTask = undefined;
       }
-      if (current.revision < checkpoint.bankRevisionAtStart) {
-        throw new Error("This device has an older bank revision than the saved session. Synchronize first; the checkpoint was retained.");
+    }
+  }
+
+  private async performStudyCheckpointRestore(
+    preferred?: ActiveBank,
+  ): Promise<StudyCheckpointRestoreOutcome> {
+    if (this.invalidStudyCheckpointRaw !== undefined) {
+      return {
+        status: "invalid",
+        message: "The preserved device-local study checkpoint is malformed and cannot be resumed.",
+      };
+    }
+    const checkpoint = this.studyCheckpoint;
+    if (checkpoint === undefined) return { status: "none" };
+    try {
+      const lookup = await this.resolveStudyCheckpointBank(checkpoint, preferred);
+      if (lookup.status !== "resolved") return lookup;
+      if (
+        preferred !== undefined
+        && preferred.bank.bankId !== lookup.checkpoint.bankId
+      ) {
+        return {
+          status: "conflict",
+          message: "Another saved practice session is in progress for a different bank.",
+        };
       }
-      this.activeBank = { path: checkpoint.bankPath, bank: current };
-      const lockedBank = checkpointBankSnapshot(checkpoint);
+      const current = lookup.active.bank;
+      const resolvedCheckpoint = lookup.checkpoint;
+      if (current.revision < resolvedCheckpoint.bankRevisionAtStart) {
+        return {
+          status: "blocked",
+          message: "This device has an older bank revision than the saved session. Synchronize the newer bank before resuming.",
+        };
+      }
+      if (resolvedCheckpoint.phase === "merging") {
+        await this.resumeMergingStudyCheckpoint(
+          resolvedCheckpoint,
+          lookup.active.path,
+          current,
+        );
+        return { status: "merged" };
+      }
+      this.activeBank = lookup.active;
+      const lockedBank = checkpointBankSnapshot(resolvedCheckpoint);
       const source = sourcePresentationFromBank(lockedBank);
       const view = await this.openView(source);
-      const visualUrls = new Map(checkpoint.visuals.map((visual) => [
+      const visualUrls = new Map(resolvedCheckpoint.visuals.map((visual) => [
         visual.id,
         this.app.vault.adapter.getResourcePath(visual.vaultPath),
       ]));
       const exercises = presentExercises(
-        checkpoint.exercises,
+        resolvedCheckpoint.exercises,
         (visualId) => visualUrls.get(visualId),
-        checkpoint.segments,
+        resolvedCheckpoint.segments,
       );
-      const learningEvidence = checkpoint.learningProgress === undefined
+      const learningEvidence = resolvedCheckpoint.learningProgress === undefined
         ? []
         : this.learningEvidenceTemplates(
             lockedBank as PracticeBankV3,
-            checkpoint.learningProgress.scope.sets.map((reference) => {
+            resolvedCheckpoint.learningProgress.scope.sets.map((reference) => {
               const set = (lockedBank as PracticeBankV3).practiceSets.find((candidate) => candidate.id === reference.id);
               if (set === undefined) throw new Error(`The saved learning scope references missing set ${reference.id}.`);
               return set;
             }),
-            checkpoint.exercises.map((exercise) => exercise.id),
+            resolvedCheckpoint.exercises.map((exercise) => exercise.id),
           );
       view.restoreStudy(
         exercises,
-        studyProgressFromCheckpoint(checkpoint),
+        studyProgressFromCheckpoint(resolvedCheckpoint),
         learningEvidence,
       );
       if (!Platform.isMobileApp) {
-        for (const answer of checkpoint.answers) {
+        for (const answer of resolvedCheckpoint.answers) {
           if (answer.aiReview?.status.state !== "pending") continue;
           this.enqueueAnswerReview(answer.aiReview.request);
         }
       }
       new Notice(
-        `Resumed practice at question ${Math.min(checkpoint.currentQuestionIndex + 1, checkpoint.exercises.length)} of ${checkpoint.exercises.length}.`,
+        `${lookup.relocated ? "Found the moved practice bank and updated its recovery path. " : ""}Resumed practice at question ${Math.min(resolvedCheckpoint.currentQuestionIndex + 1, resolvedCheckpoint.exercises.length)} of ${resolvedCheckpoint.exercises.length}.`,
         8_000,
       );
+      return { status: "resumed" };
     } catch (error) {
-      this.showError(error);
-    } finally {
-      this.restoringStudyCheckpoint = false;
+      return {
+        status: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
+  }
+
+  private async resolveStudyCheckpointBank(
+    checkpoint: StudySessionCheckpointV1,
+    preferred?: ActiveBank,
+  ): Promise<StudyCheckpointBankLookup> {
+    const byPath = new Map<string, ActiveBank>();
+    const addCandidate = (candidate: ActiveBank): void => {
+      const normalized = normalizePath(candidate.path);
+      const firstPart = normalized.split("/")[0]?.toLocaleLowerCase();
+      const configPart = this.app.vault.configDir.toLocaleLowerCase();
+      if (firstPart === ".tmp" || firstPart === ".trash" || firstPart === configPart) {
+        return;
+      }
+      byPath.set(normalized.toLocaleLowerCase(), {
+        path: normalized,
+        bank: candidate.bank,
+      });
+    };
+    if (preferred !== undefined) addCandidate(preferred);
+
+    const exactFile = this.app.vault.getAbstractFileByPath(checkpoint.bankPath);
+    if (exactFile instanceof TFile) {
+      try {
+        addCandidate({
+          path: exactFile.path,
+          bank: await this.loadPracticeBank(exactFile.path),
+        });
+      } catch {
+        // A valid matching copy elsewhere may still recover this checkpoint.
+      }
+    }
+    const snapshot = await this.dashboardRepository.load();
+    for (const record of snapshot.records) {
+      addCandidate({ path: record.bankPath, bank: record.bank });
+    }
+    const resolution = resolveStudyCheckpointBankCandidate(
+      checkpoint,
+      [...byPath.values()].map((candidate) => ({
+        bankPath: candidate.path,
+        bankId: candidate.bank.bankId,
+      })),
+    );
+    if (resolution.status === "missing") {
+      return {
+        status: "unavailable",
+        message: "The bank for the saved session was moved, replaced, deleted, or is not synchronized on this device.",
+      };
+    }
+    if (resolution.status === "ambiguous") {
+      return {
+        status: "ambiguous",
+        message: `More than one bank has the saved session identity (${resolution.candidates.map((candidate) => candidate.bankPath).join(", ")}). Resolve the duplicate banks before resuming.`,
+      };
+    }
+    const key = normalizePath(resolution.candidate.bankPath).toLocaleLowerCase();
+    const active = byPath.get(key);
+    if (active === undefined) {
+      return {
+        status: "unavailable",
+        message: "The matching practice bank disappeared while recovery was checking it.",
+      };
+    }
+    let resolvedCheckpoint = checkpoint;
+    if (resolution.status === "relocated") {
+      const latest = rebaseLatestStudySessionCheckpointBankPath(
+        checkpoint,
+        this.studyCheckpoint,
+        active.path,
+      );
+      if (latest.status === "stale") {
+        return {
+          status: "unavailable",
+          message: "The saved session changed while its bank location was being recovered.",
+        };
+      }
+      resolvedCheckpoint = latest.checkpoint;
+      if (latest.status === "rebased") {
+        this.studyCheckpoint = resolvedCheckpoint;
+        await this.persistStoredData();
+      }
+    }
+    return {
+      status: "resolved",
+      active,
+      checkpoint: resolvedCheckpoint,
+      relocated: resolution.status === "relocated",
+    };
   }
 
   private async resumeMergingStudyCheckpoint(
     checkpoint: StudySessionCheckpointV1,
+    bankPath: string,
+    current: PracticeBankV3,
   ): Promise<void> {
-    const current = await this.loadPracticeBank(checkpoint.bankPath);
     if (current.bankId !== checkpoint.bankId) {
-      throw new Error("The practice bank changed identity while a finished mobile session was awaiting merge. The checkpoint was retained.");
+      throw new Error("The practice bank changed identity while a finished session was awaiting merge. The checkpoint was retained.");
     }
     const session = finishedSessionFromCheckpoint(checkpoint);
     const summary = createSessionSummary(checkpointBankSnapshot(checkpoint), session);
     const saved = await this.repository.appendFinishedSession(
-      checkpoint.bankPath,
+      bankPath,
       summary,
       checkpoint.bankRevisionAtStart,
     );
-    this.activeBank = { path: checkpoint.bankPath, bank: saved };
+    this.activeBank = { path: bankPath, bank: saved };
     await this.clearStudySessionCheckpoint(checkpoint.sessionId);
     this.scheduleDashboardRefresh();
     new Notice("Recovered and saved the completed practice session without duplicating history.", 10_000);
   }
 
-  private async requestDiscardStudyCheckpoint(): Promise<void> {
+  private async requestDiscardStudyCheckpoint(): Promise<boolean> {
     if (this.studyCheckpoint === undefined && this.invalidStudyCheckpointRaw === undefined) {
       new Notice("There is no saved in-progress practice session to discard.");
-      return;
+      return false;
     }
-    const confirmed = await confirmDestructiveAction(this.app, {
+    return await this.discardStudyCheckpointAfterConfirmation({
       title: "Discard the saved practice session?",
       warning: "The device-local in-progress session, current input, and any answers not yet merged into the Practice Markdown will be removed.",
       consequences: [
@@ -654,13 +808,61 @@ export default class PracticeLabPlugin extends Plugin {
       ],
       confirmationPhrase: DISCARD_STUDY_CHECKPOINT_CONFIRMATION,
       confirmLabel: "Discard saved session",
+      completionNotice: "The device-local practice-session checkpoint was discarded.",
     });
-    if (!confirmed) return;
+  }
+
+  private async requestDiscardStudyCheckpointAndStart(
+    targetBank: PracticeBankV3,
+    recoveryMessage: string,
+  ): Promise<boolean> {
+    const checkpoint = this.studyCheckpoint;
+    const progress = checkpoint === undefined
+      ? "Its progress cannot be read because the saved checkpoint is malformed."
+      : (() => {
+          const summary = summarizeStudyCheckpointProgress(checkpoint);
+          const answerLabel = summary.answeredCount === 1 ? "answer" : "answers";
+          const skipLabel = summary.skippedCount === 1 ? "skip" : "skips";
+          return `It contains ${summary.answeredCount} ${answerLabel}, ${summary.skippedCount} ${skipLabel}${summary.hasDraft ? ", and unsaved input" : ", and no unsaved input"}.`;
+        })();
+    return await this.discardStudyCheckpointAfterConfirmation({
+      title: "Discard the saved session and start this practice?",
+      warning: `${recoveryMessage} ${progress}`,
+      consequences: [
+        "The unavailable session's current input and any answers not yet merged into history will be removed from this device.",
+        `The selected “${targetBank.source.title}” bank will start immediately after confirmation. Its exercises, lessons, history, and statistics will not be changed.`,
+        "Source notes, PDFs, images, provider settings, and every other saved practice bank remain unchanged.",
+      ],
+      confirmationPhrase: DISCARD_STUDY_CHECKPOINT_CONFIRMATION,
+      confirmLabel: "Discard session and start",
+      completionNotice: "The unavailable saved session was discarded. Starting the selected practice now.",
+    });
+  }
+
+  private async discardStudyCheckpointAfterConfirmation(options: {
+    readonly title: string;
+    readonly warning: string;
+    readonly consequences: readonly string[];
+    readonly confirmationPhrase: string;
+    readonly confirmLabel: string;
+    readonly completionNotice: string;
+  }): Promise<boolean> {
+    const sessionId = this.studyCheckpoint?.sessionId;
+    const confirmed = await confirmDestructiveAction(this.app, options);
+    if (!confirmed) return false;
+    if (
+      sessionId !== undefined
+      && this.studyCheckpoint !== undefined
+      && this.studyCheckpoint.sessionId !== sessionId
+    ) {
+      throw new Error("The saved practice session changed while the discard confirmation was open.");
+    }
     await this.clearStudySessionCheckpoint();
     for (const leaf of this.app.workspace.getLeavesOfType(PRACTICE_LAB_VIEW_TYPE)) {
       if (leaf.view instanceof PracticeLabView) leaf.view.discardStudySession();
     }
-    new Notice("The device-local practice-session checkpoint was discarded.", 8_000);
+    new Notice(options.completionNotice, 8_000);
+    return true;
   }
 
   public providerPresentation(
@@ -917,6 +1119,15 @@ export default class PracticeLabPlugin extends Plugin {
         },
       });
     }
+    this.addCommand({
+      id: "resume-saved-practice-session",
+      name: "Resume saved practice session",
+      checkCallback: (checking) => {
+        const available = this.studyCheckpoint !== undefined;
+        if (!checking && available) void this.restoreStudyCheckpoint();
+        return available;
+      },
+    });
     this.addCommand({
       id: "discard-saved-practice-session",
       name: "Discard saved practice session",
@@ -2026,14 +2237,25 @@ export default class PracticeLabPlugin extends Plugin {
     bank: PracticeBankV2,
     selection: BankStudySelection = { kind: "quick" },
   ): Promise<void> {
-    if (this.studyCheckpoint !== undefined || this.invalidStudyCheckpointRaw !== undefined) {
-      new Notice(
-        "A saved practice session already exists. Resume or explicitly discard it before starting another.",
-        8_000,
-      );
-      await this.restoreStudyCheckpoint();
+    const running = this.bankStudyStartTask;
+    if (running !== undefined) {
+      await running;
       return;
     }
+    const task = this.performBankStudyStart(path, bank, selection);
+    this.bankStudyStartTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.bankStudyStartTask === task) this.bankStudyStartTask = undefined;
+    }
+  }
+
+  private async performBankStudyStart(
+    path: string,
+    bank: PracticeBankV2,
+    selection: BankStudySelection,
+  ): Promise<void> {
     const currentBank = bank as PracticeBankV3;
     if (
       currentBank.schemaVersion !== 3
@@ -2042,6 +2264,20 @@ export default class PracticeLabPlugin extends Plugin {
       || !Array.isArray(currentBank.tutorLessons)
     ) {
       throw new Error("This bank must be migrated before its learning controls can be used.");
+    }
+    if (this.studyCheckpoint !== undefined || this.invalidStudyCheckpointRaw !== undefined) {
+      const recovery = await this.restoreStudyCheckpoint(
+        { path, bank: currentBank },
+        false,
+      );
+      if (recovery.status === "resumed") return;
+      if (recovery.status !== "none" && recovery.status !== "merged") {
+        const discarded = await this.requestDiscardStudyCheckpointAndStart(
+          currentBank,
+          recovery.message,
+        );
+        if (!discarded) return;
+      }
     }
     let resolvedSelection = selection;
     if (selection.kind === "recommended") {
@@ -2760,11 +2996,43 @@ export default class PracticeLabPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", scheduleRefresh));
     this.registerEvent(this.app.vault.on("modify", scheduleRefresh));
     this.registerEvent(this.app.vault.on("delete", scheduleRefresh));
-    this.registerEvent(this.app.vault.on("rename", scheduleRefresh));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      scheduleRefresh();
+      void this.followStudyCheckpointBankRename(file, oldPath);
+    }));
     this.registerEvent(this.app.metadataCache.on("changed", scheduleRefresh));
     this.registerEvent(this.app.metadataCache.on("resolved", scheduleRefresh));
     this.register(() => { this.clearDashboardRefreshTimer(); });
     this.register(() => { this.clearPendingAnswerReviewScanTimer(); });
+  }
+
+  private async followStudyCheckpointBankRename(
+    file: TAbstractFile,
+    oldPath: string,
+  ): Promise<void> {
+    const checkpoint = this.studyCheckpoint;
+    if (
+      checkpoint === undefined
+      || normalizePath(oldPath).toLocaleLowerCase()
+        !== normalizePath(checkpoint.bankPath).toLocaleLowerCase()
+      || !(file instanceof TFile)
+    ) {
+      return;
+    }
+    try {
+      const bank = await this.loadPracticeBank(file.path);
+      if (bank.bankId !== checkpoint.bankId) return;
+      const latest = rebaseLatestStudySessionCheckpointBankPath(
+        checkpoint,
+        this.studyCheckpoint,
+        file.path,
+      );
+      if (latest.status !== "rebased") return;
+      this.studyCheckpoint = latest.checkpoint;
+      await this.persistStoredData();
+    } catch {
+      // Recovery will retry by stable bank identity when the session is resumed.
+    }
   }
 
   private scheduleDashboardRefresh(): void {
@@ -4178,14 +4446,35 @@ export default class PracticeLabPlugin extends Plugin {
         await this.requestRemovePracticeSession(context.sourcePath, bank, sessionId);
       },
     });
+    const savedSession = this.studyCheckpoint;
+    const hasUnreadableSession = this.invalidStudyCheckpointRaw !== undefined;
+    const savedSessionMatchesBank = savedSession?.bankId === bank.bankId;
+    if (savedSession !== undefined || hasUnreadableSession) {
+      element.createEl("p", {
+        cls: "practice-lab-bank-warning practice-lab-study-recovery-status",
+        text: savedSessionMatchesBank && savedSession !== undefined
+          ? `Saved practice ready at question ${Math.min(savedSession.currentQuestionIndex + 1, savedSession.exercises.length)} of ${savedSession.exercises.length}. Selecting a practice action resumes it.`
+          : "Another saved session must be resolved before this practice can start. Selecting a practice action opens one safe resolution step.",
+        attr: { role: "status" },
+      });
+    }
+    const recoveryActionLabel = savedSessionMatchesBank
+      ? "Resume saved practice"
+      : savedSession !== undefined || hasUnreadableSession
+        ? "Resolve saved session…"
+        : undefined;
     const actions = element.createDiv({ cls: "practice-lab-bank-actions" });
     if (bank.learningPath !== null) {
       const continueLearning = actions.createEl("button", {
-        text: "Continue learning",
+        text: recoveryActionLabel ?? "Continue learning",
         cls: "mod-cta",
         attr: {
           type: "button",
-          title: "Start the locally recommended tutor lesson or practice set. The recommendation is advisory and can be ignored.",
+          title: recoveryActionLabel === undefined
+            ? "Start the locally recommended tutor lesson or practice set. The recommendation is advisory and can be ignored."
+            : savedSessionMatchesBank
+              ? "Resume the exact device-local session and its current input."
+              : "Review the unavailable saved session, then keep it or explicitly discard it before starting this bank.",
         },
       });
       continueLearning.addEventListener("click", () => {
@@ -4207,7 +4496,9 @@ export default class PracticeLabPlugin extends Plugin {
       });
     }
     const start = actions.createEl("button", {
-      text: bank.learningPath === null ? "Start practice" : "Practice all problems",
+      text: bank.learningPath === null
+        ? recoveryActionLabel ?? "Start practice"
+        : "Practice all problems",
       ...(bank.learningPath === null ? { cls: "mod-cta" } : {}),
       attr: { type: "button", title: "Start a freely accessible practice run across the saved exercises." },
     });
@@ -4527,6 +4818,7 @@ function studyProgressFromCheckpoint(
     orderedExerciseIds: checkpoint.exercises.map((exercise) => exercise.id),
     currentQuestionIndex: checkpoint.currentQuestionIndex,
     answers: structuredClone(checkpoint.answers),
+    skippedExerciseIds: [...(checkpoint.skippedExerciseIds ?? [])],
     currentInput: structuredClone(checkpoint.currentInput),
     answerReviewMode: checkpoint.answerReviewMode,
     answerReviewProvider: checkpoint.answerReviewProvider,

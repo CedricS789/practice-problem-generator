@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.17
+
+- Fixed orphaned device-local study checkpoints trapping every practice action in a repeated unavailable-bank notice loop.
+- Follow true bank moves by stable bank identity, persist the relocated path, and use it for both active-session recovery and pending final merges; replaced banks are never guessed from a matching title or source.
+- Added one explicit **Discard session and start** flow for unavailable or conflicting checkpoints, then start the originally selected bank without requiring a second click.
+- Made saved-bank actions state-aware with **Resume saved practice** or **Resolve saved session…** guidance and added a command to resume a saved session directly.
+- Serialized rapid practice-start and restore requests, followed live vault renames, and preserved skipped-question state when restoring a session.
+- Preserved answers and current input written while an asynchronous bank-relocation check is finishing, preventing recovery from rolling recent progress back.
+
 ## 1.3.16
 
 - Collapsed plugin-managed generation, recovery, and provenance JSON into one compact row in Live Preview without changing the portable Practice Markdown.
