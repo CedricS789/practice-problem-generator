@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -70,4 +71,15 @@ test("hidden metadata ranges preserve exact editor offsets and ignore incomplete
     ),
     [],
   );
+});
+
+test("multi-line hidden metadata decorations are supplied from editor state", () => {
+  const source = readFileSync(
+    new URL("../src/hidden-practice-metadata-editor.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /StateField\.define/u);
+  assert.match(source, /EditorView\.decorations\.from/u);
+  assert.doesNotMatch(source, /ViewPlugin\.fromClass/u);
+  assert.match(source, /block:\s*true/u);
 });

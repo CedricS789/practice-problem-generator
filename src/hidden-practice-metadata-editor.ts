@@ -1,10 +1,13 @@
 import { editorLivePreviewField } from "obsidian";
 import {
+  type EditorState,
+  StateField,
+  type Transaction,
+} from "@codemirror/state";
+import {
   Decoration,
   type DecorationSet,
   EditorView,
-  ViewPlugin,
-  type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 
@@ -61,10 +64,10 @@ class HiddenPracticeMetadataWidget extends WidgetType {
 }
 
 function selectionTouchesRange(
-  view: EditorView,
+  state: EditorState,
   metadataRange: HiddenPracticeMetadataRange,
 ): boolean {
-  return view.state.selection.ranges.some(
+  return state.selection.ranges.some(
     (selectionRange) =>
       selectionRange.from <= metadataRange.to
       && selectionRange.to >= metadataRange.from,
@@ -72,13 +75,13 @@ function selectionTouchesRange(
 }
 
 function metadataDecorations(
-  view: EditorView,
+  state: EditorState,
   ranges: readonly HiddenPracticeMetadataRange[],
 ): DecorationSet {
-  if (!view.state.field(editorLivePreviewField, false)) return Decoration.none;
+  if (!state.field(editorLivePreviewField, false)) return Decoration.none;
   return Decoration.set(
     ranges
-      .filter((range) => !selectionTouchesRange(view, range))
+      .filter((range) => !selectionTouchesRange(state, range))
       .map((range) => Decoration.replace({
         block: true,
         inclusive: true,
@@ -88,29 +91,53 @@ function metadataDecorations(
   );
 }
 
-class HiddenPracticeMetadataEditorView {
-  decorations: DecorationSet;
-  private ranges: readonly HiddenPracticeMetadataRange[];
-
-  constructor(view: EditorView) {
-    this.ranges = findHiddenPracticeMetadataRanges(view.state.doc.toString());
-    this.decorations = metadataDecorations(view, this.ranges);
-  }
-
-  update(update: ViewUpdate): void {
-    const livePreviewChanged =
-      update.startState.field(editorLivePreviewField, false)
-      !== update.state.field(editorLivePreviewField, false);
-    if (update.docChanged) {
-      this.ranges = findHiddenPracticeMetadataRanges(update.state.doc.toString());
-    }
-    if (update.docChanged || update.selectionSet || livePreviewChanged) {
-      this.decorations = metadataDecorations(update.view, this.ranges);
-    }
-  }
+interface HiddenPracticeMetadataEditorState {
+  readonly ranges: readonly HiddenPracticeMetadataRange[];
+  readonly decorations: DecorationSet;
 }
 
-export const hiddenPracticeMetadataEditorExtension = ViewPlugin.fromClass(
-  HiddenPracticeMetadataEditorView,
-  { decorations: (value) => value.decorations },
-);
+function createEditorState(state: EditorState): HiddenPracticeMetadataEditorState {
+  const ranges = findHiddenPracticeMetadataRanges(state.doc.toString());
+  return {
+    ranges,
+    decorations: metadataDecorations(state, ranges),
+  };
+}
+
+function updateEditorState(
+  value: HiddenPracticeMetadataEditorState,
+  transaction: Transaction,
+): HiddenPracticeMetadataEditorState {
+  const livePreviewChanged =
+    transaction.startState.field(editorLivePreviewField, false)
+    !== transaction.state.field(editorLivePreviewField, false);
+  if (
+    !transaction.docChanged
+    && transaction.selection === undefined
+    && !livePreviewChanged
+  ) {
+    return value;
+  }
+  const ranges = transaction.docChanged
+    ? findHiddenPracticeMetadataRanges(transaction.state.doc.toString())
+    : value.ranges;
+  return {
+    ranges,
+    decorations: metadataDecorations(transaction.state, ranges),
+  };
+}
+
+/**
+ * Multi-line replacement and block decorations must come from editor state.
+ * CodeMirror rejects them when a ViewPlugin supplies them while loading a file.
+ */
+export const hiddenPracticeMetadataEditorExtension = StateField.define<
+  HiddenPracticeMetadataEditorState
+>({
+  create: createEditorState,
+  update: updateEditorState,
+  provide: (field) => EditorView.decorations.from(
+    field,
+    (value) => value.decorations,
+  ),
+});

@@ -439,7 +439,17 @@ export default class PracticeLabPlugin extends Plugin {
       this.addFileMenuItems(menu, file);
     }));
     this.registerMarkdownCodeBlockProcessor("practice-lab", async (source, element, context) => {
-      await this.renderPracticeBlock(source, element, context);
+      try {
+        await this.renderPracticeBlock(source, element, context);
+      } catch (error) {
+        console.error("Practice Problem Generator could not render a saved bank.", error);
+        element.empty();
+        this.renderReadOnlyBlock(
+          element,
+          `The interactive bank renderer failed safely: ${error instanceof Error ? error.message : String(error)}. The Markdown file remains available; reload the plugin after installing an update, or inspect the recovery JSON below.`,
+          source,
+        );
+      }
     });
     this.addSettingTab(new PracticeLabSettingTab(this.app, this));
 

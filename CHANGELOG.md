@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.20
+
+- Fixed saved Practice Markdown files failing to open in Live Preview because their multi-line hidden-metadata replacement was supplied through an unsupported CodeMirror view-plugin decoration.
+- Moved the hidden-metadata decoration into a supported editor state field while preserving the compact, inspectable metadata row.
+- Made interactive bank rendering fail closed inside the code-block processor so a future renderer defect shows a recovery card instead of preventing the Markdown file itself from opening.
+
 ## 1.3.19
 
 - Made the configured PDF page and extracted-character limits one shared budget across the primary PDF and every supporting PDF in a Guided path.
