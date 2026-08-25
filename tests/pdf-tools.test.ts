@@ -114,7 +114,7 @@ test("PDF range and character limits fail closed without truncation", async () =
         timeoutMs: 30_000,
       },
     ),
-    /above the configured 20-character limit/u,
+    /above the remaining 20-character PDF budget/u,
   );
 });
 

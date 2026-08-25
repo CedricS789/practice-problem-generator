@@ -55,7 +55,15 @@ export interface SourcePresentation {
   readonly characterCount: number;
   readonly excerpt: string;
   readonly detail?: string;
+  /** Exact PDF scope chosen by the learner; absent for Markdown sources. */
+  readonly pdfPageSelection?: PdfPageSelectionPresentation;
   readonly visuals: readonly DetectedVisual[];
+}
+
+export interface PdfPageSelectionPresentation {
+  readonly firstPage: number;
+  readonly lastPage: number;
+  readonly documentPageCount: number;
 }
 
 export interface ProviderPresentation {

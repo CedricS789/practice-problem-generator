@@ -531,7 +531,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
 
     this.addHeading(
       "PDF source defaults",
-      "PDF text is extracted locally from an explicit page range. These limits keep one provider payload reviewable; every range can still be changed in the PDF dialog.",
+      "PDF text is extracted locally from explicit page ranges. Primary and supporting PDFs share these totals so one provider payload stays reviewable; every range can still be changed in the PDF dialog.",
     );
     new Setting(this.containerEl)
       .setName("Default PDF page window")
@@ -554,8 +554,8 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           });
       });
     new Setting(this.containerEl)
-      .setName("Maximum PDF pages per generation")
-      .setDesc("One to one hundred pages. A narrower range usually produces better grounded practice.")
+      .setName("Total PDF page budget per generation")
+      .setDesc("One to one hundred pages across all primary and supporting PDFs. Narrower source bundles usually produce better grounded practice.")
       .addText((text) => {
         text.inputEl.type = "number";
         text.inputEl.min = "1";
@@ -575,8 +575,8 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           });
       });
     new Setting(this.containerEl)
-      .setName("Maximum extracted PDF characters")
-      .setDesc("Twenty thousand to two hundred fifty thousand characters. Practice Problem Generator fails closed instead of truncating source evidence silently.")
+      .setName("Total extracted PDF character budget")
+      .setDesc("Twenty thousand to two hundred fifty thousand characters across all selected PDFs. Practice Problem Generator fails closed instead of truncating source evidence silently.")
       .addText((text) => {
         text.inputEl.type = "number";
         text.inputEl.min = "20000";

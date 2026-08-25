@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.19
+
+- Made the configured PDF page and extracted-character limits one shared budget across the primary PDF and every supporting PDF in a Guided path.
+- Showed exact used and remaining PDF capacity in Source & intent, passed only the remaining allowance into each additional PDF picker, and disabled further PDF selection when either budget is exhausted.
+- Added independent fail-closed budget checks after local extraction, while building the approved source bundle, immediately before planning, and before every newly launched set-generation job; PDF text is never silently truncated.
+- Persisted structured page-range metadata in recoverable source presentations and derived it from authoritative PDF import provenance when restoring older Guided-path recovery data.
+
 ## 1.3.18
 
 - Fixed the supporting-PDF file-picker handoff so its page-range dialog opens reliably after the file picker closes.

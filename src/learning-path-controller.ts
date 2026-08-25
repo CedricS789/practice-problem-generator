@@ -55,6 +55,7 @@ import {
   type SourceMaterialV1,
   type VisualSourceV1,
 } from "./model";
+import type { PdfSourceBudgetLimitsV1 } from "./pdf-source-budget";
 import {
   generationRecipeCatalogFromLegacy,
   parseGenerationRecipeCatalogMarkdown,
@@ -66,6 +67,7 @@ import {
 import { validatePracticeBank } from "./schema";
 import {
   createApprovedSourceBundle,
+  sourceBundleProblem,
   type ApprovedSourceBundleV1,
 } from "./source-bundle";
 import type { CollectedSource } from "./source";
@@ -141,6 +143,7 @@ export interface LearningPathControllerOptions {
   readonly ensureCliLayer: () => Promise<CliProviderLayer>;
   readonly providers: () => readonly ProviderPresentation[];
   readonly timeoutMs: () => number;
+  readonly pdfSourceBudgetLimits: () => PdfSourceBudgetLimitsV1;
   readonly setRecoveryHandle: (
     handle: DurableProcessHandle | undefined,
   ) => Promise<void>;
@@ -240,6 +243,7 @@ export class LearningPathController {
     ) {
       throw new Error("The approved planning payload changed. Preview and approve it again.");
     }
+    this.assertPendingPdfBudget(pending);
     const layer = await this.options.ensureCliLayer();
     const provider = this.provider(configuration.provider);
     const adapter = layer.adapters[configuration.provider];
@@ -276,6 +280,7 @@ export class LearningPathController {
   ): Promise<readonly LearningSetPayloadPreviewV1[]> {
     const pendingBlueprint = this.pendingBlueprint;
     if (pendingBlueprint === undefined) throw new Error("The approved source bundle is no longer available.");
+    this.assertPendingPdfBudget(pendingBlueprint);
     const batchId = `batch-${crypto.randomUUID()}`;
     const payloads = createPracticeSetPayloads({
       batchId,
@@ -320,6 +325,9 @@ export class LearningPathController {
     this.assertDesktop();
     const pending = this.pendingBatch;
     if (pending === undefined) throw new Error("Preview and approve every set payload before generation.");
+    const pendingBlueprint = this.pendingBlueprint;
+    if (pendingBlueprint === undefined) throw new Error("The approved source bundle is no longer available.");
+    this.assertPendingPdfBudget(pendingBlueprint);
     const recomputed = createPracticeSetPayloads({
       batchId: pending.batchId,
       planningInput: blueprint.planningInput,
@@ -575,7 +583,11 @@ export class LearningPathController {
   ): Promise<PendingBlueprintV1> {
     const primary = this.resolveSource(primaryPresentation);
     const supporting = supportingPresentations.map((source) => this.resolveSource(source));
-    const bundle = createApprovedSourceBundle(primary, supporting);
+    const bundle = createApprovedSourceBundle(
+      primary,
+      supporting,
+      this.options.pdfSourceBudgetLimits(),
+    );
     const preparedVisuals = await prepareSelectedVisuals(
       this.options.app,
       bundle.combined.visuals,
@@ -657,6 +669,11 @@ export class LearningPathController {
         }
       }
 
+      const pendingBlueprint = this.pendingBlueprint;
+      if (pendingBlueprint === undefined) {
+        throw new Error("The approved source bundle is no longer available.");
+      }
+      this.assertPendingPdfBudget(pendingBlueprint);
       let approved = nextGenerationBatchSet(pending.recovery);
       if (approved === undefined) break;
       const queueEntry = pending.recovery.queue[pending.recovery.queuePosition];
@@ -961,6 +978,15 @@ export class LearningPathController {
     return provider;
   }
 
+  private assertPendingPdfBudget(pending: PendingBlueprintV1): void {
+    const problem = sourceBundleProblem(
+      pending.bundle.primary,
+      pending.bundle.supporting,
+      this.options.pdfSourceBudgetLimits(),
+    );
+    if (problem !== null) throw new Error(problem.message);
+  }
+
   private assertDesktop(): void {
     if (Platform.isMobileApp) throw new Error("Guided learning-path generation is available on desktop only. Saved paths work on mobile.");
   }
@@ -1126,8 +1152,13 @@ function parsePersistedContext(
     restore(source, `supporting source ${index + 1}`)
   ));
   return {
-    primaryPresentation: value.primaryPresentation,
-    supportingPresentations: value.supportingPresentations,
+    primaryPresentation: recoveredSourcePresentation(
+      value.primaryPresentation,
+      primary,
+    ),
+    supportingPresentations: value.supportingPresentations.map((presentation, index) => (
+      recoveredSourcePresentation(presentation, supporting[index])
+    )),
     preparedVisuals: value.preparedVisuals,
     blueprint: value.blueprint,
     configurations: value.configurations,
@@ -1139,6 +1170,25 @@ function parsePersistedContext(
       bundleHash: value.combined.hash,
     },
   };
+}
+
+function recoveredSourcePresentation(
+  presentation: SourcePresentation,
+  source: CollectedSource | undefined,
+): SourcePresentation {
+  if (
+    presentation.mode !== "pdf"
+    || presentation.pdfPageSelection !== undefined
+    || source?.sourceImport === undefined
+  ) return snapshotSourcePresentation(presentation);
+  return snapshotSourcePresentation({
+    ...presentation,
+    pdfPageSelection: {
+      firstPage: source.sourceImport.firstPage,
+      lastPage: source.sourceImport.lastPage,
+      documentPageCount: source.sourceImport.pageCount,
+    },
+  });
 }
 
 async function preparedVisualsFromSources(

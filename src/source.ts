@@ -101,6 +101,11 @@ export function collectPdfSource(
     characterCount: extraction.characterCount,
     excerpt: createExcerpt(extraction.text),
     detail: pdfSourceDetail(sourceImport),
+    pdfPageSelection: {
+      firstPage: sourceImport.firstPage,
+      lastPage: sourceImport.lastPage,
+      documentPageCount: sourceImport.pageCount,
+    },
     visuals: [],
     file,
     submittedText: extraction.text,

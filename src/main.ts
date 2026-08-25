@@ -111,6 +111,9 @@ import {
   type PdfExtractionResult,
   type PdfPageRange,
 } from "./pdf-tools";
+import type {
+  PdfSourceBudgetLimitsV1,
+} from "./pdf-source-budget";
 import {
   displayReasoningEffort,
   reasoningEffortsForProvider,
@@ -388,6 +391,10 @@ export default class PracticeLabPlugin extends Plugin {
       ensureCliLayer: async () => this.ensureCliLayer(),
       providers: () => this.providers,
       timeoutMs: () => this.settings.timeoutMs,
+      pdfSourceBudgetLimits: () => ({
+        maxPages: this.settings.pdfMaxPageCount,
+        maxCharacters: this.settings.pdfMaxExtractedCharacters,
+      }),
       setRecoveryHandle: async (handle) => {
         this.learningBatchRecoveryHandle = handle;
         await this.persistStoredData();
@@ -1248,12 +1255,24 @@ export default class PracticeLabPlugin extends Plugin {
     }
   }
 
-  private async requestPdfSource(file = this.activePdfFile()): Promise<CollectedSource | null> {
+  private async requestPdfSource(
+    file = this.activePdfFile(),
+    allowance?: PdfSourceBudgetLimitsV1,
+  ): Promise<CollectedSource | null> {
     if (Platform.isMobileApp) {
       throw new Error("PDF source extraction is available in Obsidian desktop only.");
     }
     if (file === null || file.extension.toLowerCase() !== "pdf") {
       throw new Error("Open or right-click a vault PDF before using Practice Problem Generator.");
+    }
+    const limits = allowance ?? {
+      maxPages: this.settings.pdfMaxPageCount,
+      maxCharacters: this.settings.pdfMaxExtractedCharacters,
+    };
+    if (limits.maxPages < 1 || limits.maxCharacters < 1) {
+      throw new Error(
+        "The approved source bundle has no PDF capacity remaining. Remove PDF pages or raise the total PDF budget in settings.",
+      );
     }
     const bytes = await this.app.vault.readBinary(file);
     const inspecting = new Notice(
@@ -1272,8 +1291,9 @@ export default class PracticeLabPlugin extends Plugin {
     const range = await choosePdfPageRange(this.app, {
       title: file.basename,
       info,
-      defaultPageCount: this.settings.pdfDefaultPageCount,
-      maxPages: this.settings.pdfMaxPageCount,
+      defaultPageCount: Math.min(this.settings.pdfDefaultPageCount, limits.maxPages),
+      maxPages: limits.maxPages,
+      maxCharacters: limits.maxCharacters,
     });
     if (range === null) return null;
     const progress = showPdfExtractionProgress(this.app, {
@@ -1286,8 +1306,9 @@ export default class PracticeLabPlugin extends Plugin {
         bytes,
         info,
         range,
-        this.settings.pdfMaxPageCount,
+        limits.maxPages,
         progress.signal,
+        limits.maxCharacters,
       );
     } catch (error) {
       if (progress.signal.aborted) return null;
@@ -1309,12 +1330,13 @@ export default class PracticeLabPlugin extends Plugin {
     range: PdfPageRange,
     maxPages = this.settings.pdfMaxPageCount,
     signal?: AbortSignal,
+    maxCharacters = this.settings.pdfMaxExtractedCharacters,
   ): Promise<PdfExtractionResult> {
     return extractPdfPages(bytes, info, range, {
       pdfinfoExecutable: this.settings.pdfinfoExecutable,
       pdftotextExecutable: this.settings.pdftotextExecutable,
       maxPages,
-      maxCharacters: this.settings.pdfMaxExtractedCharacters,
+      maxCharacters,
       timeoutMs: this.settings.pdfExtractionTimeoutMs,
       ...(signal === undefined ? {} : { signal }),
     });
@@ -1535,6 +1557,7 @@ export default class PracticeLabPlugin extends Plugin {
         focusInstructions: this.settings.defaultFocusInstructions,
         gifFrameDefault: this.settings.gifFrameDefault,
         pdfMaxPageCount: this.settings.pdfMaxPageCount,
+        pdfMaxExtractedCharacters: this.settings.pdfMaxExtractedCharacters,
       },
       callbacks: {
         requestPrimarySource: async (mode) => {
@@ -1572,15 +1595,29 @@ export default class PracticeLabPlugin extends Plugin {
           this.lastSource = prepared;
           return this.learningPathController.registerSource(prepared);
         },
-        requestSupportingSource: async (mode) => {
+        requestSupportingSource: async (
+          mode,
+          pdfBudget,
+        ) => {
           try {
-            const file = mode === "pdf"
-              ? await chooseSourcePdfFile(this.app)
-              : await chooseSourceNoteFile(this.app);
-            if (file === null) return null;
-            const source = mode === "pdf"
-              ? await this.requestPdfSource(file)
-              : await collectSourceFromFile(this.app, file, "note");
+            let source: CollectedSource | null;
+            if (mode === "pdf") {
+              if (pdfBudget === null) {
+                throw new Error(
+                  "The current PDF bundle has invalid or unavailable budget metadata. Choose its PDF sources again before adding another PDF.",
+                );
+              }
+              const file = await chooseSourcePdfFile(this.app);
+              if (file === null) return null;
+              source = await this.requestPdfSource(file, {
+                maxPages: pdfBudget.remainingPages,
+                maxCharacters: pdfBudget.remainingCharacters,
+              });
+            } else {
+              const file = await chooseSourceNoteFile(this.app);
+              if (file === null) return null;
+              source = await collectSourceFromFile(this.app, file, "note");
+            }
             if (source === null) return null;
             return this.learningPathController.registerSource(
               await this.prepareGuidedSourceVisuals(source),

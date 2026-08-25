@@ -122,7 +122,12 @@ test("supporting PDFs wait for their picker to close and always require bounded 
   assert.match(guidedViewSource, /Add supporting PDF pages/u);
   assert.match(guidedViewSource, /this\.addSupportingSource\("note"\)/u);
   assert.match(guidedViewSource, /this\.addSupportingSource\("pdf"\)/u);
-  assert.match(guidedViewSource, /requestSupportingSource\(mode\)/u);
+  assert.match(guidedViewSource, /requestSupportingSource\(\s*mode,\s*pdfBudget,/u);
+  assert.match(guidedViewSource, /primary and supporting PDFs share one total generation budget/u);
+  assert.match(guidedViewSource, /remainingPages\.toLocaleString\(\)/u);
+  assert.match(guidedViewSource, /remainingCharacters\.toLocaleString\(\)/u);
+  assert.match(mainSource, /maxPages: pdfBudget\.remainingPages/u);
+  assert.match(mainSource, /maxCharacters: pdfBudget\.remainingCharacters/u);
   assert.match(mainSource, /mode === "pdf"[\s\S]*chooseSourcePdfFile\(this\.app\)[\s\S]*chooseSourceNoteFile\(this\.app\)/u);
   assert.match(mainSource, /mode === "pdf"[\s\S]*this\.requestPdfSource\(file\)/u);
 });

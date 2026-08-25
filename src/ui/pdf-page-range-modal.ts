@@ -7,6 +7,7 @@ export interface PdfPageRangeModalOptions {
   readonly info: PdfDocumentInfo;
   readonly defaultPageCount: number;
   readonly maxPages: number;
+  readonly maxCharacters: number;
 }
 
 export function choosePdfPageRange(
@@ -54,7 +55,7 @@ class PdfPageRangeModal extends Modal {
     });
     this.contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: `Choose exactly what the AI may consider. Text extraction runs locally from a temporary copy, and no more than ${this.options.maxPages.toLocaleString()} pages can be selected. Practice Problem Generator never modifies the PDF. You will inspect the exact provider payload before generation.`,
+      text: `Choose exactly what the AI may consider. Text extraction runs locally from a temporary copy. This selection has room for at most ${this.options.maxPages.toLocaleString()} pages and ${this.options.maxCharacters.toLocaleString()} extracted characters in the shared PDF budget; extraction fails instead of truncating evidence. Practice Problem Generator never modifies the PDF. You will inspect the exact provider payload before generation.`,
     });
 
     new Setting(this.contentEl)
@@ -127,7 +128,7 @@ class PdfPageRangeModal extends Modal {
     this.firstPageSetting = firstPage.settingEl;
     const lastPage = new Setting(this.contentEl)
       .setName("Last page")
-      .setDesc(`One generation may use at most ${this.options.maxPages.toLocaleString()} pages.`)
+      .setDesc(`This selection can use at most ${this.options.maxPages.toLocaleString()} pages under the current generation budget.`)
       .addText((text) => {
         this.lastInput = text.inputEl;
         this.configureNumberInput(this.lastInput, this.lastPage);

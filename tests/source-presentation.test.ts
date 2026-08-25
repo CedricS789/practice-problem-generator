@@ -58,3 +58,26 @@ test("durable source presentations discard circular Obsidian runtime fields", ()
     ],
   });
 });
+
+test("durable PDF presentations preserve exact page-budget provenance", () => {
+  const source: SourcePresentation = {
+    mode: "pdf",
+    title: "Synthetic PDF",
+    path: "Sources/Synthetic.pdf",
+    characterCount: 12_345,
+    excerpt: "Synthetic extracted text.",
+    detail: "PDF pages 7-11 of 80",
+    pdfPageSelection: {
+      firstPage: 7,
+      lastPage: 11,
+      documentPageCount: 80,
+    },
+    visuals: [],
+  };
+
+  assert.deepEqual(snapshotSourcePresentation(source).pdfPageSelection, {
+    firstPage: 7,
+    lastPage: 11,
+    documentPageCount: 80,
+  });
+});

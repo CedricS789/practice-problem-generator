@@ -15,6 +15,8 @@ function source(
     readonly mode?: CollectedSource["mode"];
     readonly firstPage?: number;
     readonly lastPage?: number;
+    readonly characterCount?: number;
+    readonly documentPageCount?: number;
   } = {},
 ): CollectedSource {
   const mode = options.mode ?? "note";
@@ -22,7 +24,7 @@ function source(
     mode,
     path,
     title: path.split("/").at(-1) ?? path,
-    characterCount: 100,
+    characterCount: options.characterCount ?? 100,
     excerpt: `Excerpt for ${path}`,
     visuals: [{
       id: "visual-shared",
@@ -52,7 +54,7 @@ function source(
         pdfContentHash: `pdf-${hash}`,
         firstPage: options.firstPage ?? 1,
         lastPage: options.lastPage ?? 2,
-        pageCount: 20,
+        pageCount: options.documentPageCount ?? 20,
         extractedAt: "2026-08-22T00:00:00.000Z",
         extractor: "pdftotext-layout-v1" as const,
         revisions: [],
@@ -123,4 +125,82 @@ test("supporting source limit is enforced before prompt construction", () => {
     source(`Notes/Support ${index + 1}.md`, `sha256:${index + 1}`)
   ));
   assert.equal(sourceBundleProblem(primary, supporting)?.code, "too-many-supporting");
+});
+
+test("approved bundle enforces aggregate PDF page and character budgets before prompts", () => {
+  const primary = source("Books/Primary.pdf", "sha256:primary", {
+    mode: "pdf",
+    firstPage: 1,
+    lastPage: 24,
+    characterCount: 70_000,
+    documentPageCount: 200,
+  });
+  const supporting = source("Books/Supporting.pdf", "sha256:support", {
+    mode: "pdf",
+    firstPage: 50,
+    lastPage: 68,
+    characterCount: 55_000,
+    documentPageCount: 200,
+  });
+  const limits = { maxPages: 40, maxCharacters: 120_000 } as const;
+
+  assert.equal(
+    sourceBundleProblem(primary, [supporting], limits)?.code,
+    "pdf-page-limit",
+  );
+  const misleadingPresentation: CollectedSource = {
+    ...primary,
+    pdfPageSelection: {
+      firstPage: 1,
+      lastPage: 1,
+      documentPageCount: 200,
+    },
+  };
+  assert.equal(
+    sourceBundleProblem(misleadingPresentation, [supporting], limits)?.code,
+    "pdf-page-limit",
+  );
+  assert.throws(
+    () => createApprovedSourceBundle(primary, [supporting], limits),
+    /approved PDF bundle contains 43 pages/iu,
+  );
+
+  const characterOnly = source("Books/Text-heavy.pdf", "sha256:text-heavy", {
+    mode: "pdf",
+    firstPage: 70,
+    lastPage: 73,
+    characterCount: 55_000,
+    documentPageCount: 200,
+  });
+  assert.equal(
+    sourceBundleProblem(primary, [characterOnly], limits)?.code,
+    "pdf-character-limit",
+  );
+});
+
+test("approved bundles require authoritative PDF import provenance", () => {
+  const selected = source("Books/Untrusted.pdf", "sha256:untrusted", {
+    mode: "pdf",
+    firstPage: 1,
+    lastPage: 2,
+  });
+  const { sourceImport: _sourceImport, ...withoutImport } = selected;
+  void _sourceImport;
+  const presentationOnly: CollectedSource = {
+    ...withoutImport,
+    pdfPageSelection: {
+      firstPage: 1,
+      lastPage: 2,
+      documentPageCount: 20,
+    },
+  };
+
+  assert.equal(
+    sourceBundleProblem(
+      presentationOnly,
+      [],
+      { maxPages: 40, maxCharacters: 120_000 },
+    )?.code,
+    "pdf-provenance",
+  );
 });

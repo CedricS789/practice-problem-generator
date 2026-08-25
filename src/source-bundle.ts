@@ -1,6 +1,11 @@
 import type { SourceMaterialScopeV1, SourceMaterialV1 } from "./model";
+import {
+  pdfSourceBudgetProblem,
+  type PdfSourceBudgetLimitsV1,
+} from "./pdf-source-budget";
 import { createSourceHash, sha256Hex } from "./segmenter";
 import type { CollectedSource } from "./source";
+import type { SourcePresentation } from "./ui/contracts";
 
 export const MAX_SUPPORTING_SOURCES = 4;
 
@@ -14,7 +19,14 @@ export interface ApprovedSourceBundleV1 {
 }
 
 export interface SourceBundleProblem {
-  readonly code: "too-many-supporting" | "duplicate-scope" | "empty-source";
+  readonly code:
+    | "too-many-supporting"
+    | "duplicate-scope"
+    | "empty-source"
+    | "invalid-pdf-budget"
+    | "pdf-provenance"
+    | "pdf-page-limit"
+    | "pdf-character-limit";
   readonly message: string;
 }
 
@@ -26,8 +38,9 @@ export interface SourceBundleProblem {
 export function createApprovedSourceBundle(
   primary: CollectedSource,
   supporting: readonly CollectedSource[],
+  pdfBudgetLimits?: PdfSourceBudgetLimitsV1,
 ): ApprovedSourceBundleV1 {
-  const problem = sourceBundleProblem(primary, supporting);
+  const problem = sourceBundleProblem(primary, supporting, pdfBudgetLimits);
   if (problem !== null) throw new Error(problem.message);
 
   const inputs = [primary, ...supporting];
@@ -86,6 +99,7 @@ export function createApprovedSourceBundle(
 export function sourceBundleProblem(
   primary: CollectedSource,
   supporting: readonly CollectedSource[],
+  pdfBudgetLimits?: PdfSourceBudgetLimitsV1,
 ): SourceBundleProblem | null {
   if (supporting.length > MAX_SUPPORTING_SOURCES) {
     return {
@@ -100,6 +114,24 @@ export function sourceBundleProblem(
       message: "Every approved source must contain at least one grounded segment and a source hash.",
     };
   }
+  if (pdfBudgetLimits !== undefined) {
+    const budgetProblem = pdfSourceBudgetProblem(
+      all.map(sourceBudgetPresentation),
+      pdfBudgetLimits,
+    );
+    if (budgetProblem !== null) {
+      return {
+        code: budgetProblem.code === "invalid-limits"
+          ? "invalid-pdf-budget"
+          : budgetProblem.code === "missing-page-range"
+            ? "pdf-provenance"
+            : budgetProblem.code === "page-limit"
+              ? "pdf-page-limit"
+              : "pdf-character-limit",
+        message: budgetProblem.message,
+      };
+    }
+  }
   const identities = new Set<string>();
   for (const source of all) {
     const identity = sourceScopeIdentity(source);
@@ -112,6 +144,22 @@ export function sourceBundleProblem(
     identities.add(identity);
   }
   return null;
+}
+
+function sourceBudgetPresentation(source: CollectedSource): SourcePresentation {
+  if (source.mode !== "pdf") return source;
+  const { pdfPageSelection: _presentedSelection, ...withoutPresentedSelection } = source;
+  void _presentedSelection;
+  const imported = source.sourceImport;
+  if (imported === undefined) return withoutPresentedSelection;
+  return {
+    ...withoutPresentedSelection,
+    pdfPageSelection: {
+      firstPage: imported.firstPage,
+      lastPage: imported.lastPage,
+      documentPageCount: imported.pageCount,
+    },
+  };
 }
 
 export function sourceMaterialId(source: CollectedSource): string {

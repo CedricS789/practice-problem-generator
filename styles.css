@@ -3873,6 +3873,32 @@ button.practice-lab-heatmap-day.is-future {
   margin: var(--size-4-1) 0 var(--size-4-2);
 }
 
+.practice-learning-path-pdf-budget {
+  display: grid;
+  gap: var(--size-2-1);
+  margin: 0 0 var(--size-4-3);
+  padding: var(--size-4-2) var(--size-4-3);
+  border: 1px solid var(--practice-lab-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+
+.practice-learning-path-pdf-budget > span,
+.practice-learning-path-pdf-budget > small {
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.practice-learning-path-pdf-budget.is-error {
+  border-color: var(--background-modifier-error);
+  background: var(--background-modifier-error);
+}
+
+.practice-learning-path-pdf-budget.is-error > span,
+.practice-learning-path-pdf-budget.is-error > small {
+  color: var(--text-error);
+}
+
 .practice-learning-path-support-actions {
   display: flex;
   flex-wrap: wrap;

@@ -104,7 +104,7 @@ export async function extractPdfPages(
   }
   if (text.length > options.maxCharacters) {
     throw new Error(
-      `The selected PDF pages contain ${text.length.toLocaleString()} characters, above the configured ${options.maxCharacters.toLocaleString()}-character limit. Choose a narrower page range or raise the PDF source limit in settings.`,
+      `The selected PDF pages contain ${text.length.toLocaleString()} characters, above the remaining ${options.maxCharacters.toLocaleString()}-character PDF budget. Choose a narrower page range, remove other PDFs from the source bundle, or raise the total PDF budget in settings.`,
     );
   }
   return {

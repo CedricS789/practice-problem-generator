@@ -84,3 +84,25 @@ test("legacy completed batches reconcile relationship links before final validat
   assert.match(controllerSource, /aspects: reconciliation\.aspects/u);
   assert.match(controllerSource, /reconciledLinkCount: reconciliation\.reconciledLinkCount/u);
 });
+
+test("guided PDF budgets are checked at every new provider boundary", () => {
+  assert.match(
+    controllerSource,
+    /createApprovedSourceBundle\(\s*primary,\s*supporting,\s*this\.options\.pdfSourceBudgetLimits\(\),/u,
+  );
+  const blueprintStart = controllerSource.indexOf("public async generateBlueprint(");
+  const payloadStart = controllerSource.indexOf("public async previewSetPayloads(", blueprintStart);
+  const blueprintGeneration = controllerSource.slice(blueprintStart, payloadStart);
+  assert.ok(
+    blueprintGeneration.indexOf("this.assertPendingPdfBudget(pending)")
+      < blueprintGeneration.indexOf("layer.coordinator.generate"),
+  );
+
+  const batchStart = controllerSource.indexOf("private async runPendingBatch(");
+  const batchEnd = controllerSource.indexOf("private async failActiveSet(", batchStart);
+  const batch = controllerSource.slice(batchStart, batchEnd);
+  assert.ok(
+    batch.indexOf("this.assertPendingPdfBudget(pendingBlueprint)")
+      < batch.indexOf("nextGenerationBatchSet"),
+  );
+});

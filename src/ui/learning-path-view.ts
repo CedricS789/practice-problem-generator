@@ -27,6 +27,13 @@ import {
 } from "../exercise-distribution";
 import { displayDifficulty } from "../difficulty";
 import { MAX_FOCUS_INSTRUCTIONS_LENGTH } from "../focus-instructions";
+import {
+  pdfSourceBudgetProblem,
+  pdfSourceBudgetUsage,
+  type PdfSourceBudgetLimitsV1,
+  type PdfSourceBudgetProblemV1,
+  type PdfSourceBudgetUsageV1,
+} from "../pdf-source-budget";
 import type {
   LearningPathStartingLevelV1,
   PracticeBankV3,
@@ -137,6 +144,7 @@ export interface LearningPathViewCallbacks {
   ) => Promise<SourcePresentation>;
   readonly requestSupportingSource: (
     mode: "note" | "pdf",
+    pdfBudget: PdfSourceBudgetUsageV1 | null,
   ) => Promise<SourcePresentation | null>;
   readonly updateSourceVisuals?: (
     source: SourcePresentation,
@@ -232,6 +240,7 @@ export interface LearningPathViewOptions {
     readonly focusInstructions: string;
     readonly gifFrameDefault?: GifFramePosition;
     readonly pdfMaxPageCount: number;
+    readonly pdfMaxExtractedCharacters: number;
   };
   readonly initialSource?: SourcePresentation;
   readonly recoverableBatch?: boolean;
@@ -310,6 +319,8 @@ function sameSourceScope(
     && left.path === right.path
     && left.title === right.title
     && left.detail === right.detail
+    && JSON.stringify(left.pdfPageSelection ?? null)
+      === JSON.stringify(right.pdfPageSelection ?? null)
     && left.excerpt === right.excerpt;
 }
 
@@ -833,8 +844,11 @@ export class PracticeLearningPathView extends ItemView {
     supportHeading.createSpan({ text: `${this.supporting.length} of 4 selected` });
     section.createEl("p", {
       cls: "setting-item-description practice-learning-path-support-help",
-      text: `Add only the material you approve. Every supporting PDF opens a page picker and is limited to ${this.options.defaults.pdfMaxPageCount.toLocaleString()} pages.`,
+      text: "Add only the material you approve. Every PDF opens a page picker; primary and supporting PDFs share one total generation budget.",
     });
+    const pdfBudgetProblem = this.pdfBudgetProblem();
+    const pdfBudget = this.pdfBudgetUsage();
+    this.renderPdfBudget(section, pdfBudget, pdfBudgetProblem);
     for (const source of this.supporting) {
       this.renderSourceCard(section, source, "Supporting", () => {
         this.supporting = this.supporting.filter((candidate) => candidate !== source);
@@ -852,8 +866,17 @@ export class PracticeLearningPathView extends ItemView {
     new ButtonComponent(supportActions)
       .setIcon("file-scan")
       .setButtonText(this.supportingSourceChoiceBusy === "pdf" ? "Choosing PDF pages…" : "Add supporting PDF pages")
-      .setTooltip(`Choose one PDF, then select an exact page or page range. At most ${this.options.defaults.pdfMaxPageCount.toLocaleString()} pages may be extracted.`)
-      .setDisabled(this.busy !== null || this.visualSelectionBusy || this.supporting.length >= 4)
+      .setTooltip(pdfBudget === null
+        ? pdfBudgetProblem?.message ?? "Choose the invalid PDF source again before adding another PDF."
+        : `Choose one PDF and an exact page range. ${pdfBudget.remainingPages.toLocaleString()} pages and ${pdfBudget.remainingCharacters.toLocaleString()} extracted characters remain in this bundle.`)
+      .setDisabled(
+        this.busy !== null
+        || this.visualSelectionBusy
+        || this.supporting.length >= 4
+        || pdfBudget === null
+        || pdfBudget.remainingPages < 1
+        || pdfBudget.remainingCharacters < 1
+      )
       .onClick(() => void this.addSupportingSource("pdf"));
 
     const level = this.section(container, "Starting level", "This changes the proposed teaching depth, never the approved source boundary.");
@@ -901,7 +924,12 @@ export class PracticeLearningPathView extends ItemView {
       .setIcon("scan-eye")
       .setButtonText(this.busy === "preview" ? "Preparing exact payload…" : "Preview planning payload")
       .setCta()
-      .setDisabled(this.busy !== null || this.primaryVisualPreparationToken !== null)
+      .setDisabled(
+        this.busy !== null
+        || this.primaryVisualPreparationToken !== null
+        || pdfBudgetProblem !== null
+      )
+      .setTooltip(pdfBudgetProblem?.message ?? "Prepare the exact source-grounded planning payload for approval.")
       .onClick(() => void this.previewPlanningPayload());
     if (this.preview !== null) this.renderPlanningPreview(container);
   }
@@ -1899,12 +1927,58 @@ export class PracticeLearningPathView extends ItemView {
     return this.primary === null ? [] : [this.primary, ...this.supporting];
   }
 
+  private pdfBudgetLimits(): PdfSourceBudgetLimitsV1 {
+    return {
+      maxPages: this.options.defaults.pdfMaxPageCount,
+      maxCharacters: this.options.defaults.pdfMaxExtractedCharacters,
+    };
+  }
+
+  private pdfBudgetProblem(): PdfSourceBudgetProblemV1 | null {
+    return pdfSourceBudgetProblem(this.approvedSources(), this.pdfBudgetLimits());
+  }
+
+  private pdfBudgetUsage(): PdfSourceBudgetUsageV1 | null {
+    try {
+      return pdfSourceBudgetUsage(this.approvedSources(), this.pdfBudgetLimits());
+    } catch {
+      return null;
+    }
+  }
+
+  private renderPdfBudget(
+    container: HTMLElement,
+    usage: PdfSourceBudgetUsageV1 | null,
+    problem: PdfSourceBudgetProblemV1 | null,
+  ): void {
+    const limits = this.pdfBudgetLimits();
+    const budget = container.createDiv({
+      cls: `practice-learning-path-pdf-budget${problem === null ? "" : " is-error"}`,
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    budget.createEl("strong", { text: "Shared PDF budget" });
+    if (usage === null) {
+      budget.createSpan({ text: problem?.message ?? "PDF budget metadata is unavailable." });
+      return;
+    }
+    budget.createSpan({
+      text: `${usage.pageCount.toLocaleString()} of ${limits.maxPages.toLocaleString()} pages · ${usage.characterCount.toLocaleString()} of ${limits.maxCharacters.toLocaleString()} extracted characters`,
+    });
+    budget.createEl("small", {
+      text: usage.pdfSourceCount === 0
+        ? "No PDF pages selected yet."
+        : `${usage.remainingPages.toLocaleString()} pages and ${usage.remainingCharacters.toLocaleString()} characters remain for additional PDFs.`,
+    });
+    if (problem !== null) budget.createEl("small", { text: problem.message });
+  }
+
   private sourceScopeKey(source: SourcePresentation): string {
     return JSON.stringify([
       source.mode,
       source.path,
       source.title,
       source.detail ?? "",
+      source.pdfPageSelection ?? null,
       source.excerpt,
     ]);
   }
@@ -2248,12 +2322,29 @@ export class PracticeLearningPathView extends ItemView {
 
   private async addSupportingSource(mode: "note" | "pdf"): Promise<void> {
     if (this.busy !== null || this.supporting.length >= 4) return;
+    const pdfBudget = mode === "pdf" ? this.pdfBudgetUsage() : null;
+    if (
+      mode === "pdf"
+      && (
+        pdfBudget === null
+        || pdfBudget.remainingPages < 1
+        || pdfBudget.remainingCharacters < 1
+      )
+    ) {
+      this.error = this.pdfBudgetProblem()?.message
+        ?? "The approved source bundle has no PDF capacity remaining. Remove PDF pages or raise the total PDF budget in settings.";
+      this.render();
+      return;
+    }
     this.busy = "source";
     this.supportingSourceChoiceBusy = mode;
     this.error = null;
     this.render();
     try {
-      const source = await this.options.callbacks.requestSupportingSource(mode);
+      const source = await this.options.callbacks.requestSupportingSource(
+        mode,
+        pdfBudget,
+      );
       if (source !== null) {
         const duplicate = [this.primary, ...this.supporting].some((candidate) => (
           candidate?.path === source.path && candidate.mode === source.mode && candidate.detail === source.detail
@@ -2274,6 +2365,12 @@ export class PracticeLearningPathView extends ItemView {
   private async previewPlanningPayload(): Promise<void> {
     const primary = this.primary;
     if (primary === null || this.busy !== null) return;
+    const budgetProblem = this.pdfBudgetProblem();
+    if (budgetProblem !== null) {
+      this.error = budgetProblem.message;
+      this.render();
+      return;
+    }
     let completed = false;
     this.busy = "preview";
     this.error = null;

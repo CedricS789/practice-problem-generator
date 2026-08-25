@@ -16,6 +16,15 @@ export function snapshotSourcePresentation(
     characterCount: source.characterCount,
     excerpt: source.excerpt,
     ...(source.detail === undefined ? {} : { detail: source.detail }),
+    ...(source.pdfPageSelection === undefined
+      ? {}
+      : {
+          pdfPageSelection: {
+            firstPage: source.pdfPageSelection.firstPage,
+            lastPage: source.pdfPageSelection.lastPage,
+            documentPageCount: source.pdfPageSelection.documentPageCount,
+          },
+        }),
     visuals: source.visuals.map(snapshotDetectedVisual),
   };
 }

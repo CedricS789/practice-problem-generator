@@ -1,7 +1,7 @@
 {
   "id": "practice-lab-ai",
   "name": "Practice Problem Generator",
-  "version": "1.3.18",
+  "version": "1.3.19",
   "minAppVersion": "1.13.0",
   "description": "Generate source-grounded practice problems, image occlusions, and analytics from notes and selected PDF pages.",
   "author": "Cédric Sipakam",
