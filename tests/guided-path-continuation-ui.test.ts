@@ -30,11 +30,31 @@ test("saved Practice notes explain path scope and every study choice", () => {
 
 test("a tutor step shows overall path position and skips the one-question order dialog", () => {
   assert.match(viewSource, /private renderGuidedPathPosition\(/u);
-  assert.match(viewSource, /`Step \$\{step\.stepIndex \+ 1\} of \$\{step\.stepCount\}`/u);
-  assert.match(viewSource, /total questions in the saved path/u);
+  assert.match(viewSource, /text: "You are here"/u);
+  assert.match(viewSource, /"Guided path location"/u);
+  assert.match(viewSource, /text: "Overall path"/u);
+  assert.match(viewSource, /"Inside this tutor lesson"/u);
+  assert.match(viewSource, /"Inside this practice set"/u);
+  assert.match(viewSource, /text: "Previous step"/u);
+  assert.match(viewSource, /text: "Next step"/u);
+  assert.match(viewSource, /saved questions across the full path/u);
+  assert.match(
+    viewSource,
+    /this\.studyPathStep === null\s*&& this\.displayPreferences\.practice\.showStudyProgress/u,
+  );
   assert.match(viewSource, /const isSingleTutorStep = learning\?\.pathStep\?\.kind === "tutor-lesson"/u);
   assert.match(viewSource, /isSingleTutorStep\s*\? null\s*: await chooseStudyOrder/u);
   assert.match(styles, /\.practice-lab-path-position \{/u);
+  assert.match(styles, /\.practice-lab-path-progress-levels \{/u);
+  assert.match(styles, /\.practice-lab-path-adjacent-steps \{/u);
+});
+
+test("Guided path location reconstructs neighboring steps after recovery", () => {
+  assert.match(viewSource, /readonly previousStepTitle\?: string/u);
+  assert.match(viewSource, /readonly nextStepTitle\?: string/u);
+  assert.match(viewSource, /titleForStep\(steps\[stepIndex - 1\]\)/u);
+  assert.match(viewSource, /titleForStep\(steps\[stepIndex \+ 1\]\)/u);
+  assert.match(viewSource, /const recoveredPathStep = recoveredPathStepPresentation/u);
 });
 
 test("an active Guided path session highlights Guided path in the mode switch", () => {

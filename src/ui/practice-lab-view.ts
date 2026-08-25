@@ -176,6 +176,8 @@ export interface LearningPathStepPresentationV1 {
   readonly kind: "tutor-lesson" | "practice-set";
   readonly questionCount: number;
   readonly totalQuestionCount: number;
+  readonly previousStepTitle?: string;
+  readonly nextStepTitle?: string;
 }
 
 type MainStage = "source" | "configure" | "review" | "study";
@@ -230,42 +232,58 @@ function recoveredPathStepPresentation(
   progress: StudySessionLearningProgressV1 | undefined,
   questionCount: number,
 ): LearningPathStepPresentationV1 | null {
+  const context = progress?.context;
   if (
     progress?.scope.mode !== "learning-path"
     || progress.pathStepIndex === null
-    || progress.context?.learningPath === null
-    || progress.context?.learningPath === undefined
+    || context?.learningPath === null
+    || context?.learningPath === undefined
   ) return null;
-  const path = progress.context.learningPath;
+  const path = context.learningPath;
   const steps = [...path.steps].sort((left, right) => left.order - right.order);
   const step = steps.find((candidate) => candidate.order === progress.pathStepIndex)
     ?? steps[progress.pathStepIndex];
   if (step === undefined) return null;
+  const stepIndex = steps.indexOf(step);
+  const titleForStep = (candidate: (typeof steps)[number] | undefined): string | undefined => {
+    if (candidate === undefined) return undefined;
+    return candidate.kind === "lesson"
+      ? context.tutorLessons.find((lesson) => lesson.id === candidate.lessonId)?.title
+      : context.practiceSets.find((set) => set.id === candidate.setId)?.title;
+  };
+  const previousStepTitle = titleForStep(steps[stepIndex - 1]);
+  const nextStepTitle = titleForStep(steps[stepIndex + 1]);
+  const adjacentSteps = {
+    ...(previousStepTitle === undefined ? {} : { previousStepTitle }),
+    ...(nextStepTitle === undefined ? {} : { nextStepTitle }),
+  };
   if (step.kind === "lesson") {
-    const lesson = progress.context.tutorLessons.find((candidate) => (
+    const lesson = context.tutorLessons.find((candidate) => (
       candidate.id === step.lessonId
     ));
     if (lesson === undefined) return null;
     return {
       pathTitle: path.title,
-      stepIndex: steps.indexOf(step),
+      stepIndex,
       stepCount: steps.length,
       stepTitle: lesson.title,
       kind: "tutor-lesson",
       questionCount,
-      totalQuestionCount: progress.context.exercises.length,
+      totalQuestionCount: context.exercises.length,
+      ...adjacentSteps,
     };
   }
-  const set = progress.context.practiceSets.find((candidate) => candidate.id === step.setId);
+  const set = context.practiceSets.find((candidate) => candidate.id === step.setId);
   if (set === undefined) return null;
   return {
     pathTitle: path.title,
-    stepIndex: steps.indexOf(step),
+    stepIndex,
     stepCount: steps.length,
     stepTitle: set.title,
     kind: "practice-set",
     questionCount,
-    totalQuestionCount: progress.context.exercises.length,
+    totalQuestionCount: context.exercises.length,
+    ...adjacentSteps,
   };
 }
 
@@ -985,9 +1003,12 @@ export class PracticeLabView extends ItemView {
       this.studyLearningProgress = learning === undefined
         ? null
         : structuredClone(learning.progress);
-      this.studyPathStep = learning?.pathStep === undefined
-        ? recoveredPathStepPresentation(learning?.progress, selectedExercises.length)
-        : structuredClone(learning.pathStep);
+      const recoveredPathStep = recoveredPathStepPresentation(
+        learning?.progress,
+        selectedExercises.length,
+      );
+      this.studyPathStep = recoveredPathStep
+        ?? (learning?.pathStep === undefined ? null : structuredClone(learning.pathStep));
       this.studyLearningEvidenceByExerciseId.clear();
       for (const evidence of learning?.evidenceByExerciseId ?? []) {
         this.studyLearningEvidenceByExerciseId.set(
@@ -2824,7 +2845,10 @@ export class PracticeLabView extends ItemView {
       return;
     }
     this.renderGuidedPathPosition(container);
-    if (this.displayPreferences.practice.showStudyProgress) {
+    if (
+      this.studyPathStep === null
+      && this.displayPreferences.practice.showStudyProgress
+    ) {
       const progress = container.createDiv({ cls: "practice-lab-study-progress" });
       const progressText = progress.createDiv({
         text: `Question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
@@ -2877,27 +2901,113 @@ export class PracticeLabView extends ItemView {
     const step = this.studyPathStep;
     if (step === null) return;
     const position = container.createEl("section", {
-      cls: "practice-lab-path-position",
-      attr: { "aria-label": "Guided path position" },
+      cls: "practice-lab-path-position practice-lab-path-navigator",
+      attr: { "aria-label": "Your current guided path location" },
     });
-    const heading = position.createDiv({ cls: "practice-lab-path-position-heading" });
-    heading.createSpan({ cls: "practice-lab-badge", text: "Guided path" });
-    heading.createEl("strong", {
+    const locationLabel = position.createDiv({ cls: "practice-lab-path-location-label" });
+    const locationIcon = locationLabel.createSpan({ attr: { "aria-hidden": "true" } });
+    setIcon(locationIcon, "map-pin");
+    locationLabel.createSpan({ text: "You are here" });
+
+    const breadcrumb = position.createEl("nav", {
+      cls: "practice-lab-path-breadcrumb",
+      attr: { "aria-label": "Guided path location" },
+    });
+    breadcrumb.createSpan({
+      cls: "practice-lab-path-breadcrumb-item is-path",
+      text: step.pathTitle,
+      attr: { title: step.pathTitle },
+    });
+    breadcrumb.createSpan({
+      cls: "practice-lab-path-breadcrumb-separator",
+      text: "›",
+      attr: { "aria-hidden": "true" },
+    });
+    breadcrumb.createSpan({
+      cls: "practice-lab-path-breadcrumb-item is-step",
+      text: `Step ${step.stepIndex + 1} of ${step.stepCount}`,
+      attr: { "aria-current": "step" },
+    });
+    if (this.displayPreferences.practice.showStudyProgress) {
+      breadcrumb.createSpan({
+        cls: "practice-lab-path-breadcrumb-separator",
+        text: "›",
+        attr: { "aria-hidden": "true" },
+      });
+      breadcrumb.createSpan({
+        cls: "practice-lab-path-breadcrumb-item is-question",
+        text: `Question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
+        attr: { "aria-current": "page" },
+      });
+    }
+
+    const identity = position.createDiv({ cls: "practice-lab-path-current-step" });
+    identity.createEl("h3", { text: step.stepTitle });
+    const kind = step.kind === "tutor-lesson" ? "Tutor lesson" : "Practice set";
+    identity.createEl("p", {
+      text: `${kind} · ${step.questionCount} ${step.questionCount === 1 ? "guided question" : "questions"} here · ${step.totalQuestionCount} saved questions across the full path`,
+    });
+
+    const levels = position.createDiv({ cls: "practice-lab-path-progress-levels" });
+    const pathLevel = levels.createDiv({
+      cls: "practice-lab-path-progress-level is-overall-path",
+    });
+    const pathLevelHeading = pathLevel.createDiv({
+      cls: "practice-lab-path-progress-heading",
+    });
+    pathLevelHeading.createSpan({ text: "Overall path" });
+    pathLevelHeading.createEl("strong", {
       text: `Step ${step.stepIndex + 1} of ${step.stepCount}`,
     });
-    position.createEl("h3", { text: step.stepTitle });
-    const kind = step.kind === "tutor-lesson" ? "Tutor lesson" : "Practice set";
-    position.createEl("p", {
-      text: `${kind} · ${step.questionCount} ${step.questionCount === 1 ? "guided question" : "questions"} in this step · ${step.totalQuestionCount} total questions in the saved path.`,
-    });
-    const meter = position.createEl("progress", {
+    const pathMeter = pathLevel.createEl("progress", {
       attr: {
         max: String(step.stepCount),
         value: String(step.stepIndex + 1),
-        "aria-label": `Guided path step ${step.stepIndex + 1} of ${step.stepCount}`,
+        "aria-label": `Overall Guided path position: step ${step.stepIndex + 1} of ${step.stepCount}`,
       },
     });
-    meter.value = step.stepIndex + 1;
+    pathMeter.value = step.stepIndex + 1;
+
+    if (this.displayPreferences.practice.showStudyProgress) {
+      const questionLevel = levels.createDiv({
+        cls: "practice-lab-path-progress-level is-current-step",
+      });
+      const questionLevelHeading = questionLevel.createDiv({
+        cls: "practice-lab-path-progress-heading",
+      });
+      questionLevelHeading.createSpan({
+        text: step.kind === "tutor-lesson" ? "Inside this tutor lesson" : "Inside this practice set",
+      });
+      questionLevelHeading.createEl("strong", {
+        text: `Question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
+      });
+      const questionMeter = questionLevel.createEl("progress", {
+        attr: {
+          max: String(this.studyExercises.length),
+          value: String(this.studyIndex + 1),
+          "aria-label": `Current step position: question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
+        },
+      });
+      questionMeter.value = this.studyIndex + 1;
+    }
+
+    const adjacent = position.createDiv({ cls: "practice-lab-path-adjacent-steps" });
+    const previous = adjacent.createDiv({ cls: "practice-lab-path-adjacent-step" });
+    previous.createSpan({ text: "Previous step" });
+    const previousTitle = step.previousStepTitle
+      ?? (step.stepIndex === 0 ? "Start of path" : "Earlier path step");
+    previous.createEl("strong", {
+      text: previousTitle,
+      attr: { title: previousTitle },
+    });
+    const next = adjacent.createDiv({ cls: "practice-lab-path-adjacent-step is-next" });
+    next.createSpan({ text: "Next step" });
+    const nextTitle = step.nextStepTitle
+      ?? (step.stepIndex === step.stepCount - 1 ? "End of path" : "Later path step");
+    next.createEl("strong", {
+      text: nextTitle,
+      attr: { title: nextTitle },
+    });
   }
 
   private renderStudySkipAction(

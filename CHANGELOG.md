@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.25
+
+- Replaced the two visually competing Guided-session indicators with one **You are here** navigator that presents the path, current step, and current question as a single breadcrumb.
+- Separated overall-path position from within-step question position into clearly labelled progress levels with distinct visual weight and accessible descriptions.
+- Added previous- and next-step titles, including after checkpoint recovery, so the current set or tutor lesson has immediate sequence context.
+- Kept the original compact question indicator for non-Guided practice while avoiding duplicate progress displays inside Guided sessions.
+
 ## 1.3.24
 
 - Made the creation-mode switch highlight **Guided path** whenever the active or restored study session belongs to a Guided-path step, instead of always displaying **Quick set** as selected.

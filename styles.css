@@ -1663,36 +1663,167 @@
 
 .practice-lab-path-position {
   display: grid;
-  gap: 7px;
-  margin-bottom: 12px;
-  padding: 12px 14px;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 15px 16px;
   border: 1px solid var(--practice-lab-border);
+  border-left: 4px solid var(--interactive-accent);
   border-radius: var(--radius-m);
-  background: var(--practice-lab-accent-soft);
+  background: linear-gradient(
+    135deg,
+    var(--practice-lab-accent-soft),
+    var(--background-primary) 72%
+  );
 }
 
-.practice-lab-path-position-heading {
+.practice-lab-path-location-label {
   display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-accent);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.practice-lab-path-location-label svg {
+  width: 15px;
+  height: 15px;
+}
+
+.practice-lab-path-breadcrumb {
+  display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 7px 12px;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
 }
 
-.practice-lab-path-position > h3,
-.practice-lab-path-position > p,
+.practice-lab-path-breadcrumb-item {
+  min-width: 0;
+  max-width: min(100%, 32rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.practice-lab-path-breadcrumb-item.is-step,
+.practice-lab-path-breadcrumb-item.is-question {
+  padding: 2px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-weight: var(--font-medium);
+}
+
+.practice-lab-path-breadcrumb-item.is-question {
+  border-color: var(--interactive-accent);
+  color: var(--text-accent);
+}
+
+.practice-lab-path-breadcrumb-separator {
+  color: var(--text-faint);
+  font-size: 1rem;
+}
+
+.practice-lab-path-current-step {
+  display: grid;
+  gap: 3px;
+}
+
+.practice-lab-path-current-step h3,
+.practice-lab-path-current-step p,
 .practice-lab-path-completion-note {
   margin: 0;
 }
 
-.practice-lab-path-position > p,
+.practice-lab-path-current-step p,
 .practice-lab-path-completion-note {
   color: var(--text-muted);
 }
 
-.practice-lab-path-position > progress {
+.practice-lab-path-progress-levels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.practice-lab-path-progress-level {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.practice-lab-path-progress-level.is-overall-path {
+  background: var(--practice-lab-accent-soft);
+}
+
+.practice-lab-path-progress-heading {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 10px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.practice-lab-path-progress-heading strong {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.practice-lab-path-progress-level progress {
   width: 100%;
+  height: 9px;
   accent-color: var(--interactive-accent);
+}
+
+.practice-lab-path-progress-level.is-current-step progress {
+  height: 6px;
+  accent-color: var(--text-success);
+}
+
+.practice-lab-path-adjacent-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 2px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.practice-lab-path-adjacent-step {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-top: 9px;
+}
+
+.practice-lab-path-adjacent-step.is-next {
+  text-align: end;
+}
+
+.practice-lab-path-adjacent-step > span {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.practice-lab-path-adjacent-step > strong {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .practice-lab-study-shortcut-hint {
@@ -3471,11 +3602,17 @@ button.practice-lab-heatmap-day.is-future {
   }
 
   .practice-lab-study-progress,
+  .practice-lab-path-progress-levels,
+  .practice-lab-path-adjacent-steps,
   .practice-lab-matching-row,
   .practice-lab-occlusion-answers label,
   .practice-lab-cloze-answers label,
   .practice-lab-calculation-answer {
     grid-template-columns: 1fr;
+  }
+
+  .practice-lab-path-adjacent-step.is-next {
+    text-align: start;
   }
 
   .practice-lab-dashboard-filters {
