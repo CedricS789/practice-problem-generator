@@ -1503,11 +1503,43 @@ export class PracticeLearningPathView extends ItemView {
       container.createEl("p", { cls: "practice-lab-callout is-error", text: "This workspace no longer contains a learning path." });
       return;
     }
+    complete.createEl("p", {
+      cls: "practice-lab-muted",
+      text: `${path.steps.length} path ${path.steps.length === 1 ? "step" : "steps"} · ${workspace.bank.tutorLessons.length} tutor ${workspace.bank.tutorLessons.length === 1 ? "lesson" : "lessons"} · ${workspace.bank.practiceSets.length} named ${workspace.bank.practiceSets.length === 1 ? "set" : "sets"} · ${workspace.bank.exercises.length} total ${workspace.bank.exercises.length === 1 ? "question" : "questions"}.`,
+    });
     const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
-    this.savedAction(actions, "Continue learning", "play", "continue", true);
-    this.savedAction(actions, "Choose a set", "list", "choose-set", false);
-    this.savedAction(actions, "Mixed practice", "shuffle", "mixed", false);
-    this.savedAction(actions, "Open Markdown workspace", "file-text", "open-bank", false);
+    this.savedAction(
+      actions,
+      "Continue guided path",
+      "play",
+      "continue",
+      true,
+      "Start the locally recommended path step. Tutor steps contain one guided problem and continue directly after saving.",
+    );
+    this.savedAction(
+      actions,
+      "Choose a set",
+      "list",
+      "choose-set",
+      false,
+      "Choose any named practice set without progression locks.",
+    );
+    this.savedAction(
+      actions,
+      "Mixed practice",
+      "shuffle",
+      "mixed",
+      false,
+      "Combine every named set without replaying tutor lessons.",
+    );
+    this.savedAction(
+      actions,
+      "Open Practice note",
+      "file-text",
+      "open-bank",
+      false,
+      "Open the readable Practice Markdown workspace with study choices, history, and statistics.",
+    );
 
     const identity = this.section(container, "Path identity", "Rename the path without changing its grounded content, sessions, or source provenance.");
     const title = identity.createEl("input", {
@@ -1587,10 +1619,12 @@ export class PracticeLearningPathView extends ItemView {
     icon: string,
     action: "continue" | "choose-set" | "mixed" | "open-bank",
     cta: boolean,
+    tooltip: string,
   ): void {
     const button = new ButtonComponent(container)
       .setIcon(icon)
       .setButtonText(label)
+      .setTooltip(tooltip)
       .setDisabled(this.busy !== null)
       .onClick(() => {
         if (this.savedWorkspace !== null) {

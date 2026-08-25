@@ -71,7 +71,7 @@ test("study flow supports keyboard actions, honest completion labels, and instan
   assert.match(view, /Save and practice again/u);
   assert.match(
     view,
-    /private async finishStudy\(action: "save" \| "repeat" \| "repair"\)/u,
+    /action: "save" \| "repeat" \| "repair" \| "continue"/u,
   );
   assert.match(view, /this\.finishStudy\("save"\)/u);
   assert.match(view, /this\.finishStudy\("repeat"\)/u);

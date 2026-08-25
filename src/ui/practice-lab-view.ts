@@ -165,6 +165,17 @@ export const PRACTICE_LAB_VIEW_TYPE = "practice-lab-view";
 export interface LearningStudyLaunchV1 {
   readonly progress: StudySessionLearningProgressV1;
   readonly evidenceByExerciseId: readonly SessionExerciseEvidenceV3[];
+  readonly pathStep?: LearningPathStepPresentationV1;
+}
+
+export interface LearningPathStepPresentationV1 {
+  readonly pathTitle: string;
+  readonly stepIndex: number;
+  readonly stepCount: number;
+  readonly stepTitle: string;
+  readonly kind: "tutor-lesson" | "practice-set";
+  readonly questionCount: number;
+  readonly totalQuestionCount: number;
 }
 
 type MainStage = "source" | "configure" | "review" | "study";
@@ -213,6 +224,49 @@ interface AnswerReviewActivityLog {
 
 function selectedVisualIds(source: SourcePresentation | null): readonly string[] {
   return source?.visuals.filter((visual) => visual.selected).map((visual) => visual.id) ?? [];
+}
+
+function recoveredPathStepPresentation(
+  progress: StudySessionLearningProgressV1 | undefined,
+  questionCount: number,
+): LearningPathStepPresentationV1 | null {
+  if (
+    progress?.scope.mode !== "learning-path"
+    || progress.pathStepIndex === null
+    || progress.context?.learningPath === null
+    || progress.context?.learningPath === undefined
+  ) return null;
+  const path = progress.context.learningPath;
+  const steps = [...path.steps].sort((left, right) => left.order - right.order);
+  const step = steps.find((candidate) => candidate.order === progress.pathStepIndex)
+    ?? steps[progress.pathStepIndex];
+  if (step === undefined) return null;
+  if (step.kind === "lesson") {
+    const lesson = progress.context.tutorLessons.find((candidate) => (
+      candidate.id === step.lessonId
+    ));
+    if (lesson === undefined) return null;
+    return {
+      pathTitle: path.title,
+      stepIndex: steps.indexOf(step),
+      stepCount: steps.length,
+      stepTitle: lesson.title,
+      kind: "tutor-lesson",
+      questionCount,
+      totalQuestionCount: progress.context.exercises.length,
+    };
+  }
+  const set = progress.context.practiceSets.find((candidate) => candidate.id === step.setId);
+  if (set === undefined) return null;
+  return {
+    pathTitle: path.title,
+    stepIndex: steps.indexOf(step),
+    stepCount: steps.length,
+    stepTitle: set.title,
+    kind: "practice-set",
+    questionCount,
+    totalQuestionCount: progress.context.exercises.length,
+  };
 }
 
 function configurationKey(
@@ -374,6 +428,7 @@ export class PracticeLabView extends ItemView {
   private studySubmitted: { readonly correct?: boolean; readonly answer: string } | null = null;
   private studyOrigin: StudySessionOriginV1 | null = null;
   private studyLearningProgress: StudySessionLearningProgressV1 | null = null;
+  private studyPathStep: LearningPathStepPresentationV1 | null = null;
   private readonly studyLearningEvidenceByExerciseId = new Map<
     string,
     SessionExerciseEvidenceV3
@@ -831,11 +886,11 @@ export class PracticeLabView extends ItemView {
     this.render();
   }
 
-  public startStudy(
+  public async startStudy(
     exercises?: readonly DraftExercisePresentation[],
     origin?: StudySessionOriginV1,
     learning?: LearningStudyLaunchV1,
-  ): void {
+  ): Promise<void> {
     if (this.source === null) {
       new Notice("Load the source note before starting a practice session.");
       return;
@@ -860,7 +915,7 @@ export class PracticeLabView extends ItemView {
       new Notice("The session setup dialog is already open.");
       return;
     }
-    void this.configureAndStartStudy([...selectedExercises], origin, learning);
+    await this.configureAndStartStudy([...selectedExercises], origin, learning);
   }
 
   private async configureAndStartStudy(
@@ -870,23 +925,35 @@ export class PracticeLabView extends ItemView {
   ): Promise<void> {
     this.studySetupOpen = true;
     try {
-      const result = await chooseStudyOrder(this.app, {
-        itemTypes: selectedExercises.map((exercise) => exercise.type),
-        defaults: {
-          mode: this.studyOrderDefault,
-          typeSequence: this.studyTypeSequence,
-          shuffleWithinTypes: this.studyShuffleWithinTypesDefault,
-        },
-        labels: EXERCISE_LABELS,
-      });
-      if (result === null) return;
+      const isSingleTutorStep = learning?.pathStep?.kind === "tutor-lesson"
+        && selectedExercises.length === 1;
+      const result = isSingleTutorStep
+        ? null
+        : await chooseStudyOrder(this.app, {
+            itemTypes: selectedExercises.map((exercise) => exercise.type),
+            defaults: {
+              mode: this.studyOrderDefault,
+              typeSequence: this.studyTypeSequence,
+              shuffleWithinTypes: this.studyShuffleWithinTypesDefault,
+            },
+            labels: EXERCISE_LABELS,
+          });
+      if (!isSingleTutorStep && result === null) return;
 
-      const selection: StudyOrderSelection = {
-        mode: result.mode,
-        typeSequence: normalizeStudyTypeSequence(result.typeSequence),
-        shuffleWithinTypes: result.shuffleWithinTypes,
-      };
-      if (result.rememberAsDefault) {
+      const selection: StudyOrderSelection = isSingleTutorStep
+        ? {
+            mode: "bank",
+            typeSequence: normalizeStudyTypeSequence(this.studyTypeSequence),
+            shuffleWithinTypes: false,
+          }
+        : {
+            mode: result?.mode ?? "bank",
+            typeSequence: normalizeStudyTypeSequence(
+              result?.typeSequence ?? this.studyTypeSequence,
+            ),
+            shuffleWithinTypes: result?.shuffleWithinTypes ?? false,
+          };
+      if (result?.rememberAsDefault === true) {
         this.studyOrderDefault = selection.mode;
         this.studyTypeSequence = [...selection.typeSequence];
         this.studyShuffleWithinTypesDefault = selection.shuffleWithinTypes;
@@ -918,6 +985,9 @@ export class PracticeLabView extends ItemView {
       this.studyLearningProgress = learning === undefined
         ? null
         : structuredClone(learning.progress);
+      this.studyPathStep = learning?.pathStep === undefined
+        ? recoveredPathStepPresentation(learning?.progress, selectedExercises.length)
+        : structuredClone(learning.pathStep);
       this.studyLearningEvidenceByExerciseId.clear();
       for (const evidence of learning?.evidenceByExerciseId ?? []) {
         this.studyLearningEvidenceByExerciseId.set(
@@ -993,6 +1063,10 @@ export class PracticeLabView extends ItemView {
     this.studyLearningProgress = progress.learningProgress === undefined
       ? null
       : structuredClone(progress.learningProgress);
+    this.studyPathStep = recoveredPathStepPresentation(
+      progress.learningProgress,
+      exercises.length,
+    );
     this.studyLearningEvidenceByExerciseId.clear();
     for (const evidence of [
       ...evidenceByExerciseId,
@@ -1036,6 +1110,7 @@ export class PracticeLabView extends ItemView {
     this.studyCurrentInput = null;
     this.studyOrigin = null;
     this.studyLearningProgress = null;
+    this.studyPathStep = null;
     this.studyLearningEvidenceByExerciseId.clear();
     this.studyTutorProblemStarted = false;
     this.stage = this.drafts.length > 0 ? "review" : "source";
@@ -2530,7 +2605,7 @@ export class PracticeLabView extends ItemView {
     const study = new ButtonComponent(footer)
       .setIcon("play")
       .setButtonText("Start practice");
-    study.onClick(() => this.startStudy());
+    study.onClick(() => void this.startStudy());
     this.reviewStudyButton = study;
     this.refreshReviewActionState();
   }
@@ -2735,6 +2810,7 @@ export class PracticeLabView extends ItemView {
       this.renderStudyComplete(container);
       return;
     }
+    this.renderGuidedPathPosition(container);
     if (this.displayPreferences.practice.showStudyProgress) {
       const progress = container.createDiv({ cls: "practice-lab-study-progress" });
       const progressText = progress.createDiv({
@@ -2782,6 +2858,33 @@ export class PracticeLabView extends ItemView {
       this.renderStudyFeedback(answerArea, exercise);
     }
     this.prepareStudyCard(card, exercise.id);
+  }
+
+  private renderGuidedPathPosition(container: HTMLElement): void {
+    const step = this.studyPathStep;
+    if (step === null) return;
+    const position = container.createEl("section", {
+      cls: "practice-lab-path-position",
+      attr: { "aria-label": "Guided path position" },
+    });
+    const heading = position.createDiv({ cls: "practice-lab-path-position-heading" });
+    heading.createSpan({ cls: "practice-lab-badge", text: "Guided path" });
+    heading.createEl("strong", {
+      text: `Step ${step.stepIndex + 1} of ${step.stepCount}`,
+    });
+    position.createEl("h3", { text: step.stepTitle });
+    const kind = step.kind === "tutor-lesson" ? "Tutor lesson" : "Practice set";
+    position.createEl("p", {
+      text: `${kind} · ${step.questionCount} ${step.questionCount === 1 ? "guided question" : "questions"} in this step · ${step.totalQuestionCount} total questions in the saved path.`,
+    });
+    const meter = position.createEl("progress", {
+      attr: {
+        max: String(step.stepCount),
+        value: String(step.stepIndex + 1),
+        "aria-label": `Guided path step ${step.stepIndex + 1} of ${step.stepCount}`,
+      },
+    });
+    meter.value = step.stepIndex + 1;
   }
 
   private renderStudySkipAction(
@@ -3894,7 +3997,16 @@ export class PracticeLabView extends ItemView {
       const icon = summary.createDiv({ cls: "practice-lab-complete-icon" });
       setIcon(icon, "party-popper");
     }
-    summary.createEl("h3", { text: "Session complete" });
+    const pathStep = this.studyPathStep;
+    summary.createEl("h3", {
+      text: pathStep === null ? "Session complete" : "Path step complete",
+    });
+    if (pathStep !== null) {
+      summary.createEl("p", {
+        cls: "practice-lab-path-completion-note",
+        text: `You finished step ${pathStep.stepIndex + 1} of ${pathStep.stepCount}: ${pathStep.stepTitle}. Save it to record this work, then continue directly to the next saved path step.`,
+      });
+    }
     const finale = summary.createDiv({ cls: "practice-lab-run-finale" });
     if (preferences.showCompletionRank) {
       this.studyCompletionMetricEls.set(
@@ -3954,12 +4066,31 @@ export class PracticeLabView extends ItemView {
       failure.createSpan({ text: this.studyFinishError });
     }
     const actions = summary.createDiv({ cls: "practice-lab-completion-actions" });
-    new ButtonComponent(actions)
-      .setIcon("save")
-      .setButtonText(this.studyFinishing ? "Saving session…" : "Save session")
-      .setCta()
-      .setDisabled(this.studyFinishing)
-      .onClick(() => void this.finishStudy("save"));
+    if (
+      pathStep !== null
+      && this.options.callbacks.continueLearningPath !== undefined
+    ) {
+      new ButtonComponent(actions)
+        .setIcon("route")
+        .setButtonText(this.studyFinishing ? "Saving path step…" : "Save and continue path")
+        .setTooltip("Save this completed step, then open the next tutor lesson or practice set in the saved path.")
+        .setCta()
+        .setDisabled(this.studyFinishing)
+        .onClick(() => void this.finishStudy("continue"));
+      new ButtonComponent(actions)
+        .setIcon("save")
+        .setButtonText(this.studyFinishing ? "Saving path step…" : "Save and stop here")
+        .setTooltip("Save this completed path step and return without opening another step.")
+        .setDisabled(this.studyFinishing)
+        .onClick(() => void this.finishStudy("save"));
+    } else {
+      new ButtonComponent(actions)
+        .setIcon("save")
+        .setButtonText(this.studyFinishing ? "Saving session…" : "Save session")
+        .setCta()
+        .setDisabled(this.studyFinishing)
+        .onClick(() => void this.finishStudy("save"));
+    }
     if (this.studyLearningProgress === null) {
       new ButtonComponent(actions)
         .setIcon("repeat-2")
@@ -5394,7 +5525,9 @@ export class PracticeLabView extends ItemView {
     )) === true;
   }
 
-  private async finishStudy(action: "save" | "repeat" | "repair"): Promise<void> {
+  private async finishStudy(
+    action: "save" | "repeat" | "repair" | "continue",
+  ): Promise<void> {
     const source = this.source;
     if (source === null || this.studyFinishing) return;
     const session: FinishedStudySession = {
@@ -5422,6 +5555,8 @@ export class PracticeLabView extends ItemView {
     };
     const practiceAgain = action === "repeat";
     const buildRepair = action === "repair";
+    const continuePath = action === "continue";
+    const completedPathStep = this.studyPathStep;
     const repeatExercises = [...this.studyExercises];
     const repeatReview = {
       mode: this.answerReviewMode,
@@ -5438,6 +5573,7 @@ export class PracticeLabView extends ItemView {
       this.studyOrigin = null;
       this.studySkippedExerciseIds = [];
       this.studyLearningProgress = null;
+      this.studyPathStep = null;
       this.studyLearningEvidenceByExerciseId.clear();
       this.studyTutorProblemStarted = false;
       this.studyCurrentInput = null;
@@ -5454,10 +5590,32 @@ export class PracticeLabView extends ItemView {
       new Notice(
         practiceAgain
           ? "Session history saved. Starting a new run."
-          : "Session history saved.",
+          : continuePath
+            ? "Path step saved. Opening the next step."
+            : "Session history saved.",
       );
-      if (practiceAgain) {
-        this.startStudy(repeatExercises);
+      if (continuePath) {
+        try {
+          if (completedPathStep === null) {
+            throw new Error("The completed path-step position is unavailable.");
+          }
+          await this.options.callbacks.continueLearningPath?.(
+            completedPathStep.stepIndex,
+          );
+          if (this.studyIndex >= this.studyExercises.length) {
+            this.stage = "review";
+            this.render();
+          }
+        } catch (error) {
+          this.stage = "review";
+          this.render();
+          new Notice(this.errorMessage(
+            error,
+            "The path step was saved, but the next step could not be opened.",
+          ), 10_000);
+        }
+      } else if (practiceAgain) {
+        await this.startStudy(repeatExercises);
         this.answerReviewMode =
           this.options.callbacks.enqueueAnswerReview === undefined
             ? "self"

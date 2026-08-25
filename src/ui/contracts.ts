@@ -424,6 +424,10 @@ export interface PracticeLabCallbacks {
     source: SourcePresentation,
     session: FinishedStudySession,
   ) => Promise<void>;
+  /** Saves the completed path step and opens the next saved path step. */
+  readonly continueLearningPath?: (
+    completedStepIndex: number,
+  ) => Promise<void> | void;
   /** Opens an editable, consent-first repair-set brief after the session saves. */
   readonly buildRepairSet?: (
     source: SourcePresentation,

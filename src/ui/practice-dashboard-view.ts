@@ -1580,7 +1580,8 @@ export class PracticeDashboardView extends ItemView {
     if (record.bank.learningPath !== null && this.options.continueLearning !== undefined) {
       new ButtonComponent(actions)
         .setIcon("route")
-        .setButtonText("Continue learning")
+        .setButtonText("Continue guided path")
+        .setTooltip("Start the locally recommended tutor lesson or practice set, one path step at a time.")
         .setCta()
         .onClick(() => void this.runAction(
           () => this.options.continueLearning?.(record),
@@ -1590,6 +1591,7 @@ export class PracticeDashboardView extends ItemView {
         new ButtonComponent(actions)
           .setIcon("list")
           .setButtonText("Choose a set")
+          .setTooltip("Choose any named practice set without progression locks.")
           .onClick(() => void this.runAction(
             () => this.options.chooseSet?.(record),
             "Could not open the set chooser.",
@@ -1599,6 +1601,7 @@ export class PracticeDashboardView extends ItemView {
         new ButtonComponent(actions)
           .setIcon("shuffle")
           .setButtonText("Mixed practice")
+          .setTooltip("Combine all named sets without replaying tutor lessons.")
           .onClick(() => void this.runAction(
             () => this.options.mixedPractice?.(record),
             "Could not start mixed practice.",
@@ -1607,7 +1610,10 @@ export class PracticeDashboardView extends ItemView {
     }
     const start = new ButtonComponent(actions)
       .setIcon("play")
-      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Practice all problems")
+      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Free practice")
+      .setTooltip(record.bank.learningPath === null
+        ? "Start a practice run across all saved questions."
+        : "Practice every saved question without tutor sequencing or path guidance.")
       .onClick(() => void this.runAction(
         () => this.options.startPractice(record),
         "Could not start this practice bank.",

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.22
+
+- Made Guided-path study show the exact overall path step, step type, current-step question count, and total saved-path question count instead of presenting a tutor step as an unexplained one-question path.
+- Added **Save and continue path** so a completed or skipped tutor step advances directly to the next saved lesson or set, while **Save and stop here** remains available.
+- Removed the meaningless question-order dialog from one-question tutor lessons while preserving order controls for named sets and mixed practice.
+- Moved a self-explanatory **Start studying** launcher above history and analytics in every Practice note, with exact scope descriptions for guided continuation, named sets, mixed practice, free practice, recovery, management, and dashboard actions.
+- Standardized Guided-path action labels and hover descriptions across the Practice note, path manager, and dashboard.
+
 ## 1.3.21
 
 - Added a clearly labelled **Skip question** action throughout the Guided-path tutor stages before the first independent attempt.

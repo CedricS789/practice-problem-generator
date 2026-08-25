@@ -1544,6 +1544,39 @@ export default class PracticeLabPlugin extends Plugin {
               : `Practice session saved. ${pendingCount} AI ${pendingCount === 1 ? "review is" : "reviews are"} continuing in the background.`
             : "Practice session saved.");
         },
+        continueLearningPath: async (completedStepIndex) => {
+          const active = this.activeBank;
+          if (active === undefined) {
+            throw new Error("The saved learning path is no longer active.");
+          }
+          const current = await this.loadPracticeBank(active.path);
+          if (current.bankId !== active.bank.bankId) {
+            throw new Error("The saved learning path changed identity before the next step opened.");
+          }
+          active.bank = current;
+          const path = current.learningPath;
+          if (path === null) {
+            throw new Error("The saved learning path is no longer available.");
+          }
+          const steps = [...path.steps].sort((left, right) => left.order - right.order);
+          const nextStepIndex = completedStepIndex + 1;
+          const nextStep = steps[nextStepIndex];
+          if (nextStep === undefined) {
+            new Notice("Guided path complete. Choose a set or mixed practice whenever you want another run.", 8_000);
+            return;
+          }
+          await this.startBankStudy(
+            active.path,
+            current,
+            nextStep.kind === "lesson"
+              ? { kind: "lesson", lessonId: nextStep.lessonId }
+              : {
+                  kind: "path-set",
+                  setId: nextStep.setId,
+                  pathStepIndex: nextStepIndex,
+                },
+          );
+        },
         ...(Platform.isMobileApp ? {} : {
           buildRepairSet: async (_source: SourcePresentation, session) => {
             await this.openRepairSetFromSession(session);
@@ -2424,7 +2457,7 @@ export default class PracticeLabPlugin extends Plugin {
       this.app.vault.adapter.getResourcePath(visual.vaultPath)
     ]));
     this.activeBank = { path, bank: currentBank };
-    view.startStudy(
+    await view.startStudy(
       presentExercises(
         selectedExercises,
         (visualId) => visualUrls.get(visualId),
@@ -2590,8 +2623,54 @@ export default class PracticeLabPlugin extends Plugin {
       sets,
       exerciseIds,
     );
+    const pathStep = options.mode !== "learning-path"
+      ? undefined
+      : (() => {
+          const path = bank.learningPath;
+          if (path === null) {
+            throw new Error("Learning-path study requires a saved path.");
+          }
+          const steps = [...path.steps].sort((left, right) => left.order - right.order);
+          const stepIndex = options.pathStepIndex ?? 0;
+          const step = steps[stepIndex];
+          if (step === undefined) {
+            throw new Error("The selected learning-path step no longer exists.");
+          }
+          if (options.lesson !== undefined) {
+            if (step.kind !== "lesson" || step.lessonId !== options.lesson.id) {
+              throw new Error("The selected tutor lesson does not match the saved path position.");
+            }
+            return {
+              pathTitle: path.title,
+              stepIndex,
+              stepCount: steps.length,
+              stepTitle: options.lesson.title,
+              kind: "tutor-lesson" as const,
+              questionCount: exerciseIds.length,
+              totalQuestionCount: bank.exercises.length,
+            };
+          }
+          const set = sets[0];
+          if (
+            set === undefined
+            || step.kind !== "practice-set"
+            || step.setId !== set.id
+          ) {
+            throw new Error("The selected practice set does not match the saved path position.");
+          }
+          return {
+            pathTitle: path.title,
+            stepIndex,
+            stepCount: steps.length,
+            stepTitle: set.title,
+            kind: "practice-set" as const,
+            questionCount: exerciseIds.length,
+            totalQuestionCount: bank.exercises.length,
+          };
+        })();
     return {
       evidenceByExerciseId,
+      ...(pathStep === undefined ? {} : { pathStep }),
       progress: {
         schemaVersion: 1,
         scope: options.mode === "learning-path"
@@ -4477,6 +4556,208 @@ export default class PracticeLabPlugin extends Plugin {
         ? {}
         : { generationHistoryWarning }),
     };
+    const savedSession = this.studyCheckpoint;
+    const hasUnreadableSession = this.invalidStudyCheckpointRaw !== undefined;
+    const savedSessionMatchesBank = savedSession?.bankId === bank.bankId;
+    if (savedSession !== undefined || hasUnreadableSession) {
+      element.createEl("p", {
+        cls: "practice-lab-bank-warning practice-lab-study-recovery-status",
+        text: savedSessionMatchesBank && savedSession !== undefined
+          ? `Saved practice ready at question ${Math.min(savedSession.currentQuestionIndex + 1, savedSession.exercises.length)} of ${savedSession.exercises.length}. Selecting a practice action resumes it.`
+          : "Another saved session must be resolved before this practice can start. Selecting a practice action opens one safe resolution step.",
+        attr: { role: "status" },
+      });
+    }
+    const recoveryActionLabel = savedSessionMatchesBank
+      ? "Resume saved practice"
+      : savedSession !== undefined || hasUnreadableSession
+        ? "Resolve saved session…"
+        : undefined;
+    const launcher = element.createEl("section", {
+      cls: "practice-lab-bank-launcher",
+      attr: { "aria-label": "Start studying" },
+    });
+    const launcherHeading = launcher.createDiv({ cls: "practice-lab-bank-launcher-heading" });
+    launcherHeading.createEl("h3", { text: "Start studying" });
+    launcherHeading.createEl("p", {
+      text: bank.learningPath === null
+        ? `This bank contains ${bank.exercises.length} ${bank.exercises.length === 1 ? "question" : "questions"}. Choose a session below; the saved bank is never reordered.`
+        : "Follow the guided route one clear step at a time, or deliberately choose a different practice scope.",
+    });
+
+    let recommendation: ReturnType<typeof recommendNextLearningStep> = null;
+    if (bank.learningPath !== null) {
+      recommendation = recommendNextLearningStep(
+        bank,
+        deriveLearningAnalytics(bank),
+      );
+      const overview = launcher.createDiv({ cls: "practice-lab-bank-path-overview" });
+      overview.createSpan({
+        text: `${bank.learningPath.steps.length} path ${bank.learningPath.steps.length === 1 ? "step" : "steps"}`,
+      });
+      overview.createSpan({
+        text: `${bank.tutorLessons.length} tutor ${bank.tutorLessons.length === 1 ? "lesson" : "lessons"}`,
+      });
+      overview.createSpan({
+        text: `${bank.practiceSets.length} named ${bank.practiceSets.length === 1 ? "set" : "sets"}`,
+      });
+      overview.createSpan({
+        text: `${bank.exercises.length} total ${bank.exercises.length === 1 ? "question" : "questions"}`,
+      });
+      if (recommendation === null) {
+        launcher.createEl("p", {
+          cls: "practice-lab-bank-next-step is-complete",
+          text: "Guided objectives currently have consistent evidence. You can still choose a set or start mixed review whenever useful.",
+          attr: { role: "status" },
+        });
+      } else {
+        const nextRecommendation = recommendation;
+        const steps = [...bank.learningPath.steps]
+          .sort((left, right) => left.order - right.order);
+        const stepIndex = steps.findIndex((step) => (
+          nextRecommendation.kind === "lesson"
+            ? step.kind === "lesson" && step.lessonId === nextRecommendation.id
+            : step.kind === "practice-set" && step.setId === nextRecommendation.id
+        ));
+        const nextSet = nextRecommendation.kind === "practice-set"
+          ? bank.practiceSets.find((set) => set.id === nextRecommendation.id)
+          : undefined;
+        const nextCount = nextRecommendation.kind === "lesson"
+          ? 1
+          : nextSet?.assignments.length ?? 0;
+        launcher.createEl("p", {
+          cls: "practice-lab-bank-next-step",
+          text: `Recommended next · Step ${Math.max(0, stepIndex) + 1} of ${steps.length} · ${nextRecommendation.kind === "lesson" ? "Tutor lesson" : "Practice set"}: ${nextRecommendation.title} · ${nextCount} ${nextCount === 1 ? "question" : "questions"}. Finishing this step does not end the path; you can continue directly afterward.`,
+          attr: { role: "status" },
+        });
+      }
+    }
+
+    const actions = launcher.createDiv({ cls: "practice-lab-bank-actions" });
+    const addStudyAction = (
+      label: string,
+      description: string,
+      title: string,
+      primary: boolean,
+      onClick: () => void,
+    ): void => {
+      const card = actions.createEl("article", { cls: "practice-lab-bank-action" });
+      const button = card.createEl("button", {
+        text: label,
+        ...(primary ? { cls: "mod-cta" } : {}),
+        attr: { type: "button", title },
+      });
+      button.addEventListener("click", onClick);
+      card.createEl("p", { text: description });
+    };
+
+    if (recoveryActionLabel !== undefined) {
+      addStudyAction(
+        recoveryActionLabel,
+        savedSessionMatchesBank
+          ? "Resume the exact device-local question, typed input, tutor reveals, skips, and answer state. Finish or discard it before choosing another scope."
+          : "Review the unavailable saved session and explicitly keep or discard it before starting another bank.",
+        savedSessionMatchesBank
+          ? "Resume the exact device-local session and its current input."
+          : "Safely resolve the unavailable saved session before starting another.",
+        true,
+        () => {
+          void this.startBankStudy(
+            context.sourcePath,
+            bank,
+            bank.learningPath === null ? { kind: "quick" } : { kind: "recommended" },
+          );
+        },
+      );
+    } else if (bank.learningPath !== null) {
+      addStudyAction(
+        recommendation === null ? "Start mixed review" : "Continue guided path",
+        recommendation === null
+          ? `Practice all ${bank.exercises.length} questions from the named sets now that the guided objectives have consistent evidence.`
+          : "Start only the recommended step shown above. Tutor steps contain one guided problem; after saving, Continue path opens the next step.",
+        recommendation === null
+          ? "Start a mixed review across every named set."
+          : "Start the locally recommended tutor lesson or practice set, then continue step by step.",
+        true,
+        () => {
+          void this.startBankStudy(context.sourcePath, bank, { kind: "recommended" });
+        },
+      );
+      const setCounts = bank.practiceSets.map((set) => set.assignments.length);
+      const setRange = setCounts.length === 0
+        ? "no generated questions"
+        : Math.min(...setCounts) === Math.max(...setCounts)
+          ? `${setCounts[0] ?? 0} questions each`
+          : `${Math.min(...setCounts)}–${Math.max(...setCounts)} questions per set`;
+      addStudyAction(
+        "Choose a set",
+        `Pick one of ${bank.practiceSets.length} named ${bank.practiceSets.length === 1 ? "set" : "sets"} (${setRange}) without progression locks.`,
+        "Choose one named practice set and configure its question order.",
+        false,
+        () => { void this.chooseAndStartPracticeSet(context.sourcePath, bank); },
+      );
+      addStudyAction(
+        "Mixed practice",
+        `Combine all ${bank.exercises.length} questions from every named set while preserving set and aspect evidence. Tutor lessons are not replayed.`,
+        "Practice every named set together with your chosen study-order option.",
+        false,
+        () => { void this.startBankStudy(context.sourcePath, bank, { kind: "mixed" }); },
+      );
+      addStudyAction(
+        "Free practice",
+        `Run all ${bank.exercises.length} saved questions without tutor sequencing or learning-path guidance.`,
+        "Start a freely accessible run across all saved exercises without path guidance.",
+        false,
+        () => { void this.startBankStudy(context.sourcePath, bank); },
+      );
+    } else {
+      addStudyAction(
+        "Start practice",
+        `Practice all ${bank.exercises.length} saved ${bank.exercises.length === 1 ? "question" : "questions"} using the session order you choose next.`,
+        "Start a practice run across all saved exercises.",
+        true,
+        () => { void this.startBankStudy(context.sourcePath, bank); },
+      );
+    }
+
+    const tools = launcher.createDiv({ cls: "practice-lab-bank-tools" });
+    tools.createEl("h4", { text: "Manage and review" });
+    const toolActions = tools.createDiv();
+    if (!Platform.isMobileApp && bank.learningPath === null) {
+      const regenerate = toolActions.createEl("button", {
+        text: "Regenerate / tweak",
+        attr: {
+          type: "button",
+          title: "Open configuration with this bank's previous generation settings loaded.",
+        },
+      });
+      regenerate.addEventListener("click", () => {
+        void this.regenerateBank(context.sourcePath, bank).catch((error: unknown) => {
+          this.showError(error);
+        });
+      });
+    } else if (!Platform.isMobileApp && bank.learningPath !== null) {
+      const manage = toolActions.createEl("button", {
+        text: "Manage path",
+        attr: {
+          type: "button",
+          title: "Rename, inspect, or regenerate individual sets without replacing sibling sets or history.",
+        },
+      });
+      manage.addEventListener("click", () => {
+        void this.openSavedLearningPathManager(context.sourcePath, bank);
+      });
+    }
+    const dashboard = toolActions.createEl("button", {
+      text: "View dashboard",
+      attr: {
+        type: "button",
+        title: "Open this source's performance, activity, and learning-evidence dashboard.",
+      },
+    });
+    dashboard.addEventListener("click", () => {
+      void this.openDashboard({ kind: "source", path: bank.source.vaultPath });
+    });
     renderBankStatistics(element, bank, Platform.isMobileApp ? {
       visibility: this.settings.display.bank,
       ...generationHistoryOptions,
@@ -4495,92 +4776,6 @@ export default class PracticeLabPlugin extends Plugin {
       removeSession: async (sessionId) => {
         await this.requestRemovePracticeSession(context.sourcePath, bank, sessionId);
       },
-    });
-    const savedSession = this.studyCheckpoint;
-    const hasUnreadableSession = this.invalidStudyCheckpointRaw !== undefined;
-    const savedSessionMatchesBank = savedSession?.bankId === bank.bankId;
-    if (savedSession !== undefined || hasUnreadableSession) {
-      element.createEl("p", {
-        cls: "practice-lab-bank-warning practice-lab-study-recovery-status",
-        text: savedSessionMatchesBank && savedSession !== undefined
-          ? `Saved practice ready at question ${Math.min(savedSession.currentQuestionIndex + 1, savedSession.exercises.length)} of ${savedSession.exercises.length}. Selecting a practice action resumes it.`
-          : "Another saved session must be resolved before this practice can start. Selecting a practice action opens one safe resolution step.",
-        attr: { role: "status" },
-      });
-    }
-    const recoveryActionLabel = savedSessionMatchesBank
-      ? "Resume saved practice"
-      : savedSession !== undefined || hasUnreadableSession
-        ? "Resolve saved session…"
-        : undefined;
-    const actions = element.createDiv({ cls: "practice-lab-bank-actions" });
-    if (bank.learningPath !== null) {
-      const continueLearning = actions.createEl("button", {
-        text: recoveryActionLabel ?? "Continue learning",
-        cls: "mod-cta",
-        attr: {
-          type: "button",
-          title: recoveryActionLabel === undefined
-            ? "Start the locally recommended tutor lesson or practice set. The recommendation is advisory and can be ignored."
-            : savedSessionMatchesBank
-              ? "Resume the exact device-local session and its current input."
-              : "Review the unavailable saved session, then keep it or explicitly discard it before starting this bank.",
-        },
-      });
-      continueLearning.addEventListener("click", () => {
-        void this.startBankStudy(context.sourcePath, bank, { kind: "recommended" });
-      });
-      const chooseSet = actions.createEl("button", {
-        text: "Choose a set",
-        attr: { type: "button", title: "Choose any named set without progression locks." },
-      });
-      chooseSet.addEventListener("click", () => {
-        void this.chooseAndStartPracticeSet(context.sourcePath, bank);
-      });
-      const mixed = actions.createEl("button", {
-        text: "Mixed practice",
-        attr: { type: "button", title: "Practice every named set in path order, with your chosen study-order option." },
-      });
-      mixed.addEventListener("click", () => {
-        void this.startBankStudy(context.sourcePath, bank, { kind: "mixed" });
-      });
-    }
-    const start = actions.createEl("button", {
-      text: bank.learningPath === null
-        ? recoveryActionLabel ?? "Start practice"
-        : "Practice all problems",
-      ...(bank.learningPath === null ? { cls: "mod-cta" } : {}),
-      attr: { type: "button", title: "Start a freely accessible practice run across the saved exercises." },
-    });
-    start.addEventListener("click", () => { void this.startBankStudy(context.sourcePath, bank); });
-    if (!Platform.isMobileApp && bank.learningPath === null) {
-      const regenerate = actions.createEl("button", {
-        text: "Regenerate / tweak",
-        attr: {
-          type: "button",
-          title: "Open configure with this bank's previous generation settings loaded",
-        },
-      });
-      regenerate.addEventListener("click", () => {
-        void this.regenerateBank(context.sourcePath, bank).catch((error: unknown) => {
-          this.showError(error);
-        });
-      });
-    } else if (!Platform.isMobileApp && bank.learningPath !== null) {
-      const manage = actions.createEl("button", {
-        text: "Manage path",
-        attr: {
-          type: "button",
-          title: "Open the learning-path manager. Set regeneration never replaces sibling sets or historical evidence.",
-        },
-      });
-      manage.addEventListener("click", () => {
-        void this.openSavedLearningPathManager(context.sourcePath, bank);
-      });
-    }
-    const dashboard = actions.createEl("button", { text: "View dashboard" });
-    dashboard.addEventListener("click", () => {
-      void this.openDashboard({ kind: "source", path: bank.source.vaultPath });
     });
     const dataActions = element.createEl("details", {
       cls: "practice-lab-bank-data-actions",
