@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.23
+
+- Kept plugin-managed generation and recovery metadata fully collapsed in both Live Preview and Source mode instead of revealing the raw JSON when the cursor touched it.
+- Made hidden metadata ranges atomic so keyboard navigation and accidental clicks skip over them without changing or exposing the portable data.
+- Removed the visible metadata placeholder; the information remains safely stored in the Practice Markdown for recovery and cross-device use.
+
 ## 1.3.22
 
 - Made Guided-path study show the exact overall path step, step type, current-step question count, and total saved-path question count instead of presenting a tutor step as an unexplained one-question path.
