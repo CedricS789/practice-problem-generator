@@ -3869,6 +3869,17 @@ button.practice-lab-heatmap-day.is-future {
   margin: var(--size-4-4) 0 var(--size-4-2);
 }
 
+.practice-learning-path-support-help {
+  margin: var(--size-4-1) 0 var(--size-4-2);
+}
+
+.practice-learning-path-support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+  align-items: center;
+}
+
 .practice-learning-path-subheading > span {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);

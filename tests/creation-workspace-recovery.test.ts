@@ -94,7 +94,7 @@ test("primary source cards can replace the active source through a searchable no
   assert.match(quickViewSource, /const epoch = \+\+this\.sourceRequestEpoch/u);
   assert.match(guidedViewSource, /this\.choosePrimarySource\("vault-note"\)/u);
   const chooseStart = guidedViewSource.indexOf("private async choosePrimarySource(");
-  const chooseEnd = guidedViewSource.indexOf("private async addSupportingSource()", chooseStart);
+  const chooseEnd = guidedViewSource.indexOf("private async addSupportingSource(", chooseStart);
   assert.ok(chooseStart >= 0 && chooseEnd > chooseStart);
   const chooseImplementation = guidedViewSource.slice(chooseStart, chooseEnd);
   assert.ok(
@@ -109,6 +109,22 @@ test("primary source cards can replace the active source through a searchable no
     stylesSource,
     /\.practice-source-summary-actions \{\s+grid-column: 2;\s+justify-content: flex-start;/u,
   );
+});
+
+test("supporting PDFs wait for their picker to close and always require bounded pages", () => {
+  assert.match(sourceMaterialPickerSource, /export function chooseSourcePdfFile/u);
+  assert.match(sourceMaterialPickerSource, /Search for the PDF whose pages you want to add/u);
+  assert.match(sourceMaterialPickerSource, /this\.kind === "note"[\s\S]*extension === "md"[\s\S]*extension === "pdf"/u);
+  assert.match(sourceMaterialPickerSource, /onChooseItem\(file: TFile\): void \{\s*this\.chosenFile = file;/u);
+  assert.doesNotMatch(sourceMaterialPickerSource, /onChooseItem\(file: TFile\): void \{\s*this\.finish\(file\)/u);
+  assert.match(sourceMaterialPickerSource, /window\.setTimeout\(\(\) => this\.finish\(this\.chosenFile\), 0\)/u);
+  assert.match(guidedViewSource, /Add supporting note/u);
+  assert.match(guidedViewSource, /Add supporting PDF pages/u);
+  assert.match(guidedViewSource, /this\.addSupportingSource\("note"\)/u);
+  assert.match(guidedViewSource, /this\.addSupportingSource\("pdf"\)/u);
+  assert.match(guidedViewSource, /requestSupportingSource\(mode\)/u);
+  assert.match(mainSource, /mode === "pdf"[\s\S]*chooseSourcePdfFile\(this\.app\)[\s\S]*chooseSourceNoteFile\(this\.app\)/u);
+  assert.match(mainSource, /mode === "pdf"[\s\S]*this\.requestPdfSource\(file\)/u);
 });
 
 test("guided visual defaults appear before supporting-material controls", () => {

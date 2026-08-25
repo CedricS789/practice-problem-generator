@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.18
+
+- Fixed the supporting-PDF file-picker handoff so its page-range dialog opens reliably after the file picker closes.
+- Split supporting material into explicit **Add supporting note** and **Add supporting PDF pages** actions.
+- Made every supporting PDF require an exact single-page or bounded page-range selection before local extraction.
+- Displayed the configured per-PDF page limit in the Guided-path source stage and page selector, while retaining extraction-time enforcement.
+
 ## 1.3.17
 
 - Fixed orphaned device-local study checkpoints trapping every practice action in a repeated unavailable-bank notice loop.

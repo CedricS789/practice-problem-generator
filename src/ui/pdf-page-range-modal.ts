@@ -54,7 +54,7 @@ class PdfPageRangeModal extends Modal {
     });
     this.contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Text extraction runs locally from a temporary copy. Practice Problem Generator never modifies the PDF. You will inspect the exact provider payload before generation.",
+      text: `Choose exactly what the AI may consider. Text extraction runs locally from a temporary copy, and no more than ${this.options.maxPages.toLocaleString()} pages can be selected. Practice Problem Generator never modifies the PDF. You will inspect the exact provider payload before generation.`,
     });
 
     new Setting(this.contentEl)

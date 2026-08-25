@@ -36,6 +36,10 @@ test("PDF page selection is bounded, local, previewed, and never rewrites the so
   assert.match(modal, /single \? "Extract page" : "Extract pages"/u);
   assert.match(modal, /First page/u);
   assert.match(modal, /Last page/u);
+  assert.match(modal, /no more than.*pages can be selected/u);
+  assert.match(modal, /validateRange\(this\.options\.info, range, this\.options\.maxPages\)/u);
+  assert.match(main, /maxPages: this\.settings\.pdfMaxPageCount/u);
+  assert.match(main, /this\.extractPdfRange\([\s\S]*this\.settings\.pdfMaxPageCount/u);
   assert.match(modal, /Text extraction runs locally/u);
   assert.match(modal, /never modifies the PDF/u);
   assert.match(main, /vault\.readBinary\(file\)/u);

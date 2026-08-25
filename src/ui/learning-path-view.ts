@@ -135,7 +135,9 @@ export interface LearningPathViewCallbacks {
   readonly preparePrimarySourceVisuals?: (
     source: SourcePresentation,
   ) => Promise<SourcePresentation>;
-  readonly requestSupportingSource: () => Promise<SourcePresentation | null>;
+  readonly requestSupportingSource: (
+    mode: "note" | "pdf",
+  ) => Promise<SourcePresentation | null>;
   readonly updateSourceVisuals?: (
     source: SourcePresentation,
   ) => Promise<SourcePresentation> | SourcePresentation;
@@ -229,6 +231,7 @@ export interface LearningPathViewOptions {
     readonly difficulty: Difficulty;
     readonly focusInstructions: string;
     readonly gifFrameDefault?: GifFramePosition;
+    readonly pdfMaxPageCount: number;
   };
   readonly initialSource?: SourcePresentation;
   readonly recoverableBatch?: boolean;
@@ -366,6 +369,7 @@ export class PracticeLearningPathView extends ItemView {
   private activeReviewSetId: string | null = null;
   private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | "recovery" | null = null;
   private primarySourceChoiceBusy: SourceChoiceMode | null = null;
+  private supportingSourceChoiceBusy: "note" | "pdf" | null = null;
   private error: string | null = null;
   private recoveryAvailable: boolean;
   private savedWorkspace: LearningPathSavedWorkspaceV1 | null = null;
@@ -827,6 +831,10 @@ export class PracticeLearningPathView extends ItemView {
     const supportHeading = section.createDiv({ cls: "practice-learning-path-subheading" });
     supportHeading.createEl("strong", { text: "Supporting material" });
     supportHeading.createSpan({ text: `${this.supporting.length} of 4 selected` });
+    section.createEl("p", {
+      cls: "setting-item-description practice-learning-path-support-help",
+      text: `Add only the material you approve. Every supporting PDF opens a page picker and is limited to ${this.options.defaults.pdfMaxPageCount.toLocaleString()} pages.`,
+    });
     for (const source of this.supporting) {
       this.renderSourceCard(section, source, "Supporting", () => {
         this.supporting = this.supporting.filter((candidate) => candidate !== source);
@@ -834,12 +842,19 @@ export class PracticeLearningPathView extends ItemView {
         this.render();
       });
     }
-    new ButtonComponent(section)
-      .setIcon("plus")
-      .setButtonText(this.busy === "source" ? "Choosing source…" : "Add supporting note or PDF range")
-      .setTooltip("Add one explicitly selected note or exact PDF page range. Linked material is never added automatically.")
+    const supportActions = section.createDiv({ cls: "practice-learning-path-support-actions" });
+    new ButtonComponent(supportActions)
+      .setIcon("file-text")
+      .setButtonText(this.supportingSourceChoiceBusy === "note" ? "Choosing note…" : "Add supporting note")
+      .setTooltip("Choose one Markdown note explicitly. Linked material is never added automatically.")
       .setDisabled(this.busy !== null || this.visualSelectionBusy || this.supporting.length >= 4)
-      .onClick(() => void this.addSupportingSource());
+      .onClick(() => void this.addSupportingSource("note"));
+    new ButtonComponent(supportActions)
+      .setIcon("file-scan")
+      .setButtonText(this.supportingSourceChoiceBusy === "pdf" ? "Choosing PDF pages…" : "Add supporting PDF pages")
+      .setTooltip(`Choose one PDF, then select an exact page or page range. At most ${this.options.defaults.pdfMaxPageCount.toLocaleString()} pages may be extracted.`)
+      .setDisabled(this.busy !== null || this.visualSelectionBusy || this.supporting.length >= 4)
+      .onClick(() => void this.addSupportingSource("pdf"));
 
     const level = this.section(container, "Starting level", "This changes the proposed teaching depth, never the approved source boundary.");
     const levelGrid = level.createDiv({ cls: "practice-learning-path-level-grid" });
@@ -2231,13 +2246,14 @@ export class PracticeLearningPathView extends ItemView {
     }
   }
 
-  private async addSupportingSource(): Promise<void> {
+  private async addSupportingSource(mode: "note" | "pdf"): Promise<void> {
     if (this.busy !== null || this.supporting.length >= 4) return;
     this.busy = "source";
+    this.supportingSourceChoiceBusy = mode;
     this.error = null;
     this.render();
     try {
-      const source = await this.options.callbacks.requestSupportingSource();
+      const source = await this.options.callbacks.requestSupportingSource(mode);
       if (source !== null) {
         const duplicate = [this.primary, ...this.supporting].some((candidate) => (
           candidate?.path === source.path && candidate.mode === source.mode && candidate.detail === source.detail
@@ -2250,6 +2266,7 @@ export class PracticeLearningPathView extends ItemView {
       this.error = errorMessage(error);
     } finally {
       this.busy = null;
+      this.supportingSourceChoiceBusy = null;
       this.render();
     }
   }

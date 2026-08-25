@@ -177,8 +177,8 @@ import {
   type StudySessionProgressV1,
 } from "./ui";
 import {
-  chooseSourceMaterialFile,
   chooseSourceNoteFile,
+  chooseSourcePdfFile,
 } from "./ui/source-material-picker-modal";
 import { confirmDestructiveAction } from "./ui/destructive-confirmation-modal";
 import { choosePdfPageRange } from "./ui/pdf-page-range-modal";
@@ -1534,6 +1534,7 @@ export default class PracticeLabPlugin extends Plugin {
         difficulty: generationDifficultyFromSetting(this.settings.difficulty),
         focusInstructions: this.settings.defaultFocusInstructions,
         gifFrameDefault: this.settings.gifFrameDefault,
+        pdfMaxPageCount: this.settings.pdfMaxPageCount,
       },
       callbacks: {
         requestPrimarySource: async (mode) => {
@@ -1571,11 +1572,13 @@ export default class PracticeLabPlugin extends Plugin {
           this.lastSource = prepared;
           return this.learningPathController.registerSource(prepared);
         },
-        requestSupportingSource: async () => {
+        requestSupportingSource: async (mode) => {
           try {
-            const file = await chooseSourceMaterialFile(this.app);
+            const file = mode === "pdf"
+              ? await chooseSourcePdfFile(this.app)
+              : await chooseSourceNoteFile(this.app);
             if (file === null) return null;
-            const source = file.extension.toLowerCase() === "pdf"
+            const source = mode === "pdf"
               ? await this.requestPdfSource(file)
               : await collectSourceFromFile(this.app, file, "note");
             if (source === null) return null;
