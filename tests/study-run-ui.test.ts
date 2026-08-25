@@ -39,3 +39,22 @@ test("study mode offers a described, score-neutral skip action", () => {
   assert.match(viewSource, /skippedExerciseIds: \[\.\.\.this\.studySkippedExerciseIds\]/u);
   assert.match(statisticsViewSource, /session\.skippedCount/u);
 });
+
+test("guided tutor stages expose the score-neutral skip action before an attempt", () => {
+  assert.match(
+    viewSource,
+    /this\.renderTutorLesson\(container, activeLesson, exercise\)/u,
+  );
+  assert.match(
+    viewSource,
+    /private renderTutorLesson\([\s\S]*?this\.renderStudySkipAction\(tutor, exercise\)/u,
+  );
+  assert.match(viewSource, /activeLesson\.state\.phase === "teaching"/u);
+  assert.match(viewSource, /activeLesson\.state\.phase === "self-explanation"/u);
+  assert.match(viewSource, /activeLesson\.state\.phase === "independent"/u);
+  assert.match(
+    viewSource,
+    /activeLesson\.state\.originalIndependentAttempt === null/u,
+  );
+  assert.match(viewSource, /Skip this tutor lesson and its guided problem/u);
+});

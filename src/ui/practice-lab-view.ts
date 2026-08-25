@@ -2759,7 +2759,7 @@ export class PracticeLabView extends ItemView {
         || (activeLesson.state.phase === "independent" && !this.studyTutorProblemStarted)
       )
     ) {
-      this.renderTutorLesson(container, activeLesson);
+      this.renderTutorLesson(container, activeLesson, exercise);
       return;
     }
     if (activeLesson?.state.phase === "recovery") {
@@ -2789,12 +2789,17 @@ export class PracticeLabView extends ItemView {
     exercise: EditableDraftExercise,
   ): void {
     if (!this.canSkipCurrentQuestion(exercise)) return;
+    const isGuidedLesson = (
+      this.studyLearningProgress?.activeLesson?.lesson.guidedExerciseId === exercise.id
+    );
     const actions = container.createDiv({ cls: "practice-lab-study-question-actions" });
     new ButtonComponent(actions)
       .setIcon("skip-forward")
       .setButtonText("Skip question")
       .setTooltip(
-        "Leave this question unanswered. It will be excluded from scores and recorded as skipped for this session.",
+        isGuidedLesson
+          ? "Skip this tutor lesson and its guided problem. It will be excluded from scores and recorded as skipped for this session."
+          : "Leave this question unanswered. It will be excluded from scores and recorded as skipped for this session.",
       )
       .onClick(() => void this.skipCurrentQuestion(exercise));
   }
@@ -2804,13 +2809,18 @@ export class PracticeLabView extends ItemView {
     const activeLesson = this.studyLearningProgress?.activeLesson ?? null;
     if (activeLesson === null) return true;
     return activeLesson.lesson.guidedExerciseId === exercise.id
-      && activeLesson.state.phase === "independent"
-      && activeLesson.state.originalIndependentAttempt === null;
+      && activeLesson.state.originalIndependentAttempt === null
+      && (
+        activeLesson.state.phase === "teaching"
+        || activeLesson.state.phase === "self-explanation"
+        || activeLesson.state.phase === "independent"
+      );
   }
 
   private renderTutorLesson(
     container: HTMLElement,
     active: StudyGuidedLessonCheckpointV1,
+    exercise: EditableDraftExercise,
   ): void {
     const { lesson, state } = active;
     const tutor = container.createEl("section", {
@@ -2825,6 +2835,7 @@ export class PracticeLabView extends ItemView {
     identity.createEl("h3", { text: lesson.title });
     const objective = identity.createDiv({ cls: "practice-lab-tutor-objective" });
     renderLatexMarkup(objective, lesson.objective);
+    this.renderStudySkipAction(tutor, exercise);
 
     for (const block of lesson.teachingBlocks.filter((candidate) => (
       state.revealedTeachingBlockIds.includes(candidate.id)

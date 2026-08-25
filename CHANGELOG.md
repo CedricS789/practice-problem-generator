@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.21
+
+- Added a clearly labelled **Skip question** action throughout the Guided-path tutor stages before the first independent attempt.
+- Guided skips now bypass the remaining lesson and guided problem, remain excluded from scoring, and persist through the existing session checkpoint and history flow.
+- Kept post-attempt recovery non-skippable so a completed scored attempt cannot be erased after feedback or hints are shown.
+
 ## 1.3.20
 
 - Fixed saved Practice Markdown files failing to open in Live Preview because their multi-line hidden-metadata replacement was supplied through an unsupported CodeMirror view-plugin decoration.
