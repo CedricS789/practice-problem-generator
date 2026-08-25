@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.24
+
+- Made the creation-mode switch highlight **Guided path** whenever the active or restored study session belongs to a Guided-path step, instead of always displaying **Quick set** as selected.
+- Added accurate hover descriptions while a study session locks mode switching, without changing the saved session or its progress.
+
 ## 1.3.23
 
 - Kept plugin-managed generation and recovery metadata fully collapsed in both Live Preview and Source mode instead of revealing the raw JSON when the cursor touched it.

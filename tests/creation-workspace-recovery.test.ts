@@ -26,7 +26,7 @@ test("quick and guided creation use one clearly related mode vocabulary", () => 
   assert.match(modeSwitchSource, /"aria-label": "Practice creation mode"/u);
   assert.match(modeSwitchSource, /label: "Quick set"/u);
   assert.match(modeSwitchSource, /label: "Guided path"/u);
-  assert.match(quickViewSource, /active: "quick"/u);
+  assert.match(quickViewSource, /active: activeMode/u);
   assert.match(guidedViewSource, /active: "guided"/u);
   assert.match(stylesSource, /\.practice-creation-mode-switch/u);
   assert.match(stylesSource, /\.practice-lab-view > \.practice-creation-mode-row/u);

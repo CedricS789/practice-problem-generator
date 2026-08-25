@@ -37,6 +37,19 @@ test("a tutor step shows overall path position and skips the one-question order 
   assert.match(styles, /\.practice-lab-path-position \{/u);
 });
 
+test("an active Guided path session highlights Guided path in the mode switch", () => {
+  const switchImplementation = viewSource.slice(
+    viewSource.indexOf("private renderCreationModeSwitch"),
+    viewSource.indexOf("private renderGenerationRecovery"),
+  );
+  assert.match(
+    switchImplementation,
+    /this\.studyLearningProgress\?\.scope\.mode === "learning-path"/u,
+  );
+  assert.match(switchImplementation, /active: activeMode/u);
+  assert.match(switchImplementation, /This Guided path practice session is active/u);
+});
+
 test("completing a path step can save and open the next recommendation", () => {
   assert.match(viewSource, /setButtonText\(this\.studyFinishing \? "Saving path step…" : "Save and continue path"\)/u);
   assert.match(viewSource, /this\.finishStudy\("continue"\)/u);

@@ -1212,18 +1212,31 @@ export class PracticeLabView extends ItemView {
 
   private renderCreationModeSwitch(container: HTMLElement): void {
     if (Platform.isMobileApp || this.options.callbacks.openGuidedLearningPath === undefined) return;
+    const activeMode = this.stage === "study"
+      && this.studyLearningProgress?.scope.mode === "learning-path"
+      ? "guided"
+      : "quick";
     const switchBlocked = this.stage === "review"
       || this.stage === "study"
       || this.job.state === "running"
       || this.job.state === "cancelling";
     renderSharedCreationModeSwitch(container, {
-      active: "quick",
+      active: activeMode,
       quickDisabled: true,
       guidedDisabled: switchBlocked,
+      ...(this.stage === "study"
+        ? {
+            quickDisabledReason: activeMode === "guided"
+              ? "A Guided path practice session is active. Finish or leave it before opening Quick set creation."
+              : "This Quick set practice session is active.",
+          }
+        : {}),
       ...(switchBlocked
         ? {
             guidedDisabledReason: this.stage === "study"
-              ? "Finish or leave the current practice session before changing creation mode."
+              ? activeMode === "guided"
+                ? "This Guided path practice session is active."
+                : "Finish or leave the current practice session before changing creation mode."
               : "Finish the current generation or draft review before changing creation mode.",
           }
         : {}),
