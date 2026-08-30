@@ -17,6 +17,12 @@ import type { DetectedVisual, OcclusionMaskCandidate } from "../visuals";
 import type { CliActivityEvent, CliActivityPhase } from "../cli/contracts";
 import { formatCliErrorForUi } from "../cli/errors";
 import {
+  formatGenerationCost,
+  formatTokenUsage,
+  generationTelemetryFromActivity,
+  tokenUsageTotal,
+} from "../generation-telemetry";
+import {
   displayReasoningEffort,
   reasoningEffortDescription,
 } from "../reasoning";
@@ -69,9 +75,16 @@ import {
   type PracticeRunScore,
 } from "../practice-run";
 import type {
+  AiContextCompletionPolicyV1,
   CompletedTutorLessonSnapshotV3,
+  ExerciseAlignmentSnapshotV1,
   SessionExerciseEvidenceV3,
+  SourceMaterialClassificationV1,
 } from "../model";
+import {
+  DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+  aiContextCompletionApproved,
+} from "../ai-context-completion";
 import {
   completeGuidedLesson,
   guidedAssistanceSummary,
@@ -120,6 +133,7 @@ import { presentStudyOcclusionVisual } from "./study-occlusion";
 import { chooseStudyOrder } from "./study-order-modal";
 import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
+import { applyMarkdownHeadingTheme } from "./theme-bridge";
 import {
   applyAnswerReviewStatus as mergeAnswerReviewStatus,
   answerReviewVerdictRating,
@@ -201,6 +215,23 @@ const VISUAL_LABELS: Readonly<Record<DetectedVisual["kind"], string>> = {
   video: "Video",
   "remote-image": "Remote image",
   "notability-region": "Notability region",
+};
+
+const SOURCE_CLASSIFICATION_LABELS: Readonly<Record<SourceMaterialClassificationV1, string>> = {
+  "personal-note": "Personal note",
+  "official-correction": "Official correction",
+  "instructor-material": "Instructor material",
+  "assigned-reference": "Assigned reference",
+  unclassified: "Unclassified",
+};
+
+const ALIGNMENT_STATE_LABELS: Readonly<Record<ExerciseAlignmentSnapshotV1["state"], string>> = {
+  "course-aligned": "Aligned with school material",
+  "notes-differ": "Your notes differ",
+  "notes-incomplete": "School material adds context",
+  "notes-grounded-unverified": "Selected material · not course-checked",
+  "school-sources-disagree": "School sources disagree",
+  "insufficient-evidence": "Additional context could strengthen this practice",
 };
 
 const MAX_GENERATION_ACTIVITY_EVENTS = 120;
@@ -412,10 +443,13 @@ export class PracticeLabView extends ItemView {
   private studyTypeSequence: ExerciseType[] = [...DEFAULT_STUDY_TYPE_SEQUENCE];
   private studyShuffleWithinTypesDefault = false;
   private studySetupOpen = false;
+  private answerReviewSettingsOpen = true;
   private displayPreferences: PracticeLabDisplayPreferences;
   private payloadPreviewOpen = false;
   private quantity = 10;
   private difficulty: Difficulty = "deep-exam";
+  private aiContextCompletionPolicy: AiContextCompletionPolicyV1 =
+    DEFAULT_AI_CONTEXT_COMPLETION_POLICY;
   private exerciseTypePercentages = copyExerciseTypePercentages(
     RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
   );
@@ -434,7 +468,7 @@ export class PracticeLabView extends ItemView {
     readonly startedAt: number;
     readonly finishedAt?: number;
   }> = [];
-  private agentActivityOpen = true;
+  private agentActivityOpen = false;
   private activityClock: number | undefined;
   private drafts: EditableDraftExercise[] = [];
   private studyExercises: EditableDraftExercise[] = [];
@@ -476,6 +510,7 @@ export class PracticeLabView extends ItemView {
   private reviewSummaryEl: HTMLElement | null = null;
   private reviewGateNoticeEl: HTMLElement | null = null;
   private answerReviewControlsEl: HTMLElement | null = null;
+  private answerReviewSummaryEl: HTMLElement | null = null;
   private answerReviewStatusEl: HTMLElement | null = null;
   private answerReviewActionsEl: HTMLElement | null = null;
   private studyFeedbackActionsEl: HTMLElement | null = null;
@@ -584,6 +619,7 @@ export class PracticeLabView extends ItemView {
     this.answerReviewActivityLogs.clear();
     this.clearActivityClock();
     this.focusInstructions = this.defaultFocusInstructions;
+    this.aiContextCompletionPolicy = DEFAULT_AI_CONTEXT_COMPLETION_POLICY;
     this.drafts = [];
     this.studyExercises = [];
     this.studyAnswers = [];
@@ -821,7 +857,6 @@ export class PracticeLabView extends ItemView {
       if (oldest === undefined) break;
       this.answerReviewActivityLogs.delete(oldest);
     }
-    this.agentActivityOpen = true;
     this.updateActivityClock();
     this.updateAgentActivityDom();
   }
@@ -870,6 +905,9 @@ export class PracticeLabView extends ItemView {
     }
     if (defaults.difficulty !== undefined) {
       this.difficulty = defaults.difficulty;
+    }
+    if (defaults.aiContextCompletionPolicy !== undefined) {
+      this.aiContextCompletionPolicy = defaults.aiContextCompletionPolicy;
     }
     if (defaults.exerciseTypePercentages !== undefined) {
       this.exerciseTypePercentages = normalizeExerciseTypePercentages(
@@ -1027,6 +1065,9 @@ export class PracticeLabView extends ItemView {
           : this.answerReviewDefaultMode;
       this.answerReviewProvider = this.answerReviewDefaultProvider;
       this.answerReviewReasoningEffort = this.answerReviewDefaultReasoningEffort;
+      this.answerReviewSettingsOpen = this.studyExercises.some(
+        (exercise) => exercise.grading.kind === "self",
+      );
       this.stage = "study";
       this.resetOrderingState();
       this.resetStudyCurrentInput();
@@ -1109,6 +1150,8 @@ export class PracticeLabView extends ItemView {
     this.answerReviewMode = progress.answerReviewMode;
     this.answerReviewProvider = progress.answerReviewProvider;
     this.answerReviewReasoningEffort = progress.answerReviewReasoningEffort;
+    this.answerReviewSettingsOpen = progress.answers.length === 0
+      && progress.currentQuestionIndex === 0;
     this.orderingState = progress.currentInput?.ordering !== undefined
       ? [...progress.currentInput.ordering]
       : [];
@@ -1134,6 +1177,7 @@ export class PracticeLabView extends ItemView {
     this.studyPathStep = null;
     this.studyLearningEvidenceByExerciseId.clear();
     this.studyTutorProblemStarted = false;
+    this.answerReviewSettingsOpen = true;
     this.stage = this.drafts.length > 0 ? "review" : "source";
     this.render();
   }
@@ -1147,6 +1191,7 @@ export class PracticeLabView extends ItemView {
     this.reviewSummaryEl = null;
     this.reviewGateNoticeEl = null;
     this.answerReviewControlsEl = null;
+    this.answerReviewSummaryEl = null;
     this.answerReviewStatusEl = null;
     this.answerReviewActionsEl = null;
     this.agentActivityHostEl = null;
@@ -1161,6 +1206,7 @@ export class PracticeLabView extends ItemView {
     this.studyCompletionMetricEls.clear();
     this.contentEl.empty();
     this.contentEl.addClass("practice-lab-view");
+    applyMarkdownHeadingTheme(this.contentEl);
     this.contentEl.toggleClass(
       "is-compact",
       this.displayPreferences.practice.density === "compact",
@@ -1174,15 +1220,33 @@ export class PracticeLabView extends ItemView {
 
     const header = this.contentEl.createDiv({ cls: "practice-lab-header" });
     const heading = header.createDiv();
-    heading.createEl("h2", { text: "Practice Problem Generator" });
+    heading.createEl("h2", {
+      text: this.stage === "study" ? "Practice" : "Practice Problem Generator",
+    });
     if (this.displayPreferences.practice.showHeaderDescription) {
       heading.createEl("p", {
-        text: "Turn one note into grounded practice, then study it without leaving your vault.",
+        text: this.stage === "study"
+          ? "Focus on the current question. Supporting controls appear only when they are useful."
+          : "Turn approved material into grounded practice without leaving your vault.",
       });
     }
     const icon = header.createDiv({ cls: "practice-lab-header-icon" });
-    setIcon(icon, "flask-conical");
-    this.renderCreationModeSwitch(this.contentEl);
+    setIcon(icon, this.stage === "study" ? "gamepad-2" : "flask-conical");
+    if (this.stage === "study") {
+      const mode = this.contentEl.createDiv({
+        cls: "practice-lab-session-mode-badge",
+        attr: { "aria-label": "Current practice session mode" },
+      });
+      setIcon(mode.createSpan({ attr: { "aria-hidden": "true" } }),
+        this.studyLearningProgress?.scope.mode === "learning-path" ? "route" : "list-checks");
+      mode.createSpan({
+        text: this.studyLearningProgress?.scope.mode === "learning-path"
+          ? "Guided path session"
+          : "Quick practice session",
+      });
+    } else {
+      this.renderCreationModeSwitch(this.contentEl);
+    }
     this.renderGenerationRecovery(this.contentEl);
 
     this.agentActivityHostEl = this.contentEl.createDiv({
@@ -1233,32 +1297,17 @@ export class PracticeLabView extends ItemView {
 
   private renderCreationModeSwitch(container: HTMLElement): void {
     if (Platform.isMobileApp || this.options.callbacks.openGuidedLearningPath === undefined) return;
-    const activeMode = this.stage === "study"
-      && this.studyLearningProgress?.scope.mode === "learning-path"
-      ? "guided"
-      : "quick";
+    const activeMode = "quick" as const;
     const switchBlocked = this.stage === "review"
-      || this.stage === "study"
       || this.job.state === "running"
       || this.job.state === "cancelling";
     renderSharedCreationModeSwitch(container, {
       active: activeMode,
       quickDisabled: true,
       guidedDisabled: switchBlocked,
-      ...(this.stage === "study"
-        ? {
-            quickDisabledReason: activeMode === "guided"
-              ? "A Guided path practice session is active. Finish or leave it before opening Quick set creation."
-              : "This Quick set practice session is active.",
-          }
-        : {}),
       ...(switchBlocked
         ? {
-            guidedDisabledReason: this.stage === "study"
-              ? activeMode === "guided"
-                ? "This Guided path practice session is active."
-                : "Finish or leave the current practice session before changing creation mode."
-              : "Finish the current generation or draft review before changing creation mode.",
+            guidedDisabledReason: "Finish the current generation or draft review before changing creation mode.",
           }
         : {}),
       onQuick: () => undefined,
@@ -1335,19 +1384,53 @@ export class PracticeLabView extends ItemView {
       ["configure", "Configure"],
       ["review", "Review"],
     ];
+    const currentIndex = definitions.findIndex(([stage]) => stage === this.stage);
+    const generationLocked = this.job.state === "running"
+      || this.job.state === "cancelling";
     for (const [index, [stage, label]] of definitions.entries()) {
+      const unavailable = stage === "configure"
+        ? this.source === null
+        : stage === "review"
+          ? this.drafts.length === 0
+          : false;
+      const needsUpdate = stage === "review"
+        && this.drafts.length > 0
+        && this.source !== null
+        && this.previewKey !== configurationKey(this.source, this.getConfiguration());
+      const state = this.stage === stage
+        ? "current"
+        : generationLocked
+          ? "locked"
+          : needsUpdate
+            ? "needs-update"
+            : !unavailable && index < currentIndex
+              ? "completed"
+              : unavailable
+                ? "locked"
+                : "available";
       const button = steps.createEl("button", {
-        cls: this.stage === stage ? "is-active" : "",
+        cls: `is-${state}`,
         attr: {
           type: "button",
           "aria-current": this.stage === stage ? "step" : "false",
+          "data-step-state": state,
+          title: state === "needs-update"
+            ? "Earlier settings changed. Review the refreshed payload before regenerating."
+            : state === "locked"
+              ? generationLocked
+                ? "This step is locked while generation is running."
+                : "Complete the earlier step first."
+              : `${label} step`,
         },
       });
       button.createSpan({ cls: "practice-step-number", text: String(index + 1) });
       button.createSpan({ text: label });
-      const unavailable = stage === "configure" ? this.source === null : stage === "review" ? this.drafts.length === 0 : false;
-      button.disabled = unavailable;
+      if (state === "needs-update") {
+        button.createSpan({ cls: "practice-step-state", text: "Needs update" });
+      }
+      button.disabled = unavailable || (generationLocked && this.stage !== stage);
       button.addEventListener("click", () => {
+        if (button.disabled) return;
         this.stage = stage;
         this.render();
       });
@@ -1428,22 +1511,36 @@ export class PracticeLabView extends ItemView {
         },
       }),
     });
+    this.renderSourceClassification(section);
 
-    const visualHeading = section.createDiv({ cls: "practice-source-subheading" });
+    let visualContainer: HTMLElement = section;
+    if (this.source.visuals.length > 0) {
+      const visualDetails = section.createEl("details", {
+        cls: "practice-lab-config-disclosure practice-lab-visual-disclosure",
+      });
+      const visualSummary = visualDetails.createEl("summary");
+      visualSummary.createEl("strong", { text: "Review images" });
+      visualSummary.createSpan({
+        text: `${selectedVisualIds(this.source).length} of ${this.source.visuals.length} selected`,
+      });
+      visualSummary.createSpan({ cls: "practice-lab-disclosure-action", text: "Review" });
+      visualContainer = visualDetails.createDiv({ cls: "practice-lab-visual-disclosure-body" });
+    }
+    const visualHeading = visualContainer.createDiv({ cls: "practice-source-subheading" });
     const visualCopy = visualHeading.createDiv();
     visualCopy.createEl("strong", { text: "Detected visuals" });
     visualCopy.createEl("p", {
       text: "Select only visuals that should be sent. GIFs use your default frame automatically; videos and remote images still require explicit review.",
     });
     if (this.source.visuals.length === 0) {
-      section.createEl("p", {
+      visualContainer.createEl("p", {
         cls: "practice-lab-muted practice-learning-path-visual-empty",
         text: this.source.mode === "pdf"
           ? "No separate visual was selected. PDF text is page-grounded; embedded page images are not uploaded automatically."
           : "No supported visuals were detected in this source.",
       });
     } else {
-      const bulkControls = section.createDiv({
+      const bulkControls = visualContainer.createDiv({
         cls: "practice-learning-path-visual-toolbar practice-lab-visual-bulk-controls",
       });
       const defaultLabel = bulkControls.createEl("label", {
@@ -1493,7 +1590,7 @@ export class PracticeLabView extends ItemView {
         text: `${selectedVisualIds(this.source).length} of ${this.source.visuals.length} selected`,
         attr: { "aria-live": "polite" },
       });
-      const visualList = section.createDiv({
+      const visualList = visualContainer.createDiv({
         cls: "practice-lab-visual-grid practice-source-visual-grid",
       });
       for (const visual of this.source.visuals) this.renderVisualCard(visualList, visual);
@@ -1508,6 +1605,67 @@ export class PracticeLabView extends ItemView {
         this.stage = "configure";
         this.render();
       });
+  }
+
+  private renderSourceClassification(container: HTMLElement): void {
+    const source = this.source;
+    if (source === null) return;
+    const current = source.classification ?? "unclassified";
+    const state = source.classificationState ?? "suggested";
+    const details = container.createEl("details", {
+      cls: `practice-lab-source-classification is-${state}`,
+    });
+    details.open = state !== "confirmed";
+    const summary = details.createEl("summary");
+    summary.createEl("strong", { text: "Source label" });
+    summary.createSpan({
+      text: `${SOURCE_CLASSIFICATION_LABELS[current]}${state === "confirmed" ? " · Confirmed" : " · Suggested — review"}`,
+    });
+    const body = details.createDiv({ cls: "practice-lab-source-classification-body" });
+    body.createEl("p", {
+      text: "This label controls course alignment only. It never changes, moves, or rewrites the source file.",
+    });
+    const setting = new Setting(body)
+      .setName("What kind of source is this?")
+      .setDesc("Course material can define the expected course answer. Personal notes remain visible when they differ.");
+    const select = setting.controlEl.createEl("select", {
+      attr: { "aria-label": "Source classification" },
+    });
+    for (const [value, label] of Object.entries(SOURCE_CLASSIFICATION_LABELS)) {
+      select.createEl("option", { value, text: label });
+    }
+    select.value = current;
+    const status = body.createEl("p", {
+      cls: "practice-lab-source-classification-status",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    const confirm = new ButtonComponent(setting.controlEl)
+      .setIcon("check")
+      .setButtonText(state === "confirmed" ? "Confirmed" : "Confirm label")
+      .setCta()
+      .setDisabled(
+        this.options.callbacks.confirmSourceClassification === undefined
+          || state === "confirmed",
+      );
+    select.addEventListener("change", () => {
+      confirm.setButtonText("Confirm label");
+      confirm.setDisabled(this.options.callbacks.confirmSourceClassification === undefined);
+      status.setText("");
+    });
+    confirm.onClick(() => {
+      const classification = select.value as SourceMaterialClassificationV1;
+      confirm.setDisabled(true).setButtonText("Saving…");
+      void this.options.callbacks.confirmSourceClassification?.(source, classification)
+        .then((confirmed) => {
+          this.source = confirmed;
+          this.invalidatePreview();
+          this.renderPreservingScroll();
+        })
+        .catch((error: unknown) => {
+          confirm.setDisabled(false).setButtonText("Confirm label");
+          status.setText(this.errorMessage(error, "Could not confirm the source label."));
+        });
+    });
   }
 
   private renderVisualCard(container: HTMLElement, visual: DetectedVisual): void {
@@ -1651,12 +1809,31 @@ export class PracticeLabView extends ItemView {
     let refreshOutput = (): void => undefined;
     let refreshModelControl = (): void => undefined;
     let refreshReasoningControl = (): void => undefined;
+    let refreshEngineSummary = (): void => undefined;
+    let refreshMixSummary = (): void => undefined;
     const configurationChanged = (): void => {
       this.invalidatePreview();
+      refreshEngineSummary();
+      refreshMixSummary();
       refreshOutput();
     };
 
-    const form = container.createDiv({ cls: "practice-lab-config-grid" });
+    const engine = container.createEl("details", {
+      cls: "practice-lab-config-disclosure practice-lab-engine-disclosure",
+    });
+    const engineSummary = engine.createEl("summary");
+    engineSummary.createEl("strong", { text: "Generation engine" });
+    const engineSummaryText = engineSummary.createSpan();
+    engineSummary.createSpan({ cls: "practice-lab-disclosure-action", text: "Change…" });
+    refreshEngineSummary = (): void => {
+      const providerLabel = this.providers.find(
+        (candidate) => candidate.id === this.provider,
+      )?.label ?? this.provider;
+      engineSummaryText.setText(
+        `${providerLabel} · ${this.model.length === 0 ? "Automatic model" : this.model} · ${displayReasoningEffort(this.reasoningEffort)} reasoning`,
+      );
+    };
+    const form = engine.createDiv({ cls: "practice-lab-config-grid" });
     const providerSetting = new Setting(form)
       .setName("AI provider")
       .setDesc("Practice Problem Generator never switches providers silently.");
@@ -1901,8 +2078,12 @@ export class PracticeLabView extends ItemView {
     });
     refreshModelControl();
     refreshReasoningControl();
+    refreshEngineSummary();
 
-    new Setting(form)
+    const essentials = container.createDiv({
+      cls: "practice-lab-config-grid practice-lab-config-essentials",
+    });
+    new Setting(essentials)
       .setName("Number of exercises")
       .setDesc("Choose between 1 and 30 items. Distribution counts update from this total.")
       .addText((component) => {
@@ -1921,7 +2102,7 @@ export class PracticeLabView extends ItemView {
         });
       });
 
-    const difficultySetting = new Setting(form)
+    const difficultySetting = new Setting(essentials)
       .setName("Difficulty")
       .setDesc("Choose the reasoning demand for this set. It never expands the approved source or permits missing assumptions.");
     difficultySetting.settingEl.addClass("practice-lab-difficulty-setting");
@@ -1935,7 +2116,7 @@ export class PracticeLabView extends ItemView {
       },
     });
 
-    const focusSetting = new Setting(form)
+    const focusSetting = new Setting(essentials)
       .setName("Focus instructions for the AI")
       .setDesc(
         "Optional guidance for this draft only. Specify what to emphasize, compare, avoid, or make more challenging. The source and exact exercise mix remain authoritative.",
@@ -1966,9 +2147,21 @@ export class PracticeLabView extends ItemView {
       );
     });
 
-    const typeSection = container.createDiv({
-      cls: "practice-lab-type-section",
+    const mixDetails = container.createEl("details", {
+      cls: "practice-lab-config-disclosure practice-lab-mix-disclosure",
     });
+    const mixSummary = mixDetails.createEl("summary");
+    mixSummary.createEl("strong", { text: "Exercise mix" });
+    const mixSummaryText = mixSummary.createSpan();
+    mixSummary.createSpan({ cls: "practice-lab-disclosure-action", text: "Customize" });
+    refreshMixSummary = (): void => {
+      const selectedCount = enabledExerciseTypes(this.exerciseTypePercentages).length;
+      mixSummaryText.setText(
+        `${selectedCount} selected ${selectedCount === 1 ? "type" : "types"} · ${exerciseTypePercentageTotal(this.exerciseTypePercentages)}% allocated`,
+      );
+    };
+    refreshMixSummary();
+    const typeSection = mixDetails.createDiv({ cls: "practice-lab-type-section" });
     const output = container.createDiv({ cls: "practice-lab-config-output" });
     refreshOutput = (): void => {
       const scrollTop = this.contentEl.scrollTop;
@@ -2259,14 +2452,22 @@ export class PracticeLabView extends ItemView {
     );
 
     if (this.job.state === "failed") {
+      const failureMessage = this.job.message
+        ?? "Generation failed. Your reviewed payload is still ready to retry.";
+      const presentation = generationFailurePresentation(failureMessage);
       const failure = container.createDiv({
         cls: "practice-lab-callout is-error",
         attr: { role: "alert", "aria-live": "assertive" },
       });
       setIcon(failure.createSpan(), "circle-alert");
-      failure.createSpan({
-        text: this.job.message ?? "Generation failed. Your reviewed payload is still ready to retry.",
+      const copy = failure.createDiv({ cls: "practice-lab-error-copy" });
+      copy.createEl("strong", { text: presentation.summary });
+      copy.createEl("p", { text: presentation.recovery });
+      const technical = copy.createEl("details", {
+        cls: "practice-lab-technical-details",
       });
+      technical.createEl("summary", { text: "Technical details" });
+      technical.createEl("pre", { text: presentation.technicalDetails });
     }
 
     const footer = container.createDiv({ cls: "practice-lab-stage-footer" });
@@ -2283,18 +2484,40 @@ export class PracticeLabView extends ItemView {
       const generate = new ButtonComponent(footer)
         .setIcon("sparkles")
         .setButtonText(
-          this.job.state === "failed" ? "Retry generation" : "Generate draft set",
+          this.job.state === "failed" ? "Retry generation" : "Generate practice",
         )
         .setCta();
       const currentKey = configurationKey(source, this.getConfiguration());
       generate.setDisabled(
         capability !== null ||
-          recoveryBlocked ||
-          !this.payloadAccepted ||
-          this.previewKey !== currentKey ||
-          this.payloadPreview === null,
+          recoveryBlocked,
       );
-      generate.onClick(() => void this.generate());
+      generate.onClick(() => {
+        const payloadReady = this.previewKey === currentKey
+          && this.payloadPreview !== null;
+        const details = container.querySelector<HTMLDetailsElement>(
+          ".practice-lab-payload-preview",
+        );
+        if (!payloadReady && details !== null) {
+          void this.buildPreview(details, refreshOutput).then(() => {
+            const currentDetails = this.contentEl.querySelector<HTMLDetailsElement>(
+              ".practice-lab-payload-preview",
+            );
+            currentDetails?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            new Notice("Review the exact payload and approve it once, then select generate practice again.", 8_000);
+          });
+          return;
+        }
+        if (!this.payloadAccepted) {
+          if (details !== null) {
+            details.open = true;
+            details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          }
+          new Notice("Approve the exact payload before generation. No provider has been contacted yet.", 8_000);
+          return;
+        }
+        void this.generate();
+      });
     }
 
   }
@@ -2403,7 +2626,6 @@ export class PracticeLabView extends ItemView {
     if (TERMINAL_ACTIVITY_PHASES.has(event.phase)) {
       this.generationActivityFinishedAt = Date.now();
     }
-    this.agentActivityOpen = true;
     this.updateActivityClock();
     this.updateAgentActivityDom();
   }
@@ -2426,10 +2648,17 @@ export class PracticeLabView extends ItemView {
 
     const activeCount = (this.job.state === "running" || this.job.state === "cancelling" ? 1 : 0)
       + reviewLogs.filter((log) => log.finishedAt === undefined).length;
+    const generationDuration = this.generationActivityStartedAt === null
+      ? undefined
+      : (this.generationActivityFinishedAt ?? Date.now()) - this.generationActivityStartedAt;
+    const generationTelemetry = generationTelemetryFromActivity(
+      this.generationActivityEvents,
+      generationDuration,
+    );
     const details = host.createEl("details", {
       cls: "practice-lab-agent-activity",
     });
-    details.open = this.agentActivityOpen || activeCount > 0;
+    details.open = this.agentActivityOpen;
     details.addEventListener("toggle", () => {
       this.agentActivityOpen = details.open;
     });
@@ -2445,12 +2674,15 @@ export class PracticeLabView extends ItemView {
       cls: "practice-lab-agent-activity-summary",
       text: activeCount > 0
         ? `${activeCount} running · ${this.currentActivityElapsedText(reviewLogs)}`
+          + (generationTelemetry === undefined
+            ? ""
+            : ` · ${generationTelemetry.tokenUsage.source === "provider-reported" ? "" : "~"}${compactActivityTokens(tokenUsageTotal(generationTelemetry.tokenUsage))} tokens`)
         : "Latest run complete",
     });
     const body = details.createDiv({ cls: "practice-lab-agent-activity-body" });
     body.createEl("p", {
       cls: "practice-lab-agent-activity-disclosure",
-      text: "Live provider events, elapsed time, and emitted reasoning status. Private chain-of-thought and raw provider output are not exposed; this activity log is capped and is not saved to your vault.",
+      text: "Live provider events, elapsed time, token usage, and provider-reported monetary cost. Local token estimates are marked with ~ and exclude visual tokenization. Private chain-of-thought and raw provider output are never exposed. Final generation telemetry is saved with generation provenance.",
     });
     if (generationVisible) {
       this.renderActivityLog(
@@ -2493,6 +2725,38 @@ export class PracticeLabView extends ItemView {
       startedAt,
       ...(finishedAt === undefined ? {} : { finishedAt }),
     });
+    const telemetry = generationTelemetryFromActivity(
+      events,
+      (finishedAt ?? Date.now()) - startedAt,
+    );
+    if (telemetry !== undefined) {
+      const metrics = section.createDiv({
+        cls: "practice-lab-generation-telemetry",
+        attr: { "aria-label": `${title} usage summary` },
+      });
+      activityMetric(metrics, "Tokens", formatTokenUsage(telemetry.tokenUsage));
+      activityMetric(metrics, "Cost", formatGenerationCost(telemetry));
+      activityMetric(
+        metrics,
+        "Attempts",
+        telemetry.attempts === 2 ? "2 · includes schema repair" : "1",
+      );
+      activityMetric(
+        metrics,
+        "Basis",
+        telemetry.tokenUsage.source === "provider-reported"
+          ? "Provider reported"
+          : telemetry.tokenUsage.source === "mixed"
+            ? "Provider + local estimate"
+            : "Local text estimate",
+      );
+      if (telemetry.tokenUsage.source !== "provider-reported") {
+        metrics.createDiv({
+          cls: "practice-lab-generation-telemetry-note",
+          text: `~ covers submitted text and visible structured output only. Hidden reasoning and provider/tool overhead${telemetry.tokenUsage.inputEstimateExcludesMedia ? ", including visual tokenization," : ""} are not included.`,
+        });
+      }
+    }
     const list = section.createEl("ol", {
       cls: "practice-lab-agent-activity-log",
       attr: { "aria-live": "polite", "aria-relevant": "additions text" },
@@ -2555,8 +2819,18 @@ export class PracticeLabView extends ItemView {
     const activeCount = (this.job.state === "running" || this.job.state === "cancelling" ? 1 : 0)
       + reviewLogs.filter((log) => log.finishedAt === undefined).length;
     if (this.agentActivitySummaryEl !== null && activeCount > 0) {
+      const duration = this.generationActivityStartedAt === null
+        ? undefined
+        : (this.generationActivityFinishedAt ?? Date.now()) - this.generationActivityStartedAt;
+      const telemetry = generationTelemetryFromActivity(
+        this.generationActivityEvents,
+        duration,
+      );
       this.agentActivitySummaryEl.setText(
-        `${activeCount} running · ${this.currentActivityElapsedText(reviewLogs)}`,
+        `${activeCount} running · ${this.currentActivityElapsedText(reviewLogs)}`
+        + (telemetry === undefined
+          ? ""
+          : ` · ${telemetry.tokenUsage.source === "provider-reported" ? "" : "~"}${compactActivityTokens(tokenUsageTotal(telemetry.tokenUsage))} tokens`),
       );
     }
   }
@@ -2901,65 +3175,22 @@ export class PracticeLabView extends ItemView {
     const step = this.studyPathStep;
     if (step === null) return;
     const position = container.createEl("section", {
-      cls: "practice-lab-path-position practice-lab-path-navigator",
+      cls: "practice-lab-path-position practice-lab-path-navigator is-compact",
       attr: { "aria-label": "Your current guided path location" },
     });
-    const locationLabel = position.createDiv({ cls: "practice-lab-path-location-label" });
-    const locationIcon = locationLabel.createSpan({ attr: { "aria-hidden": "true" } });
-    setIcon(locationIcon, "map-pin");
-    locationLabel.createSpan({ text: "You are here" });
-
-    const breadcrumb = position.createEl("nav", {
-      cls: "practice-lab-path-breadcrumb",
-      attr: { "aria-label": "Guided path location" },
-    });
-    breadcrumb.createSpan({
-      cls: "practice-lab-path-breadcrumb-item is-path",
-      text: step.pathTitle,
-      attr: { title: step.pathTitle },
-    });
-    breadcrumb.createSpan({
-      cls: "practice-lab-path-breadcrumb-separator",
-      text: "›",
-      attr: { "aria-hidden": "true" },
-    });
-    breadcrumb.createSpan({
-      cls: "practice-lab-path-breadcrumb-item is-step",
-      text: `Step ${step.stepIndex + 1} of ${step.stepCount}`,
-      attr: { "aria-current": "step" },
-    });
+    const current = position.createDiv({ cls: "practice-lab-path-compact-current" });
+    const label = current.createDiv({ cls: "practice-lab-path-compact-label" });
+    setIcon(label.createSpan({ attr: { "aria-hidden": "true" } }), "map-pin");
+    label.createSpan({ text: "Guided path" });
+    label.createEl("strong", { text: `Step ${step.stepIndex + 1} of ${step.stepCount}` });
     if (this.displayPreferences.practice.showStudyProgress) {
-      breadcrumb.createSpan({
-        cls: "practice-lab-path-breadcrumb-separator",
-        text: "›",
-        attr: { "aria-hidden": "true" },
-      });
-      breadcrumb.createSpan({
-        cls: "practice-lab-path-breadcrumb-item is-question",
+      label.createSpan({
         text: `Question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
-        attr: { "aria-current": "page" },
       });
     }
-
-    const identity = position.createDiv({ cls: "practice-lab-path-current-step" });
-    identity.createEl("h3", { text: step.stepTitle });
-    const kind = step.kind === "tutor-lesson" ? "Tutor lesson" : "Practice set";
-    identity.createEl("p", {
-      text: `${kind} · ${step.questionCount} ${step.questionCount === 1 ? "guided question" : "questions"} here · ${step.totalQuestionCount} saved questions across the full path`,
-    });
-
-    const levels = position.createDiv({ cls: "practice-lab-path-progress-levels" });
-    const pathLevel = levels.createDiv({
-      cls: "practice-lab-path-progress-level is-overall-path",
-    });
-    const pathLevelHeading = pathLevel.createDiv({
-      cls: "practice-lab-path-progress-heading",
-    });
-    pathLevelHeading.createSpan({ text: "Overall path" });
-    pathLevelHeading.createEl("strong", {
-      text: `Step ${step.stepIndex + 1} of ${step.stepCount}`,
-    });
-    const pathMeter = pathLevel.createEl("progress", {
+    current.createEl("h3", { text: step.stepTitle });
+    const pathMeter = position.createEl("progress", {
+      cls: "practice-lab-path-primary-progress",
       attr: {
         max: String(step.stepCount),
         value: String(step.stepIndex + 1),
@@ -2967,31 +3198,15 @@ export class PracticeLabView extends ItemView {
       },
     });
     pathMeter.value = step.stepIndex + 1;
-
-    if (this.displayPreferences.practice.showStudyProgress) {
-      const questionLevel = levels.createDiv({
-        cls: "practice-lab-path-progress-level is-current-step",
-      });
-      const questionLevelHeading = questionLevel.createDiv({
-        cls: "practice-lab-path-progress-heading",
-      });
-      questionLevelHeading.createSpan({
-        text: step.kind === "tutor-lesson" ? "Inside this tutor lesson" : "Inside this practice set",
-      });
-      questionLevelHeading.createEl("strong", {
-        text: `Question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
-      });
-      const questionMeter = questionLevel.createEl("progress", {
-        attr: {
-          max: String(this.studyExercises.length),
-          value: String(this.studyIndex + 1),
-          "aria-label": `Current step position: question ${this.studyIndex + 1} of ${this.studyExercises.length}`,
-        },
-      });
-      questionMeter.value = this.studyIndex + 1;
-    }
-
-    const adjacent = position.createDiv({ cls: "practice-lab-path-adjacent-steps" });
+    const details = position.createEl("details", {
+      cls: "practice-lab-path-details",
+    });
+    details.createEl("summary", { text: "Path details" });
+    const body = details.createDiv({ cls: "practice-lab-path-details-body" });
+    body.createEl("p", {
+      text: `${step.pathTitle} · ${step.kind === "tutor-lesson" ? "Tutor lesson" : "Practice set"} · ${step.questionCount} ${step.questionCount === 1 ? "question" : "questions"} in this step · ${step.totalQuestionCount} across the saved path`,
+    });
+    const adjacent = body.createDiv({ cls: "practice-lab-path-adjacent-steps" });
     const previous = adjacent.createDiv({ cls: "practice-lab-path-adjacent-step" });
     previous.createSpan({ text: "Previous step" });
     const previousTitle = step.previousStepTitle
@@ -3146,6 +3361,9 @@ export class PracticeLabView extends ItemView {
         const item = points.createEl("li");
         renderLatexMarkup(item, point);
       }
+    }
+    if (exercise.alignment !== undefined) {
+      this.renderStudyAlignment(check, exercise.alignment);
     }
     new ButtonComponent(check)
       .setIcon("arrow-right")
@@ -3501,6 +3719,9 @@ export class PracticeLabView extends ItemView {
       const rationale = answer.createDiv({ cls: "practice-lab-rationale" });
       renderLatexMarkup(rationale, exercise.rationale);
     }
+    if (exercise.alignment !== undefined) {
+      this.renderStudyAlignment(answer, exercise.alignment);
+    }
 
     if (exercise.grading.kind === "self") {
       this.studyFeedbackActionsEl = container.createDiv({
@@ -3523,21 +3744,150 @@ export class PracticeLabView extends ItemView {
   }
 
   private renderAnswerReviewControls(container: HTMLElement): void {
-    this.answerReviewControlsEl = container.createEl("section", {
+    const details = container.createEl("details", {
       cls: "practice-lab-answer-review-controls",
       attr: { "aria-label": "Free-response review" },
     });
+    details.open = this.answerReviewSettingsOpen;
+    const summary = details.createEl("summary", {
+      cls: "practice-lab-answer-review-summary",
+      attr: {
+        title: "Change how open answers are assessed for this session.",
+      },
+    });
+    this.answerReviewSummaryEl = summary.createEl("strong", {
+      text: this.answerReviewMode === "ai"
+        ? "Answer review: AI in the background"
+        : "Answer review: Self-assess",
+    });
+    summary.createSpan({ text: "Change…" });
+    details.addEventListener("toggle", () => {
+      this.answerReviewSettingsOpen = details.open;
+    });
+    this.answerReviewControlsEl = details.createDiv({
+      cls: "practice-lab-answer-review-controls-body",
+    });
     this.refreshAnswerReviewControls();
+  }
+
+  private renderStudyAlignment(
+    container: HTMLElement,
+    alignment: ExerciseAlignmentSnapshotV1,
+  ): void {
+    const completionApproved = aiContextCompletionApproved(
+      alignment.aiContextCompletionPolicy,
+    );
+    const details = container.createEl("details", {
+      cls: `practice-lab-study-alignment is-${alignment.state}`,
+    });
+    details.open = alignment.state === "notes-differ"
+      || alignment.state === "school-sources-disagree";
+    const summary = details.createEl("summary");
+    const icon = summary.createSpan({ attr: { "aria-hidden": "true" } });
+    setIcon(
+      icon,
+      alignment.state === "course-aligned"
+        ? "badge-check"
+        : alignment.state === "notes-grounded-unverified"
+          ? "circle-help"
+          : "message-square-warning",
+    );
+    const label = (
+      completionApproved
+      && (
+        alignment.state === "notes-grounded-unverified"
+        || alignment.state === "insufficient-evidence"
+      )
+    )
+      ? "AI-supported context approved · not course-checked"
+      : ALIGNMENT_STATE_LABELS[alignment.state];
+    summary.createEl("strong", { text: label });
+    summary.createSpan({ text: "Details" });
+    const body = details.createDiv({ cls: "practice-lab-study-alignment-body" });
+    if (alignment.records.length === 0) {
+      body.createEl("p", {
+        text: completionApproved
+          ? "Your selected material anchors this topic. You approved a small amount of AI-supported context for this practice; no confirmed school comparison verifies that context."
+          : "This answer stays within the selected material. No confirmed school comparison is available, so it is not course-checked.",
+      });
+      return;
+    }
+    if (alignment.state === "insufficient-evidence") {
+      body.createEl("p", {
+        text: completionApproved
+          ? "The selected material anchors this topic, and you approved supporting AI context for the practice. Treat that addition as AI-supported, not as verified school material."
+          : "The selected material anchors this topic. This practice stayed within that material, without adding general technical context.",
+      });
+    } else if (alignment.state === "notes-grounded-unverified") {
+      body.createEl("p", {
+        text: completionApproved
+          ? "This answer follows the selected material and includes the supporting AI context you approved. No confirmed school source verifies that addition."
+          : "This answer follows the selected material only. No confirmed school source verifies it.",
+      });
+    }
+    for (const record of alignment.records) {
+      const comparison = body.createEl("article", {
+        cls: `practice-lab-alignment-record is-${record.status}`,
+      });
+      if (record.schoolClaim !== null) {
+        const school = comparison.createDiv({ cls: "practice-lab-alignment-claim is-school" });
+        school.createEl("strong", { text: "Selected school material" });
+        const claim = school.createDiv();
+        renderLatexMarkup(claim, record.schoolClaim);
+      }
+      if (record.noteClaim !== null) {
+        const note = comparison.createDiv({ cls: "practice-lab-alignment-claim is-note" });
+        note.createEl("strong", { text: "Your notes" });
+        const claim = note.createDiv();
+        renderLatexMarkup(claim, record.noteClaim);
+      }
+      if (
+        record.courseSupportedClaim !== null
+        && record.courseSupportedClaim !== record.schoolClaim
+      ) {
+        const resolution = comparison.createDiv({ cls: "practice-lab-alignment-resolution" });
+        resolution.createEl("strong", { text: "Course-supported interpretation" });
+        const claim = resolution.createDiv();
+        renderLatexMarkup(claim, record.courseSupportedClaim);
+      }
+      const evidence = comparison.createEl("details", {
+        cls: "practice-lab-alignment-evidence",
+      });
+      evidence.createEl("summary", { text: "Exact source excerpts" });
+      for (const citation of [...record.schoolEvidence, ...record.noteEvidence]) {
+        const excerpt = evidence.createEl("blockquote");
+        const page = citation.scope.kind === "pdf-pages"
+          ? citation.scope.firstPage === citation.scope.lastPage
+            ? ` · page ${citation.scope.firstPage}`
+            : ` · pages ${citation.scope.firstPage}–${citation.scope.lastPage}`
+          : "";
+        excerpt.createEl("strong", {
+          text: `${SOURCE_CLASSIFICATION_LABELS[citation.classification]} · ${citation.title}${page}`,
+        });
+        if (citation.headingPath.length > 0) {
+          excerpt.createEl("p", {
+            cls: "practice-lab-muted",
+            text: citation.headingPath.join(" › "),
+          });
+        }
+        const text = excerpt.createDiv();
+        renderLatexMarkup(text, citation.text);
+      }
+    }
   }
 
   private refreshAnswerReviewControls(): void {
     const controls = this.answerReviewControlsEl;
     if (controls === null) return;
+    this.answerReviewSummaryEl?.setText(
+      this.answerReviewMode === "ai"
+        ? "Answer review: AI in the background"
+        : "Answer review: Self-assess",
+    );
     controls.empty();
-    const heading = controls.createDiv({ cls: "practice-lab-answer-review-heading" });
-    heading.createEl("strong", { text: "Free-response review" });
-    heading.createSpan({
-      text: "Choose how open answers are assessed in this session.",
+    controls.createEl("p", {
+      cls: "practice-lab-answer-review-introduction",
+      text: "Choose once for this session. Background review never pauses the next question.",
     });
 
     const choices = controls.createDiv({
@@ -4692,6 +5042,7 @@ export class PracticeLabView extends ItemView {
       exerciseTypes: enabledExerciseTypes(percentages),
       exerciseTypePercentages: percentages,
       selectedVisualIds: selectedVisualIds(this.source),
+      aiContextCompletionPolicy: this.aiContextCompletionPolicy,
     };
   }
 
@@ -4888,7 +5239,7 @@ export class PracticeLabView extends ItemView {
     this.generationActivityEvents = [];
     this.generationActivityStartedAt = Date.now();
     this.generationActivityFinishedAt = null;
-    this.agentActivityOpen = true;
+    this.agentActivityOpen = false;
     this.job = { state: "running", message: "Generating grounded exercises…" };
     this.updateActivityClock();
     this.render();
@@ -4909,7 +5260,9 @@ export class PracticeLabView extends ItemView {
         state: "failed",
         message: this.errorMessage(error, "Generation failed."),
       };
-      new Notice(this.job.message ?? "Generation failed.");
+      new Notice(generationFailurePresentation(
+        this.job.message ?? "Generation failed.",
+      ).summary);
       this.updateActivityClock();
       this.render();
     }
@@ -5579,6 +5932,11 @@ export class PracticeLabView extends ItemView {
       answers: structuredClone(this.studyAnswers),
       skippedExerciseIds: [...this.studySkippedExerciseIds],
       currentInput: structuredClone(this.studyCurrentInput),
+      alignmentSnapshots: this.studyExercises.flatMap((exercise) =>
+        exercise.alignment === undefined
+          ? []
+          : [structuredClone(exercise.alignment)]
+      ),
       answerReviewMode: this.answerReviewMode,
       answerReviewProvider: this.answerReviewProvider,
       answerReviewReasoningEffort: this.answerReviewReasoningEffort,
@@ -5808,6 +6166,66 @@ export class PracticeLabView extends ItemView {
   }
 }
 
+interface GenerationFailurePresentation {
+  readonly summary: string;
+  readonly recovery: string;
+  readonly technicalDetails: string;
+}
+
+function generationFailurePresentation(
+  technicalDetails: string,
+): GenerationFailurePresentation {
+  const normalized = technicalDetails.toLowerCase();
+  if (normalized.includes("cancel")) {
+    return {
+      summary: "Generation was cancelled.",
+      recovery: "Your approved configuration is unchanged. Start generation again whenever you are ready.",
+      technicalDetails,
+    };
+  }
+  if (normalized.includes("timeout") || normalized.includes("timed out")) {
+    return {
+      summary: "Generation did not finish within the allowed time.",
+      recovery: "Retry the approved request, or increase the generation timeout in Settings if this model needs longer.",
+      technicalDetails,
+    };
+  }
+  if (
+    normalized.includes("structured result")
+    || normalized.includes("schema")
+    || normalized.includes("valid result")
+  ) {
+    return {
+      summary: "The AI response could not be turned into a valid practice set.",
+      recovery: "Retry once with the same approved payload. If it repeats, check the selected provider in Settings.",
+      technicalDetails,
+    };
+  }
+  if (
+    normalized.includes("not available")
+    || normalized.includes("missing executable")
+    || normalized.includes("enoent")
+  ) {
+    return {
+      summary: "The selected generation engine is unavailable.",
+      recovery: "Open Settings, run Check providers, and keep the same provider or explicitly choose another one.",
+      technicalDetails,
+    };
+  }
+  if (normalized.includes("circular structure")) {
+    return {
+      summary: "The local generation helper could not prepare the result.",
+      recovery: "Your approved payload is preserved. Retry once; if it repeats, open Technical details when reporting the problem.",
+      technicalDetails,
+    };
+  }
+  return {
+    summary: "Generation stopped before a valid practice set was ready.",
+    recovery: "Your approved payload is preserved. Retry once, then use Activity and Technical details if the same failure repeats.",
+    technicalDetails,
+  };
+}
+
 function tutorBlockLabel(
   kind: "why" | "prerequisite" | "explanation" | "worked-example" | "causal-walkthrough",
 ): string {
@@ -5887,4 +6305,20 @@ function formatElapsed(milliseconds: number): string {
     return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function compactActivityTokens(value: number): string {
+  if (value < 1_000) return Math.round(value).toLocaleString();
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+function activityMetric(
+  container: HTMLElement,
+  label: string,
+  value: string,
+): void {
+  const metric = container.createDiv({ cls: "practice-lab-generation-telemetry-metric" });
+  metric.createSpan({ text: label });
+  metric.createEl("strong", { text: value });
 }

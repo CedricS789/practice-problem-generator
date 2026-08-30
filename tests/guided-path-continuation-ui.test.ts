@@ -9,35 +9,37 @@ const [mainSource, viewSource, learningPathViewSource, styles] = await Promise.a
   readFile(new URL("../styles.css", import.meta.url), "utf8"),
 ]);
 
-test("saved Practice notes explain path scope and every study choice", () => {
-  assert.match(mainSource, /text: "Start studying"/u);
-  assert.match(mainSource, /total \$\{bank\.exercises\.length === 1 \? "question" : "questions"\}/u);
-  assert.match(mainSource, /Finishing this step does not end the path/u);
-  assert.match(mainSource, /"Continue guided path"/u);
-  assert.match(mainSource, /Tutor steps contain one guided problem/u);
+test("saved Practice notes render one active Practice, Progress, or Manage panel", () => {
+  assert.match(mainSource, /type SavedBankPage = "practice" \| "progress" \| "manage"/u);
+  assert.match(mainSource, /renderHorizontalTabs<SavedBankPage>/u);
+  assert.match(mainSource, /label: "Practice"/u);
+  assert.match(mainSource, /label: "Progress"/u);
+  assert.match(mainSource, /label: "Manage"/u);
+  assert.match(mainSource, /private readonly savedBankPagesByLeaf = new WeakMap/u);
+  assert.match(mainSource, /"Continue learning"/u);
   assert.match(mainSource, /"Choose a set"/u);
   assert.match(mainSource, /"Mixed practice"/u);
   assert.match(mainSource, /"Free practice"/u);
-  assert.match(mainSource, /"Manage and review"/u);
-  assert.match(styles, /\.practice-lab-bank-launcher \{/u);
-  assert.match(styles, /\.practice-lab-bank-action \{/u);
+  assert.match(mainSource, /"Choose another session…"/u);
+  assert.match(mainSource, /renderSavedBankProgressPage/u);
+  assert.match(mainSource, /renderSavedBankManagePage/u);
   assert.ok(
-    mainSource.indexOf('cls: "practice-lab-bank-launcher"')
-      < mainSource.indexOf("renderBankStatistics(element, bank"),
-    "Study choices must appear before history and analytics on the Practice note",
+    mainSource.indexOf("private renderSavedBankPracticePage")
+      < mainSource.indexOf("private renderSavedBankProgressPage"),
+    "Practice must remain the first saved-note task panel",
   );
 });
 
-test("a tutor step shows overall path position and skips the one-question order dialog", () => {
+test("a tutor step uses one compact path locator and skips the one-question order dialog", () => {
   assert.match(viewSource, /private renderGuidedPathPosition\(/u);
-  assert.match(viewSource, /text: "You are here"/u);
-  assert.match(viewSource, /"Guided path location"/u);
-  assert.match(viewSource, /text: "Overall path"/u);
-  assert.match(viewSource, /"Inside this tutor lesson"/u);
-  assert.match(viewSource, /"Inside this practice set"/u);
+  assert.match(viewSource, /text: "Guided path"/u);
+  assert.match(viewSource, /`Step \$\{step\.stepIndex \+ 1\} of \$\{step\.stepCount\}`/u);
+  assert.match(viewSource, /`Question \$\{this\.studyIndex \+ 1\} of \$\{this\.studyExercises\.length\}`/u);
+  assert.match(viewSource, /"Path details"/u);
+  assert.match(viewSource, /practice-lab-path-primary-progress/u);
   assert.match(viewSource, /text: "Previous step"/u);
   assert.match(viewSource, /text: "Next step"/u);
-  assert.match(viewSource, /saved questions across the full path/u);
+  assert.match(viewSource, /across the saved path/u);
   assert.match(
     viewSource,
     /this\.studyPathStep === null\s*&& this\.displayPreferences\.practice\.showStudyProgress/u,
@@ -45,7 +47,8 @@ test("a tutor step shows overall path position and skips the one-question order 
   assert.match(viewSource, /const isSingleTutorStep = learning\?\.pathStep\?\.kind === "tutor-lesson"/u);
   assert.match(viewSource, /isSingleTutorStep\s*\? null\s*: await chooseStudyOrder/u);
   assert.match(styles, /\.practice-lab-path-position \{/u);
-  assert.match(styles, /\.practice-lab-path-progress-levels \{/u);
+  assert.match(styles, /\.practice-lab-path-compact-current \{/u);
+  assert.match(styles, /\.practice-lab-path-details \{/u);
   assert.match(styles, /\.practice-lab-path-adjacent-steps \{/u);
 });
 
@@ -57,17 +60,12 @@ test("Guided path location reconstructs neighboring steps after recovery", () =>
   assert.match(viewSource, /const recoveredPathStep = recoveredPathStepPresentation/u);
 });
 
-test("an active Guided path session highlights Guided path in the mode switch", () => {
-  const switchImplementation = viewSource.slice(
-    viewSource.indexOf("private renderCreationModeSwitch"),
-    viewSource.indexOf("private renderGenerationRecovery"),
-  );
-  assert.match(
-    switchImplementation,
-    /this\.studyLearningProgress\?\.scope\.mode === "learning-path"/u,
-  );
-  assert.match(switchImplementation, /active: activeMode/u);
-  assert.match(switchImplementation, /This Guided path practice session is active/u);
+test("study replaces the creation mode switch with a non-interactive session badge", () => {
+  assert.match(viewSource, /if \(this\.stage === "study"\)/u);
+  assert.match(viewSource, /cls: "practice-lab-session-mode-badge"/u);
+  assert.match(viewSource, /\? "Guided path session"\s*: "Quick practice session"/u);
+  assert.match(viewSource, /\} else \{\s*this\.renderCreationModeSwitch\(this\.contentEl\)/u);
+  assert.match(styles, /\.practice-lab-session-mode-badge \{/u);
 });
 
 test("completing a path step can save and open the next recommendation", () => {
@@ -82,11 +80,24 @@ test("completing a path step can save and open the next recommendation", () => {
 });
 
 test("saved-session recovery is one explicit action instead of several misleading scopes", () => {
-  const recoveryBranch = mainSource.slice(
-    mainSource.indexOf("if (recoveryActionLabel !== undefined)"),
-    mainSource.indexOf("} else if (bank.learningPath !== null)", mainSource.indexOf("if (recoveryActionLabel !== undefined)")),
+  const practice = mainSource.slice(
+    mainSource.indexOf("private renderSavedBankPracticePage"),
+    mainSource.indexOf("private renderSavedBankProgressPage"),
   );
-  assert.match(recoveryBranch, /Finish or discard it before choosing another scope/u);
-  assert.match(recoveryBranch, /addStudyAction\(/u);
-  assert.doesNotMatch(recoveryBranch, /"Choose a set"|"Mixed practice"|"Free practice"/u);
+  assert.match(practice, /savedSessionMatchesBank/u);
+  assert.match(practice, /Nothing is discarded without explicit confirmation/u);
+  assert.match(practice, /if \(savedSession !== undefined \|\| hasUnreadableSession\) return/u);
+  assert.ok(
+    practice.indexOf("hasUnreadableSession) return") < practice.indexOf('"Choose a set"'),
+    "Alternate scopes must be unreachable while a checkpoint needs recovery",
+  );
+});
+
+test("the Guided Ready page names checkpoint recovery before invoking a study action", () => {
+  assert.match(learningPathViewSource, /savedWorkspaceStudyState/u);
+  assert.match(learningPathViewSource, /"Open recovery choices"/u);
+  assert.match(learningPathViewSource, /"Resume saved session"/u);
+  assert.match(learningPathViewSource, /studyState\.state === "ready"/u);
+  assert.match(mainSource, /savedWorkspaceStudyState: \(workspace\) =>/u);
+  assert.match(mainSource, /studyCheckpointWorkspaceActionState\(/u);
 });

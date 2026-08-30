@@ -53,7 +53,7 @@ test("remote, video, and unavailable visuals remain explicit and immutable", () 
   assert.match(viewSource, /updateSourceVisuals/u);
 });
 
-test("guided and tutor UI classes have a Border-theme-aware responsive style surface", () => {
+test("guided and tutor UI classes have an Obsidian-theme-aware responsive style surface", () => {
   const learningClasses = new Set(
     viewSource.match(/practice-learning-path-[a-z0-9-]+/gu) ?? [],
   );

@@ -92,6 +92,12 @@ export function lockAnswerReviewRequest(
       id: segment.id,
       headingPath: Object.freeze([...segment.headingPath]),
       text: segment.text,
+      ...(segment.classification === undefined
+        ? {}
+        : { classification: segment.classification }),
+      ...(segment.sourceTitle === undefined
+        ? {}
+        : { sourceTitle: segment.sourceTitle }),
     })];
   });
   return Object.freeze({

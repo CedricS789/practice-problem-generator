@@ -22,9 +22,15 @@ import type { ReasoningEffortV1 } from "../model";
 import { modelIdProblem } from "../model-selection";
 import { DEFAULT_AI_TIMEOUT_MS } from "../settings-values";
 import { CliActivityDecoder, publishCliActivity } from "./activity";
+import {
+  aggregateGenerationTelemetry,
+  generationAttemptTelemetryProblem,
+  type GenerationAttemptTelemetryV1,
+} from "../generation-telemetry";
 
 export const DEFAULT_GENERATION_TIMEOUT_MS = DEFAULT_AI_TIMEOUT_MS;
 export const GENERATION_RECOVERY_CONTEXT_FILENAME = "generation-context.json";
+export const GENERATION_RECOVERY_TELEMETRY_FILENAME = "generation-telemetry.json";
 export const MAX_GENERATION_PROMPT_CHARACTERS = 2_000_000;
 export const MAX_GENERATION_SCHEMA_CHARACTERS = 1_000_000;
 export const MAX_GENERATION_MEDIA_INPUTS = 200;
@@ -32,6 +38,7 @@ export const MAX_GENERATION_MEDIA_BYTES = 256 * 1024 * 1024;
 const DETECTION_TIMEOUT_MS = 10_000;
 const MODEL_CATALOG_TIMEOUT_MS = 10_000;
 const MODEL_CATALOG_CACHE_MS = 10 * 60 * 1_000;
+const MAX_RECOVERY_TELEMETRY_CHARACTERS = 32_000;
 
 export interface PreparedInvocation {
   readonly args: readonly string[];
@@ -219,6 +226,8 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     let recoveryHandle = request.recovery?.mode === "resume"
       ? request.recovery.handle
       : undefined;
+    const generationStartedAt = originalGenerationStart(request);
+    const attemptTelemetry: GenerationAttemptTelemetryV1[] = [];
     const recoveryReady = request.recovery?.mode === "start"
       ? request.recovery.onReady
       : undefined;
@@ -248,6 +257,9 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
           GENERATION_RECOVERY_CONTEXT_FILENAME,
           request.recovery.context,
         );
+      }
+      if (request.recovery?.mode === "resume") {
+        attemptTelemetry.push(...await readRecoveryAttemptTelemetry(workspace));
       }
       const schemaJson = requestSchemaJson;
       const resuming = request.recovery?.mode === "resume";
@@ -349,9 +361,26 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
           request.onActivity,
           attempt,
           durable,
+          prompt,
+          media.length > 0,
         );
-        recoveryHandle = result.recoveryHandle ?? recoveryHandle;
         const actualAttempt = result.durableAttempt ?? attempt;
+        if (result.telemetry !== undefined) {
+          const normalizedTelemetry: GenerationAttemptTelemetryV1 = {
+            ...result.telemetry,
+            attempt: actualAttempt,
+          };
+          const existing = attemptTelemetry.findIndex(
+            (item) => item.attempt === actualAttempt,
+          );
+          if (existing >= 0) attemptTelemetry[existing] = normalizedTelemetry;
+          else attemptTelemetry.push(normalizedTelemetry);
+          attemptTelemetry.sort((left, right) => left.attempt - right.attempt);
+          if (request.recovery !== undefined) {
+            await writeRecoveryAttemptTelemetry(workspace, attemptTelemetry);
+          }
+        }
+        recoveryHandle = result.recoveryHandle ?? recoveryHandle;
         priorOutput = result.stdout;
 
         try {
@@ -375,6 +404,14 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
             provider: this.id,
             value: parsed.value,
             attempts: actualAttempt,
+            ...(!sequentialAttemptTelemetry(attemptTelemetry, actualAttempt)
+              ? {}
+              : {
+                  telemetry: aggregateGenerationTelemetry(
+                    attemptTelemetry,
+                    Date.now() - generationStartedAt,
+                  ),
+                }),
             ...(recoveryHandle === undefined ? {} : { recoveryHandle }),
           };
         } catch (error) {
@@ -455,10 +492,16 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     onActivity?: CliActivityListener,
     attempt: 1 | 2 = 1,
     durable?: DurableProcessRun,
+    prompt = "",
+    includesMedia = false,
   ): Promise<ProcessRunResult> {
-    const decoder = onActivity === undefined
-      ? undefined
-      : new CliActivityDecoder(this.id, attempt, onActivity);
+    const decoder = new CliActivityDecoder(
+      this.id,
+      attempt,
+      onActivity ?? (() => undefined),
+      { prompt, includesMedia },
+    );
+    decoder.start();
     let streamedOutput = false;
     let result: ProcessRunResult;
     try {
@@ -470,22 +513,20 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
         timeoutMs,
         ...(signal === undefined ? {} : { signal }),
         ...(durable === undefined ? {} : { durable }),
-        ...(decoder === undefined
-          ? {}
-          : {
-              onOutput: (event): void => {
-                streamedOutput = true;
-                decoder.push(event);
-              },
-            }),
+        onOutput: (event): void => {
+          streamedOutput = true;
+          decoder.push(event);
+        },
       });
-      if (decoder !== undefined && !streamedOutput) {
+      if (!streamedOutput) {
         decoder.push({ stream: "stdout", text: result.stdout });
         decoder.push({ stream: "stderr", text: result.stderr });
       }
     } finally {
-      decoder?.finish();
+      decoder.finish();
     }
+
+    result = { ...result, telemetry: decoder.telemetry() };
 
     if (result.exitCode !== 0) {
       const providerFailure = providerTerminalFailure(result.stdout);
@@ -511,6 +552,64 @@ export abstract class BaseCliProviderAdapter implements CliProviderAdapter {
     }
     return result;
   }
+}
+
+function originalGenerationStart<T>(request: StructuredGenerationRequest<T>): number {
+  if (request.recovery?.mode !== "resume") return Date.now();
+  const parsed = Date.parse(request.recovery.handle.startedAt);
+  if (!Number.isFinite(parsed)) return Date.now();
+  return Math.min(Date.now(), Math.max(0, parsed));
+}
+
+async function readRecoveryAttemptTelemetry(
+  workspace: CliJobWorkspace,
+): Promise<GenerationAttemptTelemetryV1[]> {
+  if (workspace.readText === undefined) return [];
+  try {
+    const serialized = await workspace.readText(GENERATION_RECOVERY_TELEMETRY_FILENAME);
+    if (serialized === undefined || serialized.length > MAX_RECOVERY_TELEMETRY_CHARACTERS) return [];
+    const value: unknown = JSON.parse(serialized);
+    if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.attempts)) return [];
+    if (Object.keys(value).some((key) => key !== "schemaVersion" && key !== "attempts")) return [];
+    const attempts: GenerationAttemptTelemetryV1[] = [];
+    for (const item of value.attempts) {
+      if (generationAttemptTelemetryProblem(item) !== null) return [];
+      attempts.push(structuredClone(item) as GenerationAttemptTelemetryV1);
+    }
+    attempts.sort((left, right) => left.attempt - right.attempt);
+    return sequentialAttemptTelemetry(attempts, attempts.length as 1 | 2)
+      ? attempts
+      : [];
+  } catch {
+    // Telemetry is best-effort and must never block recovery of authored work.
+    return [];
+  }
+}
+
+async function writeRecoveryAttemptTelemetry(
+  workspace: CliJobWorkspace,
+  attempts: readonly GenerationAttemptTelemetryV1[],
+): Promise<void> {
+  if (!sequentialAttemptTelemetry(attempts, attempts.length as 1 | 2)) return;
+  try {
+    const serialized = JSON.stringify({ schemaVersion: 1, attempts });
+    if (serialized.length > MAX_RECOVERY_TELEMETRY_CHARACTERS) return;
+    await workspace.writeText(GENERATION_RECOVERY_TELEMETRY_FILENAME, serialized);
+  } catch {
+    // Generation telemetry cannot control provider execution or recovery.
+  }
+}
+
+function sequentialAttemptTelemetry(
+  attempts: readonly GenerationAttemptTelemetryV1[],
+  expectedAttempts: 1 | 2,
+): boolean {
+  return attempts.length === expectedAttempts
+    && attempts.every(
+      (attempt, index) =>
+        attempt.attempt === index + 1
+        && generationAttemptTelemetryProblem(attempt) === null,
+    );
 }
 
 function assertBoundedRequest<T>(request: StructuredGenerationRequest<T>): string {
@@ -582,4 +681,8 @@ function conciseFailure(result: ProcessRunResult): string {
   return detail.length === 0
     ? `Process exited with code ${result.exitCode}.`
     : detail.slice(0, 4_000);
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

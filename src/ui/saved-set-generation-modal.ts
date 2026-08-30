@@ -10,6 +10,13 @@ import {
 import type { CliActivityEvent } from "../cli/contracts";
 import { formatCliErrorForUi } from "../cli/errors";
 import {
+  formatGenerationCost,
+  formatGenerationDuration,
+  formatTokenUsage,
+  generationTelemetryFromActivity,
+  tokenUsageTotal,
+} from "../generation-telemetry";
+import {
   balanceExerciseTypes,
   copyExerciseTypePercentages,
   enabledExerciseTypes,
@@ -118,6 +125,12 @@ export class SavedSetGenerationModal extends Modal {
   };
   private readonly occlusionEditors: OcclusionEditor[] = [];
   private activityHost: HTMLElement | null = null;
+  private activityStartedAt: number | null = null;
+  private activityFinishedAt: number | null = null;
+  private activityClock: number | undefined;
+  private activitySummaryEl: HTMLElement | null = null;
+  private activityElapsedEl: HTMLElement | null = null;
+  private activityExpanded = false;
 
   constructor(app: App, private readonly options: SavedSetGenerationModalOptions) {
     super(app);
@@ -138,11 +151,14 @@ export class SavedSetGenerationModal extends Modal {
 
   public override onClose(): void {
     for (const editor of this.occlusionEditors.splice(0)) editor.unload();
+    this.clearActivityClock();
   }
 
   private render(): void {
     for (const editor of this.occlusionEditors.splice(0)) editor.unload();
     this.activityHost = null;
+    this.activitySummaryEl = null;
+    this.activityElapsedEl = null;
     this.contentEl.empty();
     const heading = this.contentEl.createDiv({ cls: "practice-learning-path-set-modal-heading" });
     const icon = heading.createDiv();
@@ -649,13 +665,55 @@ export class SavedSetGenerationModal extends Modal {
     if (this.activity.length === 0) return;
     const details = container.createEl("details", {
       cls: "practice-learning-path-activity",
-      attr: { open: "" },
+      ...(this.activityExpanded ? { attr: { open: "" } } : {}),
     });
-    details.createEl("summary", { text: "Live agent activity" });
+    details.addEventListener("toggle", () => {
+      this.activityExpanded = details.open;
+    });
+    const summary = details.createEl("summary");
+    summary.createSpan({ text: "Live agent activity" });
+    this.activitySummaryEl = summary.createSpan({
+      cls: "practice-learning-path-activity-summary",
+    });
+    this.refreshActivitySummary();
+    const firstEvent = this.activity[0];
+    const startedAt = this.activityStartedAt
+      ?? (firstEvent === undefined ? undefined : activityTimestamp(firstEvent))
+      ?? Date.now();
+    const duration = (this.activityFinishedAt ?? Date.now()) - startedAt;
+    const telemetry = generationTelemetryFromActivity(this.activity, duration);
+    if (telemetry !== undefined) {
+      const metrics = details.createDiv({
+        cls: "practice-lab-generation-telemetry",
+        attr: { "aria-label": "Set generation usage summary" },
+      });
+      this.activityElapsedEl = modalTelemetryMetric(
+        metrics,
+        "Elapsed",
+        formatGenerationDuration(duration),
+      );
+      modalTelemetryMetric(metrics, "Tokens", formatTokenUsage(telemetry.tokenUsage));
+      modalTelemetryMetric(metrics, "Cost", formatGenerationCost(telemetry));
+      modalTelemetryMetric(
+        metrics,
+        "Attempts",
+        telemetry.attempts === 2 ? "2 · includes schema repair" : "1",
+      );
+      if (telemetry.tokenUsage.source !== "provider-reported") {
+        details.createEl("p", {
+          cls: "practice-lab-generation-telemetry-note",
+          text: `~ marks a local estimate from submitted text and visible structured output. Hidden reasoning and provider/tool overhead${telemetry.tokenUsage.inputEstimateExcludesMedia ? ", including visual tokenization," : ""} are not included.`,
+        });
+      }
+    }
     const list = details.createEl("ol");
     for (const event of this.activity.slice(-20)) {
-      list.createEl("li", { text: `${event.phase}: ${event.message}` });
+      const occurredAt = activityTimestamp(event);
+      list.createEl("li", {
+        text: `${occurredAt === undefined ? "" : `+${formatGenerationDuration(Math.max(0, occurredAt - startedAt))} · `}${event.phase}: ${event.message}`,
+      });
     }
+    this.ensureActivityClock();
   }
 
   private refreshActivity(): void {
@@ -686,6 +744,9 @@ export class SavedSetGenerationModal extends Modal {
     this.busy = "generate";
     this.error = null;
     this.activity = [];
+    this.activityExpanded = false;
+    this.activityStartedAt = Date.now();
+    this.activityFinishedAt = null;
     this.render();
     try {
       const generated = await this.options.callbacks.generate(this.request, (event) => {
@@ -698,9 +759,38 @@ export class SavedSetGenerationModal extends Modal {
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
+      this.activityFinishedAt ??= Date.now();
       this.busy = null;
       this.render();
     }
+  }
+
+  private refreshActivitySummary(): void {
+    const summary = this.activitySummaryEl;
+    if (summary === null || this.activityStartedAt === null) return;
+    const duration = (this.activityFinishedAt ?? Date.now()) - this.activityStartedAt;
+    const telemetry = generationTelemetryFromActivity(this.activity, duration);
+    summary.setText(
+      formatGenerationDuration(duration)
+      + (telemetry === undefined
+        ? ""
+        : ` · ${telemetry.tokenUsage.source === "provider-reported" ? "" : "~"}${compactModalTokens(tokenUsageTotal(telemetry.tokenUsage))} tokens`),
+    );
+    this.activityElapsedEl?.setText(formatGenerationDuration(duration));
+  }
+
+  private ensureActivityClock(): void {
+    if (this.busy !== "generate" || this.activityClock !== undefined) return;
+    this.activityClock = window.setInterval(() => {
+      this.refreshActivitySummary();
+      if (this.busy !== "generate") this.clearActivityClock();
+    }, 1_000);
+  }
+
+  private clearActivityClock(): void {
+    if (this.activityClock === undefined) return;
+    window.clearInterval(this.activityClock);
+    this.activityClock = undefined;
   }
 
   private async save(): Promise<void> {
@@ -854,4 +944,28 @@ export class SavedSetGenerationModal extends Modal {
 
 function errorMessage(error: unknown): string {
   return formatCliErrorForUi(error, "The requested generation step failed.");
+}
+
+function activityTimestamp(event: CliActivityEvent): number | undefined {
+  const value = Date.parse(event.occurredAt);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function compactModalTokens(value: number): string {
+  const rounded = Math.max(0, Math.round(value));
+  if (rounded < 1_000) return rounded.toLocaleString();
+  if (rounded < 1_000_000) {
+    return `${(rounded / 1_000).toFixed(rounded < 10_000 ? 1 : 0).replace(/\.0$/u, "")}k`;
+  }
+  return `${(rounded / 1_000_000).toFixed(rounded < 10_000_000 ? 1 : 0).replace(/\.0$/u, "")}m`;
+}
+
+function modalTelemetryMetric(
+  container: HTMLElement,
+  label: string,
+  value: string,
+): HTMLElement {
+  const metric = container.createDiv({ cls: "practice-lab-generation-telemetry-metric" });
+  metric.createSpan({ text: label });
+  return metric.createEl("strong", { text: value });
 }

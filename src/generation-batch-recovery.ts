@@ -7,9 +7,16 @@ import {
   learningPathSourceBundleHash,
   practiceSetPayloadHash,
   validatePracticeSetDraft,
+  validatePracticeSetDraftWithCompletedSiblings,
   type PracticeSetDraftV1,
   type PracticeSetPayloadV1,
 } from "./learning-path-generation";
+import {
+  generationTelemetryProblem,
+  type GenerationTelemetryV1,
+} from "./generation-telemetry";
+import { isNormalizedRect } from "./geometry";
+import type { OcclusionMaskCandidate } from "./visuals";
 
 export const GENERATION_BATCH_RECOVERY_VERSION = 1 as const;
 export const GENERATION_BATCH_RECOVERY_FILENAME = "generation-batch.json";
@@ -43,6 +50,7 @@ export interface CompletedPracticeSetDraftV1 {
   readonly payloadHash: string;
   readonly completedAt: string;
   readonly attempts: 1 | 2;
+  readonly telemetry?: GenerationTelemetryV1;
   readonly draft: PracticeSetDraftV1;
 }
 
@@ -50,6 +58,28 @@ export interface ActiveBatchGenerationV1 {
   readonly setId: string;
   readonly payloadHash: string;
   readonly handle: DurableProcessHandle;
+}
+
+/**
+ * Only review-owned fields are persisted. In particular, resource URLs and
+ * other presentation-only values never enter the durable recovery file.
+ */
+export interface PracticeSetReviewExerciseSnapshotV1 {
+  readonly id: string;
+  readonly type: PracticeSetDraftV1["exercises"][number]["type"];
+  readonly prompt: string;
+  readonly groundedAnswer: string;
+  readonly rejected: boolean;
+  readonly occlusionReviewed: boolean;
+  readonly masks?: readonly OcclusionMaskCandidate[];
+}
+
+export interface PracticeSetReviewSnapshotV1 {
+  readonly setId: string;
+  readonly payloadHash: string;
+  readonly updatedAt: string;
+  readonly exercises: readonly PracticeSetReviewExerciseSnapshotV1[];
+  readonly approvedExerciseIds: readonly string[];
 }
 
 export interface GenerationBatchRecoveryV1 {
@@ -64,6 +94,8 @@ export interface GenerationBatchRecoveryV1 {
   readonly approvedPayloads: readonly ApprovedPracticeSetPayloadV1[];
   readonly queue: readonly GenerationBatchQueueEntryV1[];
   readonly completedDrafts: readonly CompletedPracticeSetDraftV1[];
+  /** Exact, locally reviewed state for completed sets. Optional for v1 compatibility. */
+  readonly reviewSnapshots?: readonly PracticeSetReviewSnapshotV1[];
   readonly active?: ActiveBatchGenerationV1;
   readonly savedSetIds: readonly string[];
 }
@@ -83,7 +115,11 @@ export function createGenerationBatchRecovery(input: {
     schemaVersion: GENERATION_BATCH_RECOVERY_VERSION,
     batchId: input.batchId,
     blueprintId: input.blueprintId,
-    sourceBundleHash: learningPathSourceBundleHash(input.payloads[0]?.sources ?? []),
+    sourceBundleHash: learningPathSourceBundleHash(
+      input.payloads[0]?.sources ?? [],
+      input.payloads[0]?.sourceAlignment,
+      input.payloads[0]?.aiContextCompletionPolicy,
+    ),
     createdAt: input.createdAt,
     updatedAt: input.createdAt,
     queuePosition: 0,
@@ -95,6 +131,7 @@ export function createGenerationBatchRecovery(input: {
       attempts: 0,
     })),
     completedDrafts: [],
+    reviewSnapshots: [],
     savedSetIds: [],
   };
   return parseGenerationBatchRecovery(JSON.stringify(state));
@@ -177,6 +214,7 @@ export function completeGenerationBatchSet(
     readonly setId: string;
     readonly draft: PracticeSetDraftV1;
     readonly attempts: 1 | 2;
+    readonly telemetry?: GenerationTelemetryV1;
     readonly completedAt: string;
   },
 ): GenerationBatchRecoveryV1 {
@@ -194,7 +232,11 @@ export function completeGenerationBatchSet(
   if (approved === undefined || approved.payloadHash !== entry.payloadHash) {
     throw new Error("The active set no longer matches its approved payload.");
   }
-  const draftResult = validatePracticeSetDraft(input.draft, approved.payload);
+  const draftResult = validatePracticeSetDraftWithCompletedSiblings({
+    payload: approved.payload,
+    draft: input.draft,
+    completedDrafts: checked.completedDrafts.map((completed) => completed.draft),
+  });
   if (!draftResult.valid || draftResult.value === undefined) {
     throw new Error(
       `Cannot checkpoint an invalid set draft: ${draftResult.errors?.join("; ") ?? "unknown error"}`,
@@ -212,11 +254,37 @@ export function completeGenerationBatchSet(
     payloadHash: entry.payloadHash,
     completedAt: timestamp(input.completedAt, "set completion timestamp"),
     attempts: input.attempts,
+    ...(input.telemetry === undefined
+      ? {}
+      : { telemetry: structuredClone(input.telemetry) }),
     draft: structuredClone(draftResult.value),
   });
   delete next.active;
   next.queuePosition += 1;
   next.updatedAt = input.completedAt;
+  return parseGenerationBatchRecovery(JSON.stringify(next));
+}
+
+/** Persist one exact review snapshot without weakening the generated draft. */
+export function saveGenerationBatchReviewSnapshot(
+  state: GenerationBatchRecoveryV1,
+  snapshot: PracticeSetReviewSnapshotV1,
+): GenerationBatchRecoveryV1 {
+  const checked = parseGenerationBatchRecovery(JSON.stringify(state));
+  const completed = checked.completedDrafts.find((entry) => entry.setId === snapshot.setId);
+  if (completed === undefined || completed.payloadHash !== snapshot.payloadHash) {
+    throw new Error("Only a completed set matching its approved payload can store review progress.");
+  }
+  const problems = reviewSnapshotProblems(snapshot, completed);
+  if (problems.length > 0) {
+    throw new Error(`Cannot checkpoint invalid guided review state: ${problems.join("; ")}`);
+  }
+  const next = cloneState(checked);
+  next.reviewSnapshots = [
+    ...(next.reviewSnapshots ?? []).filter((entry) => entry.setId !== snapshot.setId),
+    structuredClone(snapshot),
+  ];
+  next.updatedAt = snapshot.updatedAt;
   return parseGenerationBatchRecovery(JSON.stringify(next));
 }
 
@@ -348,6 +416,7 @@ function generationBatchRecoveryProblems(value: unknown): string[] {
     "approvedPayloads",
     "queue",
     "completedDrafts",
+    "reviewSnapshots",
     "active",
     "savedSetIds",
   ]);
@@ -396,7 +465,11 @@ function generationBatchRecoveryProblems(value: unknown): string[] {
     if (practiceSetPayloadHash(payload) !== raw.payloadHash) {
       errors.push(`Approved payload ${index + 1} no longer matches its hash.`);
     }
-    if (learningPathSourceBundleHash(payload.sources) !== value.sourceBundleHash) {
+    if (learningPathSourceBundleHash(
+      payload.sources,
+      payload.sourceAlignment,
+      payload.aiContextCompletionPolicy,
+    ) !== value.sourceBundleHash) {
       errors.push(`Approved payload ${index + 1} no longer matches the source bundle.`);
     }
     approved.push({
@@ -484,6 +557,17 @@ function generationBatchRecoveryProblems(value: unknown): string[] {
       errors.push(`Completed set draft ${index + 1} is invalid: ${result.errors?.join("; ") ?? "unknown error"}`);
       continue;
     }
+    if (raw.telemetry !== undefined) {
+      const telemetryProblem = generationTelemetryProblem(raw.telemetry);
+      if (telemetryProblem !== null) {
+        errors.push(`Completed set draft ${index + 1} telemetry is invalid: ${telemetryProblem}`);
+        continue;
+      }
+      if ((raw.telemetry as GenerationTelemetryV1).attempts !== raw.attempts) {
+        errors.push(`Completed set draft ${index + 1} telemetry attempts do not match.`);
+        continue;
+      }
+    }
     const queueEntry = queue.find((entry) => entry.setId === raw.setId);
     if (queueEntry?.status !== "completed") {
       errors.push(`Completed set draft ${index + 1} is not marked completed in the queue.`);
@@ -493,6 +577,9 @@ function generationBatchRecoveryProblems(value: unknown): string[] {
       payloadHash: raw.payloadHash,
       completedAt: raw.completedAt,
       attempts: raw.attempts,
+      ...(raw.telemetry === undefined
+        ? {}
+        : { telemetry: structuredClone(raw.telemetry) as GenerationTelemetryV1 }),
       draft: result.value,
     });
   }
@@ -500,6 +587,34 @@ function generationBatchRecoveryProblems(value: unknown): string[] {
   for (const entry of queue.filter((candidate) => candidate.status === "completed")) {
     if (!completed.some((draft) => draft.setId === entry.setId)) {
       errors.push(`Completed queue set ${entry.setId} is missing its validated draft.`);
+    }
+  }
+
+  if (value.reviewSnapshots !== undefined) {
+    if (!Array.isArray(value.reviewSnapshots)) {
+      errors.push("The interrupted batch review snapshot list is invalid.");
+    } else {
+      const snapshots: PracticeSetReviewSnapshotV1[] = [];
+      for (const [index, raw] of value.reviewSnapshots.entries()) {
+        if (!isRecord(raw) || !identifier(raw.setId) || !hash(raw.payloadHash)) {
+          errors.push(`Review snapshot ${index + 1} is malformed.`);
+          continue;
+        }
+        const completedDraft = completed.find((entry) => entry.setId === raw.setId);
+        if (completedDraft === undefined || completedDraft.payloadHash !== raw.payloadHash) {
+          errors.push(`Review snapshot ${index + 1} has no matching completed draft.`);
+          continue;
+        }
+        const problems = reviewSnapshotProblems(raw, completedDraft);
+        if (problems.length > 0) {
+          errors.push(...problems.map((problem) => `Review snapshot ${index + 1}: ${problem}`));
+          continue;
+        }
+        snapshots.push(
+          structuredClone(raw) as unknown as PracticeSetReviewSnapshotV1,
+        );
+      }
+      pushDuplicate(errors, snapshots.map((snapshot) => snapshot.setId), "Review snapshot set IDs");
     }
   }
 
@@ -560,8 +675,131 @@ interface MutableBatchState {
   approvedPayloads: ApprovedPracticeSetPayloadV1[];
   queue: MutableQueueEntry[];
   completedDrafts: CompletedPracticeSetDraftV1[];
+  reviewSnapshots?: PracticeSetReviewSnapshotV1[];
   active?: ActiveBatchGenerationV1;
   savedSetIds: string[];
+}
+
+function reviewSnapshotProblems(
+  value: unknown,
+  completed: CompletedPracticeSetDraftV1,
+): string[] {
+  const errors: string[] = [];
+  if (!isRecord(value)) return ["review state must be an object"];
+  const allowed = new Set([
+    "setId",
+    "payloadHash",
+    "updatedAt",
+    "exercises",
+    "approvedExerciseIds",
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    errors.push("review state contains an unknown field");
+  }
+  if (value.setId !== completed.setId || value.payloadHash !== completed.payloadHash) {
+    errors.push("review state no longer matches its completed set");
+  }
+  if (!isoTimestamp(value.updatedAt)) errors.push("review timestamp is invalid");
+  if (!Array.isArray(value.exercises)) {
+    errors.push("review exercises are missing");
+    return errors;
+  }
+  if (value.exercises.length !== completed.draft.exercises.length) {
+    errors.push("review exercises no longer match the completed set");
+  }
+  const exerciseIds = new Set<string>();
+  const keptIds = new Set<string>();
+  const reviewedOcclusionIds = new Set<string>();
+  for (const [index, raw] of value.exercises.entries()) {
+    const original = completed.draft.exercises[index];
+    if (!isRecord(raw) || original === undefined) {
+      errors.push(`review exercise ${index + 1} is malformed`);
+      continue;
+    }
+    const exerciseAllowed = new Set([
+      "id",
+      "type",
+      "prompt",
+      "groundedAnswer",
+      "rejected",
+      "occlusionReviewed",
+      "masks",
+    ]);
+    if (Object.keys(raw).some((key) => !exerciseAllowed.has(key))) {
+      errors.push(`review exercise ${index + 1} contains an unknown field`);
+    }
+    if (raw.id !== original.id || raw.type !== original.type || !identifier(raw.id)) {
+      errors.push(`review exercise ${index + 1} no longer matches the generated exercise`);
+      continue;
+    }
+    if (exerciseIds.has(raw.id)) errors.push(`review exercise ID ${raw.id} is duplicated`);
+    exerciseIds.add(raw.id);
+    if (!reviewText(raw.prompt) || !reviewText(raw.groundedAnswer)) {
+      errors.push(`review exercise ${index + 1} contains oversized or invalid text`);
+    }
+    if (typeof raw.rejected !== "boolean" || typeof raw.occlusionReviewed !== "boolean") {
+      errors.push(`review exercise ${index + 1} has invalid review flags`);
+      continue;
+    }
+    if (!raw.rejected) keptIds.add(raw.id);
+    if (raw.type === "image-occlusion") {
+      if (!Array.isArray(raw.masks) || raw.masks.some((mask) => !recoverableMask(mask))) {
+        errors.push(`review exercise ${index + 1} has malformed occlusion masks`);
+      }
+      if (raw.occlusionReviewed) reviewedOcclusionIds.add(raw.id);
+    } else if (raw.masks !== undefined || raw.occlusionReviewed !== true) {
+      errors.push(`review exercise ${index + 1} has invalid non-occlusion review state`);
+    }
+  }
+  const approvedExerciseIds = identifierArray(value.approvedExerciseIds);
+  if (approvedExerciseIds === null) {
+    errors.push("approved exercise IDs are invalid");
+  } else {
+    pushDuplicate(errors, approvedExerciseIds, "Approved exercise IDs");
+    for (const id of approvedExerciseIds) {
+      if (!keptIds.has(id)) errors.push(`approved exercise ${id} is missing or rejected`);
+      const original = completed.draft.exercises.find((exercise) => exercise.id === id);
+      if (original?.type === "image-occlusion" && !reviewedOcclusionIds.has(id)) {
+        errors.push(`approved occlusion ${id} has not been accepted`);
+      }
+    }
+  }
+  return [...new Set(errors)];
+}
+
+function reviewText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 20_000;
+}
+
+function identifierArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: string[] = [];
+  for (const entry of value as unknown[]) {
+    if (!identifier(entry)) return null;
+    result.push(entry);
+  }
+  return result;
+}
+
+function recoverableMask(value: unknown): value is OcclusionMaskCandidate {
+  if (!isRecord(value)) return false;
+  const allowed = new Set(["id", "label", "answer", "x", "y", "width", "height"]);
+  return Object.keys(value).every((key) => allowed.has(key))
+    && identifier(value.id)
+    && typeof value.label === "string"
+    && value.label.length <= 2_000
+    && typeof value.answer === "string"
+    && value.answer.length <= 20_000
+    && typeof value.x === "number"
+    && typeof value.y === "number"
+    && typeof value.width === "number"
+    && typeof value.height === "number"
+    && isNormalizedRect({
+      x: value.x,
+      y: value.y,
+      width: value.width,
+      height: value.height,
+    });
 }
 
 function cloneState(state: GenerationBatchRecoveryV1): MutableBatchState {

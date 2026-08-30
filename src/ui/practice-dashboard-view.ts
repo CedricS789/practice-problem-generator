@@ -24,11 +24,12 @@ import {
 import type { PracticeDashboardSnapshot } from "../dashboard-repository";
 import { formatPracticeRunPoints, practiceRunRankText } from "../practice-run";
 import {
-  hasVisibleDashboardOverview,
   normalizeDisplayPreferences,
   type PracticeLabDisplayPreferences,
 } from "../preferences";
 import { installHoverDescriptions } from "./hover-descriptions";
+import { renderHorizontalTabs } from "./horizontal-tabs";
+import { applyMarkdownHeadingTheme } from "./theme-bridge";
 import {
   activityMetricValue,
   buildPracticeActivity,
@@ -41,6 +42,25 @@ import {
 } from "../activity-analytics";
 
 export const PRACTICE_DASHBOARD_VIEW_TYPE = "practice-lab-dashboard-view";
+
+export type DashboardPage = "practice-now" | "learning" | "activity" | "library";
+
+export type DashboardActivityView =
+  | "heatmap"
+  | "trend"
+  | "performance"
+  | "outcomes";
+
+export type DashboardRecoveryAction = "resume" | "resolve";
+
+export interface DashboardRecoveryPresentation {
+  readonly state: "resumable" | "needs-resolution";
+  /** Stable bank identity when the checkpoint can be matched to a library card. */
+  readonly bankId?: string;
+  readonly title: string;
+  readonly description: string;
+  readonly actionLabel?: string;
+}
 
 const EXERCISE_TYPE_LABELS = {
   "short-answer": "Short answer",
@@ -63,6 +83,12 @@ export interface PracticeDashboardViewOptions {
     readonly weekStart: WeekStart;
   };
   readonly load: () => Promise<PracticeDashboardSnapshot>;
+  /** Read-only device-local checkpoint state supplied by the plugin controller. */
+  readonly recoveryPresentation?: DashboardRecoveryPresentation | null
+    | (() => DashboardRecoveryPresentation | null);
+  readonly handleRecovery?: (
+    action: DashboardRecoveryAction,
+  ) => Promise<void> | void;
   readonly startPractice: (record: DashboardBankRecord) => Promise<void> | void;
   readonly continueLearning?: (record: DashboardBankRecord) => Promise<void> | void;
   readonly chooseSet?: (record: DashboardBankRecord) => Promise<void> | void;
@@ -201,6 +227,11 @@ export class PracticeDashboardView extends ItemView {
   private activityRangeWeeks: ActivityRangeWeeks;
   private activityMetric: ActivityMetric;
   private activityWeekStart: WeekStart;
+  private activePage: DashboardPage = "practice-now";
+  private activityView: DashboardActivityView = "heatmap";
+  private scopeEditorOpen = false;
+  private selectedLearningBankId: string | null = null;
+  private activePanelEl: HTMLElement | null = null;
 
   public constructor(
     leaf: WorkspaceLeaf,
@@ -335,10 +366,12 @@ export class PracticeDashboardView extends ItemView {
 
   private render(): void {
     this.contentEl.empty();
+    this.activePanelEl = null;
     this.contentEl.addClasses([
       "practice-lab-view",
       "practice-lab-dashboard-view",
     ]);
+    applyMarkdownHeadingTheme(this.contentEl);
     this.contentEl.toggleClass(
       "is-compact",
       this.displayPreferences.practice.density === "compact",
@@ -388,95 +421,314 @@ export class PracticeDashboardView extends ItemView {
       this.renderStatus("No dashboard data is available yet.", "layout-dashboard");
       return;
     }
-    if (this.errorMessage !== null) {
-      const alert = this.contentEl.createDiv({
-        cls: "practice-lab-dashboard-diagnostics",
-        attr: { role: "alert", "aria-live": "assertive" },
-      });
-      alert.createEl("strong", { text: "Dashboard refresh failed" });
-      alert.createEl("p", {
-        text: `Showing the last loaded statistics. ${this.errorMessage}`,
-      });
-    }
     const scopeOptions = getDashboardScopeOptions(snapshot.records);
     const tagOptions = this.contextualTagOptions(
       snapshot.records,
       scopeOptions.tags,
     );
     const display = this.displayPreferences.dashboard;
-    if (display.showScopeControls) this.renderFilters(scopeOptions, tagOptions);
-    if (display.showBreadcrumbs) {
-      this.renderBreadcrumbs();
-    }
     const summary = aggregatePracticeDashboard(
       snapshot.records,
       this.currentFilter(),
     );
-    this.renderDiagnostics(snapshot, summary);
-    if (snapshot.records.length === 0) {
-      this.renderStatus(
-        "No Practice Problem Generator banks were found. Generate and save a practice set first.",
-        "library-big",
+    renderHorizontalTabs(this.contentEl, {
+      tabs: [
+        { id: "practice-now", label: "Practice now" },
+        { id: "learning", label: "Learning" },
+        { id: "activity", label: "Activity" },
+        { id: "library", label: "Library" },
+      ],
+      selected: this.activePage,
+      ariaLabel: "Practice dashboard pages",
+      className: "practice-lab-dashboard-tabs",
+      onSelect: (page) => {
+        this.activePage = page;
+        this.scopeEditorOpen = false;
+        this.render();
+      },
+      renderPanel: (panel) => {
+        this.activePanelEl = panel;
+        this.renderScopeBar(scopeOptions, tagOptions);
+        if (this.errorMessage !== null) {
+          const alert = panel.createDiv({
+            cls: "practice-lab-dashboard-diagnostics",
+            attr: { role: "alert", "aria-live": "assertive" },
+          });
+          alert.createEl("strong", { text: "Dashboard refresh failed" });
+          alert.createEl("p", {
+            text: `Showing the last loaded statistics. ${this.errorMessage}`,
+          });
+        }
+        if (snapshot.records.length === 0) {
+          this.renderStatus(
+            "No practice banks are available yet. Generate and save a practice set first.",
+            "library-big",
+          );
+          return;
+        }
+        if (summary.bankCount === 0) {
+          this.renderStatus(
+            "No practice banks match this scope. Change the scope to continue.",
+            "filter-x",
+          );
+          return;
+        }
+        if (this.activePage === "practice-now") {
+          this.renderPracticeNow(summary, snapshot.records);
+          this.renderDiagnostics(snapshot, summary);
+          return;
+        }
+        if (this.activePage === "learning") {
+          if (display.showLearningPathAnalytics) {
+            this.renderLearningPathAnalytics(summary, snapshot.records);
+          } else {
+            this.renderStatus(
+              "Learning-path insights are hidden in dashboard settings.",
+              "route",
+            );
+          }
+          return;
+        }
+        if (this.activePage === "activity") {
+          this.renderActivityAnalytics(summary);
+          return;
+        }
+        if (display.showBankList) {
+          this.renderBankSection(summary, snapshot.records);
+          this.renderDiagnostics(snapshot, summary);
+        } else {
+          this.renderStatus(
+            "The practice library is hidden in dashboard settings.",
+            "library-big",
+          );
+        }
+      },
+    });
+  }
+
+  private dashboardContainer(): HTMLElement {
+    return this.activePanelEl ?? this.contentEl;
+  }
+
+  private renderScopeBar(
+    options: ReturnType<typeof getDashboardScopeOptions>,
+    tagOptions: readonly DashboardScopeOption[],
+  ): void {
+    const bar = this.dashboardContainer().createDiv({
+      cls: "practice-lab-dashboard-scope-bar",
+      attr: { "aria-label": "Current dashboard scope" },
+    });
+    const copy = bar.createDiv();
+    copy.createSpan({ cls: "practice-lab-muted", text: "Scope" });
+    copy.createEl("strong", { text: this.scopeLabel() });
+    if (this.displayPreferences.dashboard.showScopeControls) {
+      new ButtonComponent(bar)
+        .setIcon(this.scopeEditorOpen ? "x" : "sliders-horizontal")
+        .setButtonText(this.scopeEditorOpen ? "Close" : "Change scope…")
+        .setTooltip(this.scopeEditorOpen
+          ? "Close the dashboard scope controls."
+          : "Choose a folder, source note, or optional source tag.")
+        .onClick(() => {
+          this.scopeEditorOpen = !this.scopeEditorOpen;
+          this.render();
+        });
+    }
+    if (!this.scopeEditorOpen) return;
+    const editor = this.dashboardContainer().createDiv({
+      cls: "practice-lab-dashboard-scope-editor",
+    });
+    const previousHost = this.activePanelEl;
+    this.activePanelEl = editor;
+    this.renderFilters(options, tagOptions);
+    this.activePanelEl = previousHost;
+  }
+
+  private scopeLabel(): string {
+    const base = this.primary.kind === "all"
+      ? "All practice"
+      : this.primary.kind === "folder"
+        ? this.primary.path
+        : this.primary.kind === "source"
+          ? sourceNameFromPath(this.primary.path)
+          : `#${this.primary.tag}`;
+    return this.tagPrefix === undefined ? base : `${base} · #${this.tagPrefix}`;
+  }
+
+  private renderPracticeNow(
+    summary: PracticeDashboardSummary,
+    records: readonly DashboardBankRecord[],
+  ): void {
+    const section = this.dashboardSection(
+      "Practice now",
+      "Pick up from the most useful available place. This is guidance from your saved activity, never a due task or spaced-repetition schedule.",
+    );
+    const actionCard = section.createDiv({
+      cls: "practice-lab-dashboard-primary-action",
+    });
+    const recovery = this.recoveryPresentation();
+    if (recovery !== undefined && recovery !== null) {
+      const icon = actionCard.createSpan({ attr: { "aria-hidden": "true" } });
+      setIcon(icon, recovery.state === "resumable" ? "history" : "circle-alert");
+      const copy = actionCard.createDiv();
+      copy.createEl("h3", { text: recovery.title });
+      copy.createEl("p", { text: recovery.description });
+      const action = recovery.state === "resumable" ? "resume" : "resolve";
+      new ButtonComponent(actionCard)
+        .setIcon(recovery.state === "resumable" ? "play" : "wrench")
+        .setButtonText(recovery.actionLabel
+          ?? (recovery.state === "resumable" ? "Resume session" : "Resolve session"))
+        .setDisabled(this.options.handleRecovery === undefined)
+        .setCta()
+        .onClick(() => void this.runAction(
+          () => this.options.handleRecovery?.(action),
+          "Could not open the saved session.",
+        ));
+    } else {
+      const guided = this.mostRecentBank(summary, true);
+      const regular = guided === undefined
+        ? this.mostRecentBank(summary, false)
+        : undefined;
+      const recommended = guided ?? regular;
+      if (recommended === undefined) {
+        const copy = actionCard.createDiv();
+        copy.createEl("h3", { text: "Choose your first practice" });
+        copy.createEl("p", {
+          text: "There is no completed practice in this scope yet. Choose any saved bank to begin.",
+        });
+        new ButtonComponent(actionCard)
+          .setIcon("library-big")
+          .setButtonText("Choose practice")
+          .setCta()
+          .onClick(() => {
+            this.activePage = "library";
+            this.render();
+          });
+      } else {
+        const record = this.recordForBank(records, recommended);
+        const guidedPath = recommended.learningPath !== null;
+        const copy = actionCard.createDiv();
+        copy.createEl("h3", {
+          text: guidedPath
+            ? `Continue ${recommended.learningPath?.title ?? recommended.sourceTitle}`
+            : `Practise ${recommended.sourceTitle}`,
+        });
+        copy.createEl("p", {
+          text: guidedPath
+            ? "This is the most recently practised guided path in the current scope."
+            : "This is the most recently practised regular bank in the current scope.",
+        });
+        const button = new ButtonComponent(actionCard)
+          .setIcon(guidedPath ? "route" : "play")
+          .setButtonText(guidedPath ? "Continue learning" : "Start practice")
+          .setDisabled(record === undefined)
+          .setCta();
+        button.onClick(() => void this.runAction(
+          () => {
+            if (record === undefined) return;
+            return guidedPath && this.options.continueLearning !== undefined
+              ? this.options.continueLearning(record)
+              : this.options.startPractice(record);
+          },
+          guidedPath
+            ? "Could not continue this learning path."
+            : "Could not start this practice bank.",
+        ));
+      }
+    }
+
+    const metrics = section.createDiv({
+      cls: "practice-lab-dashboard-metrics practice-lab-dashboard-key-metrics",
+    });
+    this.dashboardMetric(
+      metrics,
+      "Performance",
+      percentText(summary.performance.percent),
+      summary.performance.totalPoints === 0
+        ? "No scored answers yet"
+        : `${formatPracticeRunPoints(summary.performance.earnedPoints)} / ${summary.performance.totalPoints} points`,
+    );
+    this.dashboardMetric(
+      metrics,
+      "Practised coverage",
+      summary.problemCount === 0
+        ? "—"
+        : `${Math.round(summary.practicedProblemCount / summary.problemCount * 100)}%`,
+      `${summary.practicedProblemCount} of ${summary.problemCount} saved problems attempted`,
+    );
+    const attentionCount = summary.failedAiReviewCount
+      + summary.pendingAiReviewCount
+      + summary.alignment.schoolDisagreementRecordCount
+      + summary.alignment.unresolvedRecordCount
+      + summary.learning.unresolvedSourceGapCount
+      + summary.missingSourceCount;
+    if (attentionCount > 0) {
+      this.dashboardMetric(
+        metrics,
+        "Needs attention",
+        String(attentionCount),
+        "Reviews, alignment, source gaps, or missing source notes",
       );
-      return;
-    }
-    if (summary.bankCount === 0) {
-      this.renderStatus(
-        "No practice banks match the current folder, source, and tag filters.",
-        "filter-x",
-      );
-      return;
-    }
-    const showOfflinePreparation = display.showOfflinePreparation
-      && this.options.prepareOffline !== undefined;
-    if (showOfflinePreparation) {
-      const selectedPaths = new Set(summary.banks.map((bank) => bank.bankPath));
-      this.renderOfflinePreparation(snapshot.records.filter((record) =>
-        selectedPaths.has(record.bankPath.replace(/\\/gu, "/")),
-      ));
-    }
-    if (hasVisibleDashboardOverview(display)) this.renderMetrics(summary);
-    const showLearningPathAnalytics = display.showLearningPathAnalytics
-      && summary.learning.pathBankCount > 0;
-    if (showLearningPathAnalytics) {
-      this.renderLearningPathAnalytics(summary, snapshot.records);
-    }
-    if (
-      display.showActivitySummary
-      || display.showActivityHeatmap
-      || display.showActivityTrend
-      || display.showPerformanceTrend
-      || display.showOutcomeChart
-    ) {
-      this.renderActivityAnalytics(summary);
-    }
-    if (display.showTypeBreakdown) this.renderTypeBreakdown(summary);
-    if (display.showRecentSessions) this.renderRecentSessions(summary);
-    if (display.showBankList) this.renderBankSection(summary, snapshot.records);
-    if (
-      !hasVisibleDashboardOverview(display)
-      && !display.showActivitySummary
-      && !display.showActivityHeatmap
-      && !display.showActivityTrend
-      && !display.showPerformanceTrend
-      && !display.showOutcomeChart
-      && !showLearningPathAnalytics
-      && !display.showTypeBreakdown
-      && !display.showRecentSessions
-      && !display.showBankList
-      && !showOfflinePreparation
-    ) {
-      this.contentEl.createEl("p", {
-        cls: "practice-lab-muted",
-        text: "All optional dashboard sections are hidden in Practice Problem Generator settings.",
+      const details = section.createEl("details", {
+        cls: "practice-lab-dashboard-diagnostics",
       });
+      details.createEl("summary", { text: "Review attention items" });
+      details.createEl("p", {
+        text: `${summary.pendingAiReviewCount} pending AI reviews · ${summary.failedAiReviewCount} failed AI reviews · ${summary.learning.unresolvedSourceGapCount} source gaps · ${summary.alignment.schoolDisagreementRecordCount + summary.alignment.unresolvedRecordCount} alignment concerns · ${summary.missingSourceCount} missing source notes.`,
+      });
+    } else {
+      this.dashboardMetric(
+        metrics,
+        "Recent activity",
+        String(summary.sessionCount),
+        summary.recentSessions[0] === undefined
+          ? "No completed sessions yet"
+          : `Last practised ${new Date(summary.recentSessions[0].session.finishedAt).toLocaleDateString()}`,
+      );
     }
+
+    if (
+      this.displayPreferences.dashboard.showOfflinePreparation
+      && this.options.prepareOffline !== undefined
+    ) {
+      const details = section.createEl("details", {
+        cls: "practice-lab-dashboard-secondary-actions",
+      });
+      details.createEl("summary", { text: "More…" });
+      const selectedPaths = new Set(summary.banks.map((bank) => bank.bankPath));
+      const previousHost = this.activePanelEl;
+      this.activePanelEl = details;
+      this.renderOfflinePreparation(records.filter((record) => (
+        selectedPaths.has(record.bankPath.replace(/\\/gu, "/"))
+      )));
+      this.activePanelEl = previousHost;
+    }
+  }
+
+  private mostRecentBank(
+    summary: PracticeDashboardSummary,
+    guided: boolean,
+  ): DashboardBankSummary | undefined {
+    return summary.banks
+      .filter((bank) => (bank.learningPath !== null) === guided)
+      .filter((bank) => bank.latestSessionAt !== null)
+      .sort((left, right) => (
+        Date.parse(right.latestSessionAt ?? "") - Date.parse(left.latestSessionAt ?? "")
+      ))[0];
+  }
+
+  private recordForBank(
+    records: readonly DashboardBankRecord[],
+    bank: DashboardBankSummary,
+  ): DashboardBankRecord | undefined {
+    return records.find((record) => (
+      record.bankPath.replace(/\\/gu, "/") === bank.bankPath
+    ));
   }
 
   private renderOfflinePreparation(
     records: readonly DashboardBankRecord[],
   ): void {
-    const panel = this.contentEl.createDiv({
+    const panel = this.dashboardContainer().createDiv({
       cls: "practice-lab-offline-preparation",
     });
     const copy = panel.createDiv();
@@ -512,7 +764,7 @@ export class PracticeDashboardView extends ItemView {
     options: ReturnType<typeof getDashboardScopeOptions>,
     tagOptions: readonly DashboardScopeOption[],
   ): void {
-    const panel = this.contentEl.createDiv({
+    const panel = this.dashboardContainer().createDiv({
       cls: "practice-lab-dashboard-filters",
     });
     new Setting(panel)
@@ -645,7 +897,7 @@ export class PracticeDashboardView extends ItemView {
 
   private renderBreadcrumbs(): void {
     if (this.primary.kind === "all" && this.tagPrefix === undefined) return;
-    const trail = this.contentEl.createDiv({
+    const trail = this.dashboardContainer().createDiv({
       cls: "practice-lab-dashboard-breadcrumbs",
       attr: { "aria-label": "Dashboard scope" },
     });
@@ -789,79 +1041,89 @@ export class PracticeDashboardView extends ItemView {
     metric.createSpan({ cls: "practice-lab-dashboard-metric-note", text: note });
   }
 
+  private renderAlignmentHealth(summary: PracticeDashboardSummary): void {
+    const health = summary.alignment;
+    const panel = this.dashboardContainer().createDiv({
+      cls: "practice-lab-dashboard-alignment-health",
+      attr: { role: "status" },
+    });
+    const icon = panel.createSpan({
+      cls: "practice-lab-dashboard-alignment-icon",
+      attr: { "aria-hidden": "true" },
+    });
+    setIcon(icon, health.unresolvedRecordCount + health.schoolDisagreementRecordCount > 0
+      ? "shield-alert"
+      : health.courseCheckedBankCount > 0 ? "shield-check" : "shield-question");
+    const copy = panel.createDiv();
+    copy.createEl("strong", { text: "Course alignment" });
+    copy.createEl("p", {
+      text: `${health.courseCheckedBankCount} course-checked · ${health.notCourseCheckedBankCount} not course-checked${health.noteDifferenceRecordCount === 0 ? "" : ` · ${health.noteDifferenceRecordCount} note ${health.noteDifferenceRecordCount === 1 ? "difference" : "differences"}`}`,
+    });
+    const attentionCount = health.schoolDisagreementRecordCount
+      + health.unresolvedRecordCount;
+    if (attentionCount === 0 && health.noteIncompleteRecordCount === 0) return;
+    const details = panel.createEl("details");
+    details.createEl("summary", { text: "Details" });
+    details.createEl("p", {
+      text: `${health.noteIncompleteRecordCount} school-backed context ${health.noteIncompleteRecordCount === 1 ? "addition" : "additions"} · ${health.schoolDisagreementRecordCount} school-source ${health.schoolDisagreementRecordCount === 1 ? "disagreement" : "disagreements"} · ${health.unresolvedRecordCount} ${health.unresolvedRecordCount === 1 ? "area needs" : "areas need"} attention. Alignment is informational and never changes practice scores.`,
+    });
+  }
+
   private renderLearningPathAnalytics(
     summary: PracticeDashboardSummary,
     records: readonly DashboardBankRecord[],
   ): void {
-    const learning = summary.learning;
     const section = this.dashboardSection(
-      "Guided learning paths",
-      "Independent attempts determine performance and evidence labels. Lessons, hints, and retries are reported separately and never create a schedule or inflate a score.",
+      "Learning",
+      "Choose one guided path to see its current step and the evidence that supports the recommendation.",
     );
-    const metrics = section.createDiv({ cls: "practice-lab-dashboard-metrics" });
-    this.dashboardMetric(
-      metrics,
-      "Independent performance",
-      percentText(learning.independentPerformancePercent),
-      `${learning.independentAttempts} scored independent ${learning.independentAttempts === 1 ? "attempt" : "attempts"}`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Guided lessons",
-      percentText(learning.lessonCompletionPercent),
-      `${learning.completedLessonCount} of ${learning.lessonCount} current lessons completed`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Source coverage",
-      percentText(learning.sourceCoveragePercent),
-      `${learning.coveredSourceSegmentCount} of ${learning.sourceSegmentCount} approved segments mapped to supported aspects`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Assistance used",
-      percentText(learning.assistanceRatePercent),
-      `${learning.assistedGuidedAttemptCount} of ${learning.guidedAttempts} guided attempts used a hint, retry, or repair`,
-    );
-    this.dashboardMetric(
-      metrics,
-      "Recovery after difficulty",
-      percentText(learning.recoveryRatePercent),
-      `${learning.recoveredCount} recovered · ${learning.unresolvedCount} unresolved`,
-    );
-
-    const evidenceStates = section.createDiv({ cls: "practice-lab-dashboard-bank-stats" });
-    evidenceStates.createSpan({
-      text: `${learning.consistentAspectCount} Consistent evidence`,
-      attr: {
-        title: "Each aspect has at least three scored independent attempts across two sessions and at least 80% weighted performance.",
-      },
+    const pathBanks = summary.banks.filter((bank) => bank.learningPath !== null);
+    if (pathBanks.length === 0) {
+      section.createEl("p", {
+        cls: "practice-lab-dashboard-empty-inline",
+        text: "No guided learning path is available in this scope.",
+      });
+      return;
+    }
+    if (!pathBanks.some((bank) => bank.bankId === this.selectedLearningBankId)) {
+      this.selectedLearningBankId = pathBanks[0]?.bankId ?? null;
+    }
+    const selector = section.createDiv({
+      cls: "practice-lab-dashboard-learning-selector",
+      attr: { role: "listbox", "aria-label": "Guided learning paths" },
     });
-    evidenceStates.createSpan({
-      text: `${learning.developingAspectCount} Developing`,
-      attr: { title: "These aspects have some independent evidence but have not reached the consistency threshold." },
-    });
-    evidenceStates.createSpan({
-      text: `${learning.unpracticedAspectCount} Unpracticed`,
-      attr: { title: "These aspects have no scored independent evidence. Guided attempts are intentionally excluded." },
-    });
-    if (learning.unresolvedSourceGapCount > 0) {
-      evidenceStates.createSpan({
-        cls: "practice-lab-dashboard-warning",
-        text: `${learning.unresolvedSourceGapCount} unresolved source ${learning.unresolvedSourceGapCount === 1 ? "gap" : "gaps"}`,
-        attr: { title: "A source gap is an aspect the approved source bundle does not support." },
+    for (const bank of pathBanks) {
+      const path = bank.learningPath;
+      if (path === null) continue;
+      const selected = bank.bankId === this.selectedLearningBankId;
+      const button = selector.createEl("button", {
+        cls: `practice-lab-dashboard-learning-option${selected ? " is-selected" : ""}`,
+        attr: {
+          type: "button",
+          role: "option",
+          "aria-selected": String(selected),
+        },
+      });
+      button.createEl("strong", { text: path.title });
+      button.createSpan({
+        text: `${path.completedLessonCount}/${path.lessonCount} lessons · ${path.setCount} ${path.setCount === 1 ? "set" : "sets"}`,
+      });
+      button.addEventListener("click", () => {
+        this.selectedLearningBankId = bank.bankId;
+        this.render();
       });
     }
-
-    const list = section.createDiv({ cls: "practice-lab-dashboard-bank-list" });
-    for (const bank of summary.banks) {
-      const learningPath = bank.learningPath;
-      if (learningPath === null) continue;
-      const record = records.find((entry) => (
-        entry.bankPath.replace(/\\/gu, "/") === bank.bankPath
-      ));
-      this.renderLearningPathCard(list, bank, learningPath, record);
-    }
+    const selected = pathBanks.find((bank) => (
+      bank.bankId === this.selectedLearningBankId
+    ));
+    const learning = selected?.learningPath;
+    if (selected === undefined || learning === null || learning === undefined) return;
+    this.renderLearningPathCard(
+      section,
+      selected,
+      learning,
+      this.recordForBank(records, selected),
+    );
   }
 
   private renderLearningPathCard(
@@ -870,7 +1132,9 @@ export class PracticeDashboardView extends ItemView {
     learning: DashboardLearningPathSummary,
     record: DashboardBankRecord | undefined,
   ): void {
-    const card = container.createDiv({ cls: "practice-lab-dashboard-bank" });
+    const card = container.createDiv({
+      cls: "practice-lab-dashboard-bank practice-lab-dashboard-learning-detail",
+    });
     const heading = card.createDiv({ cls: "practice-lab-dashboard-bank-heading" });
     const title = heading.createDiv();
     title.createEl("h4", { text: learning.title });
@@ -881,29 +1145,48 @@ export class PracticeDashboardView extends ItemView {
       attr: { title: "The learner starting level selected when this guided path was approved." },
     });
 
-    const status = card.createDiv({ cls: "practice-lab-dashboard-bank-stats" });
-    status.createSpan({ text: `${learning.setCount} practice ${learning.setCount === 1 ? "set" : "sets"}` });
-    status.createSpan({
-      text: `${learning.completedLessonCount}/${learning.lessonCount} lessons completed`,
-      attr: {
-        title: learning.remainingLessonTitles.length === 0
-          ? "Every current tutor lesson is complete."
-          : `Remaining: ${learning.remainingLessonTitles.join(", ")}`,
-      },
+    const current = card.createDiv({ cls: "practice-lab-dashboard-primary-action" });
+    const recommendation = learning.recommendation;
+    const copy = current.createDiv();
+    copy.createSpan({ cls: "practice-lab-muted", text: "Current step" });
+    copy.createEl("strong", {
+      text: recommendation?.title
+        ?? (learning.remainingLessonTitles[0] ?? "Path complete — choose any set"),
     });
-    status.createSpan({
-      text: `${learning.sourceMaterialCount} approved source ${learning.sourceMaterialCount === 1 ? "item" : "items"}`,
-      attr: { title: "Only notes or PDF page ranges explicitly approved for this path are counted." },
-    });
-    status.createSpan({ text: `${learning.consistentAspectCount}/${learning.supportedAspectCount} aspects with Consistent evidence` });
-    status.createSpan({ text: `${learning.hintsRevealed} hints · ${learning.retries} retries` });
+    if (recommendation !== null) {
+      copy.createEl("p", { text: recommendation.reasons[0] ?? "Ready to continue." });
+    }
+    const continueButton = new ButtonComponent(current)
+      .setIcon("route")
+      .setButtonText("Continue learning")
+      .setDisabled(record === undefined || this.options.continueLearning === undefined)
+      .setCta();
+    continueButton.onClick(() => void this.runAction(
+      () => record === undefined
+        ? undefined
+        : this.options.continueLearning?.(record),
+      "Could not continue this learning path.",
+    ));
 
-    const coverageLabel = `${learning.title} source coverage: ${learning.coveredSourceSegmentCount} of ${learning.sourceSegmentCount} approved segments are referenced by supported aspects`;
-    this.performanceBar(card, learning.sourceCoveragePercent, coverageLabel);
-    card.createEl("p", {
-      cls: "practice-lab-dashboard-note",
-      text: `${percentText(learning.sourceCoveragePercent)} source coverage maps supported aspects to the explicitly approved bundle; it is not a claim that every source sentence needs a question.`,
-    });
+    const status = card.createDiv({ cls: "practice-lab-dashboard-metrics" });
+    this.dashboardMetric(
+      status,
+      "Independent evidence",
+      percentText(learning.independentPerformancePercent),
+      `${learning.independentAttempts} scored independent ${learning.independentAttempts === 1 ? "attempt" : "attempts"}`,
+    );
+    this.dashboardMetric(
+      status,
+      "Lesson progress",
+      `${learning.completedLessonCount}/${learning.lessonCount}`,
+      `${learning.setCount} practice ${learning.setCount === 1 ? "set" : "sets"}`,
+    );
+    this.dashboardMetric(
+      status,
+      "Evidence state",
+      String(learning.consistentAspectCount),
+      `${learning.developingAspectCount} developing · ${learning.unpracticedAspectCount} unpractised`,
+    );
 
     if (learning.unresolvedSourceGapCount > 0) {
       const gaps = card.createEl("details", {
@@ -924,20 +1207,22 @@ export class PracticeDashboardView extends ItemView {
       });
     }
 
-    this.renderLearningRecommendation(card, learning, record);
-
     const evidence = card.createEl("details", {
       cls: "practice-lab-analytics-table-details",
     });
     evidence.createEl("summary", {
-      text: "View set and aspect evidence",
+      text: "Details",
       attr: {
-        "data-practice-lab-description": "Expand independent performance, guided assistance, and historical evidence for this path.",
+        "data-practice-lab-description": "Expand source coverage, assistance, and historical evidence for this path.",
       },
     });
     evidence.createEl("p", {
       cls: "practice-lab-dashboard-note",
-      text: "Unpracticed means no scored independent evidence. Developing means some evidence. Consistent evidence requires at least three independent attempts across two sessions with at least 80% weighted performance.",
+      text: `${percentText(learning.sourceCoveragePercent)} source coverage · ${percentText(learning.assistanceRatePercent)} assistance rate · ${learning.hintsRevealed} hints · ${learning.retries} retries · ${percentText(learning.recoveryRatePercent)} recovery after difficulty. Guided support never inflates independent performance.`,
+    });
+    evidence.createEl("p", {
+      cls: "practice-lab-dashboard-note",
+      text: "Unpractised means no scored independent evidence. Developing means some evidence. Consistent evidence requires at least three independent attempts across two sessions with at least 80% weighted performance.",
     });
     this.renderLearningEvidenceTable(evidence, "Aspect evidence", "Aspect", learning.aspects);
     this.renderLearningEvidenceTable(evidence, "Practice-set evidence", "Set", learning.sets);
@@ -1058,6 +1343,30 @@ export class PracticeDashboardView extends ItemView {
 
   private renderActivityAnalytics(summary: PracticeDashboardSummary): void {
     const preferences = this.displayPreferences.dashboard;
+    const availableViews = [
+      ...(preferences.showActivityHeatmap
+        ? [{ id: "heatmap", label: "Heatmap" } as const]
+        : []),
+      ...(preferences.showActivityTrend
+        ? [{ id: "trend", label: "Trend" } as const]
+        : []),
+      ...(preferences.showPerformanceTrend
+        ? [{ id: "performance", label: "Performance" } as const]
+        : []),
+      ...(preferences.showOutcomeChart
+        ? [{ id: "outcomes", label: "Outcomes" } as const]
+        : []),
+    ] satisfies readonly { readonly id: DashboardActivityView; readonly label: string }[];
+    if (availableViews.length === 0) {
+      this.renderStatus(
+        "Activity visualisations are hidden in dashboard settings.",
+        "chart-no-axes-column",
+      );
+      return;
+    }
+    if (!availableViews.some((view) => view.id === this.activityView)) {
+      this.activityView = availableViews[0]?.id ?? "heatmap";
+    }
     const activity = buildPracticeActivity(summary.recentSessions, {
       rangeWeeks: this.activityRangeWeeks,
       weekStart: this.activityWeekStart,
@@ -1066,8 +1375,64 @@ export class PracticeDashboardView extends ItemView {
       "Practice activity",
       "Completed sessions in the current dashboard scope. These graphs describe past work only; they do not create due dates, quotas, or review schedules.",
     );
+    const controls = section.createDiv({ cls: "practice-lab-dashboard-activity-controls" });
+    const views = controls.createDiv({
+      cls: "practice-lab-dashboard-activity-views",
+      attr: { role: "group", "aria-label": "Activity visualisation" },
+    });
+    for (const view of availableViews) {
+      const button = views.createEl("button", {
+        text: view.label,
+        cls: view.id === this.activityView ? "is-active" : "",
+        attr: {
+          type: "button",
+          "aria-pressed": String(view.id === this.activityView),
+        },
+      });
+      button.addEventListener("click", () => {
+        this.activityView = view.id;
+        this.render();
+      });
+    }
+    new Setting(controls)
+      .setName("Window")
+      .setDesc("Changes this dashboard view only.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("13", "13 Weeks")
+        .addOption("26", "26 Weeks")
+        .addOption("52", "52 Weeks")
+        .setValue(String(this.activityRangeWeeks))
+        .onChange((value) => {
+          this.activityRangeWeeks = Number(value) as ActivityRangeWeeks;
+          this.render();
+        }));
+    if (this.activityView === "trend") {
+      new Setting(controls)
+        .setName("Trend metric")
+        .setDesc("Changes this dashboard view only.")
+        .addDropdown((dropdown) => dropdown
+          .addOption("answers", "Answers")
+          .addOption("sessions", "Sessions")
+          .addOption("minutes", "Practice time")
+          .setValue(this.activityMetric)
+          .onChange((value) => {
+            this.activityMetric = value as ActivityMetric;
+            this.render();
+          }));
+    }
+
+    const chart = section.createDiv({ cls: "practice-lab-dashboard-active-chart" });
+    if (this.activityView === "heatmap") this.renderActivityHeatmap(chart, activity);
+    if (this.activityView === "trend") this.renderActivityTrend(chart, activity);
+    if (this.activityView === "performance") this.renderPerformanceTrend(chart, activity);
+    if (this.activityView === "outcomes") this.renderOutcomeChart(chart, summary);
+
     if (preferences.showActivitySummary) {
-      const metrics = section.createDiv({ cls: "practice-lab-dashboard-metrics practice-lab-activity-metrics" });
+      const summaryDetails = section.createEl("details", {
+        cls: "practice-lab-analytics-table-details",
+      });
+      summaryDetails.createEl("summary", { text: "Activity summary" });
+      const metrics = summaryDetails.createDiv({ cls: "practice-lab-dashboard-metrics practice-lab-activity-metrics" });
       this.dashboardMetric(
         metrics,
         "Active days",
@@ -1093,13 +1458,28 @@ export class PracticeDashboardView extends ItemView {
         `${formatPracticeRunPoints(activity.earnedPoints)} / ${activity.scoredAnswerCount} scored points`,
       );
     }
-
-    if (preferences.showActivityHeatmap) this.renderActivityHeatmap(section, activity);
-    if (preferences.showActivityTrend) this.renderActivityTrend(section, activity);
-    if (preferences.showPerformanceTrend) this.renderPerformanceTrend(section, activity);
-    if (preferences.showOutcomeChart) this.renderOutcomeChart(section, summary);
-    if (preferences.showActivityTrend || preferences.showPerformanceTrend) {
+    if (this.activityView === "trend" || this.activityView === "performance") {
       this.renderWeeklyActivityTable(section, activity);
+    }
+    if (preferences.showRecentSessions) {
+      const recent = section.createEl("details", {
+        cls: "practice-lab-analytics-table-details",
+      });
+      recent.createEl("summary", { text: "Recent sessions" });
+      const previousHost = this.activePanelEl;
+      this.activePanelEl = recent;
+      this.renderRecentSessions(summary);
+      this.activePanelEl = previousHost;
+    }
+    if (preferences.showTypeBreakdown) {
+      const breakdown = section.createEl("details", {
+        cls: "practice-lab-analytics-table-details",
+      });
+      breakdown.createEl("summary", { text: "Performance by exercise type" });
+      const previousHost = this.activePanelEl;
+      this.activePanelEl = breakdown;
+      this.renderTypeBreakdown(summary);
+      this.activePanelEl = previousHost;
     }
     section.createEl("p", {
       cls: "practice-lab-dashboard-note",
@@ -1464,8 +1844,8 @@ export class PracticeDashboardView extends ItemView {
     records: readonly DashboardBankRecord[],
   ): void {
     const section = this.dashboardSection(
-      "Practice banks",
-      "Search within the current scope, then start practice or open its notes.",
+      "Library",
+      "Search saved practice and open secondary actions only when you need them.",
     );
     const search = section.createEl("input", {
       cls: "practice-lab-dashboard-search",
@@ -1560,35 +1940,69 @@ export class PracticeDashboardView extends ItemView {
 
     if (preferences.showBankActivity) {
       const statistics = card.createDiv({ cls: "practice-lab-dashboard-bank-stats" });
-      statistics.createSpan({ text: `${bank.problemCount} problems` });
-      statistics.createSpan({ text: `${bank.sessionCount} sessions` });
-      statistics.createSpan({ text: `${bank.answerCount} answers` });
+      statistics.createSpan({
+        text: `${bank.problemCount} problems · ${bank.sessionCount} completed ${bank.sessionCount === 1 ? "session" : "sessions"} · ${bank.latestSessionAt === null ? "Not practised yet" : `Last practised ${new Date(bank.latestSessionAt).toLocaleDateString()}`}`,
+      });
       if (bank.reviewedAiResponseCount + bank.pendingAiReviewCount + bank.failedAiReviewCount > 0) {
         statistics.createSpan({
-          text: `AI reviews ${bank.reviewedAiResponseCount} done · ${bank.pendingAiReviewCount} pending · ${bank.failedAiReviewCount} failed`,
+          cls: bank.pendingAiReviewCount + bank.failedAiReviewCount > 0
+            ? "practice-lab-dashboard-warning"
+            : "",
+          text: `AI reviews: ${bank.pendingAiReviewCount} pending · ${bank.failedAiReviewCount} failed`,
         });
       }
-      statistics.createSpan({ text: `Best streak ${bank.bestAnswerStreak}` });
-      statistics.createSpan({
-        text: bank.latestSessionAt === null
-          ? "Not practiced yet"
-          : `Last practiced ${new Date(bank.latestSessionAt).toLocaleDateString()}`,
-      });
     }
 
     const actions = card.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
-    if (record.bank.learningPath !== null && this.options.continueLearning !== undefined) {
+    const recovery = this.recoveryPresentation();
+    const recoveryMatches = recovery?.bankId === record.bank.bankId
+      && this.options.handleRecovery !== undefined;
+    if (recoveryMatches && recovery !== undefined) {
+      const recoveryAction = recovery.state === "resumable" ? "resume" : "resolve";
+      new ButtonComponent(actions)
+        .setIcon(recovery.state === "resumable" ? "history" : "circle-alert")
+        .setButtonText(recovery.actionLabel
+          ?? (recovery.state === "resumable" ? "Resume" : "Resolve"))
+        .setCta()
+        .onClick(() => void this.runAction(
+          () => this.options.handleRecovery?.(recoveryAction),
+          "Could not open the saved session.",
+        ));
+    } else if (record.bank.learningPath !== null && this.options.continueLearning !== undefined) {
       new ButtonComponent(actions)
         .setIcon("route")
-        .setButtonText("Continue guided path")
-        .setTooltip("Start the locally recommended tutor lesson or practice set, one path step at a time.")
+        .setButtonText("Continue")
+        .setTooltip("Continue the locally recommended tutor lesson or practice set.")
         .setCta()
         .onClick(() => void this.runAction(
           () => this.options.continueLearning?.(record),
           "Could not continue this learning path.",
         ));
+    } else {
+      new ButtonComponent(actions)
+        .setIcon("play")
+        .setButtonText("Start")
+        .setTooltip("Start a practice run across this saved bank.")
+        .setCta()
+        .onClick(() => void this.runAction(
+          () => this.options.startPractice(record),
+          "Could not start this practice bank.",
+        ));
+    }
+
+    const more = card.createEl("details", {
+      cls: "practice-lab-dashboard-bank-more",
+    });
+    more.createEl("summary", {
+      text: "More…",
+      attr: {
+        "data-practice-lab-description": "Show alternate practice modes, note actions, and data controls.",
+      },
+    });
+    const moreActions = more.createDiv({ cls: "practice-lab-dashboard-bank-actions" });
+    if (record.bank.learningPath !== null) {
       if (this.options.chooseSet !== undefined) {
-        new ButtonComponent(actions)
+        new ButtonComponent(moreActions)
           .setIcon("list")
           .setButtonText("Choose a set")
           .setTooltip("Choose any named practice set without progression locks.")
@@ -1598,7 +2012,7 @@ export class PracticeDashboardView extends ItemView {
           ));
       }
       if (this.options.mixedPractice !== undefined) {
-        new ButtonComponent(actions)
+        new ButtonComponent(moreActions)
           .setIcon("shuffle")
           .setButtonText("Mixed practice")
           .setTooltip("Combine all named sets without replaying tutor lessons.")
@@ -1607,20 +2021,17 @@ export class PracticeDashboardView extends ItemView {
             "Could not start mixed practice.",
           ));
       }
+      new ButtonComponent(moreActions)
+        .setIcon("play")
+        .setButtonText("Free practice")
+        .setTooltip("Practice every saved question without tutor sequencing.")
+        .onClick(() => void this.runAction(
+          () => this.options.startPractice(record),
+          "Could not start this practice bank.",
+        ));
     }
-    const start = new ButtonComponent(actions)
-      .setIcon("play")
-      .setButtonText(record.bank.learningPath === null ? "Start practice" : "Free practice")
-      .setTooltip(record.bank.learningPath === null
-        ? "Start a practice run across all saved questions."
-        : "Practice every saved question without tutor sequencing or path guidance.")
-      .onClick(() => void this.runAction(
-        () => this.options.startPractice(record),
-        "Could not start this practice bank.",
-      ));
-    if (record.bank.learningPath === null) start.setCta();
     if (this.options.regenerate !== undefined && record.bank.learningPath === null) {
-      const regenerate = new ButtonComponent(actions)
+      const regenerate = new ButtonComponent(moreActions)
         .setIcon("refresh-cw")
         .setButtonText("Regenerate / tweak")
         .setDisabled(!record.sourceExists);
@@ -1630,7 +2041,7 @@ export class PracticeDashboardView extends ItemView {
       ));
     }
     if (record.bank.learningPath !== null && this.options.manageLearningPath !== undefined) {
-      new ButtonComponent(actions)
+      new ButtonComponent(moreActions)
         .setIcon("settings-2")
         .setButtonText("Manage path")
         .onClick(() => void this.runAction(
@@ -1638,14 +2049,14 @@ export class PracticeDashboardView extends ItemView {
           "Could not open the learning-path manager.",
         ));
     }
-    new ButtonComponent(actions)
+    new ButtonComponent(moreActions)
       .setIcon("notebook-tabs")
       .setButtonText("Open bank")
       .onClick(() => void this.runAction(
         () => this.options.openBank(record),
         "Could not open this practice bank.",
       ));
-    const openSource = new ButtonComponent(actions)
+    const openSource = new ButtonComponent(moreActions)
       .setIcon("file-text")
       .setButtonText("Open source")
       .setDisabled(!record.sourceExists);
@@ -1654,7 +2065,7 @@ export class PracticeDashboardView extends ItemView {
       "Could not open the source note.",
     ));
     if (this.options.deleteBank !== undefined) {
-      const dataActions = card.createEl("details", {
+      const dataActions = more.createEl("details", {
         cls: "practice-lab-dashboard-data-actions",
       });
       dataActions.createEl("summary", { text: "Data actions" });
@@ -1683,6 +2094,13 @@ export class PracticeDashboardView extends ItemView {
     }
   }
 
+  private recoveryPresentation(): DashboardRecoveryPresentation | null {
+    const presentation = this.options.recoveryPresentation;
+    return typeof presentation === "function"
+      ? presentation()
+      : presentation ?? null;
+  }
+
   private renderDiagnostics(
     snapshot: PracticeDashboardSnapshot,
     summary?: PracticeDashboardSummary,
@@ -1698,7 +2116,7 @@ export class PracticeDashboardView extends ItemView {
     const attentionCount = snapshot.issues.length
       + duplicateCount
       + missingSourceCount;
-    const details = this.contentEl.createEl("details", {
+    const details = this.dashboardContainer().createEl("details", {
       cls: "practice-lab-dashboard-diagnostics",
     });
     details.createEl("summary", {
@@ -1739,7 +2157,7 @@ export class PracticeDashboardView extends ItemView {
     title: string,
     description: string,
   ): HTMLElement {
-    const section = this.contentEl.createEl("section", {
+    const section = this.dashboardContainer().createEl("section", {
       cls: "practice-lab-dashboard-section",
     });
     const heading = section.createDiv({ cls: "practice-lab-section-heading" });
@@ -1753,7 +2171,7 @@ export class PracticeDashboardView extends ItemView {
     iconName: string,
     role: "alert" | "status" = "status",
   ): void {
-    const state = this.contentEl.createDiv({
+    const state = this.dashboardContainer().createDiv({
       cls: "practice-lab-empty",
       attr: {
         role,

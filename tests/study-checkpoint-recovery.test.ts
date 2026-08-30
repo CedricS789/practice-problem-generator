@@ -32,6 +32,7 @@ import {
   rebaseLatestStudySessionCheckpointBankPath,
   rebaseStudySessionCheckpointBankPath,
   resolveStudyCheckpointBankCandidate,
+  studyCheckpointWorkspaceActionState,
   summarizeStudyCheckpointProgress,
 } from "../src/study-checkpoint-recovery";
 import type { StudySessionProgressV1 } from "../src/ui/contracts";
@@ -285,6 +286,49 @@ test("bank resolution fails closed when one identity exists at multiple relocate
       : [],
     [first.bankPath, second.bankPath],
   );
+});
+
+test("saved-workspace actions distinguish ready, resumable, stale, and different checkpoints", () => {
+  const checkpoint = freshCheckpoint();
+  assert.deepEqual(
+    studyCheckpointWorkspaceActionState(undefined, false, {
+      bankId: checkpoint.bankId,
+      revision: checkpoint.bankRevisionAtStart,
+    }),
+    {
+      state: "ready",
+      description: "The saved guided path is ready to continue.",
+    },
+  );
+
+  const unreadable = studyCheckpointWorkspaceActionState(undefined, true, {
+    bankId: checkpoint.bankId,
+    revision: checkpoint.bankRevisionAtStart,
+  });
+  assert.equal(unreadable.state, "blocked");
+  assert.match(unreadable.description, /nothing will be discarded automatically/iu);
+
+  const resumable = studyCheckpointWorkspaceActionState(checkpoint, false, {
+    bankId: checkpoint.bankId,
+    revision: checkpoint.bankRevisionAtStart + 2,
+  });
+  assert.equal(resumable.state, "resume");
+  assert.match(resumable.description, /question 1 of 1/iu);
+
+  const olderCopy = studyCheckpointWorkspaceActionState(checkpoint, false, {
+    bankId: checkpoint.bankId,
+    revision: checkpoint.bankRevisionAtStart - 1,
+  });
+  assert.equal(olderCopy.state, "blocked");
+  assert.match(olderCopy.description, /older copy/iu);
+  assert.match(olderCopy.description, /revision 4 or newer/iu);
+
+  const different = studyCheckpointWorkspaceActionState(checkpoint, false, {
+    bankId: "bank-new-guided-path",
+    revision: 0,
+  });
+  assert.equal(different.state, "blocked");
+  assert.match(different.description, /different saved practice session/iu);
 });
 
 test("checkpoint path rebasing preserves every other field and runs full validation", () => {

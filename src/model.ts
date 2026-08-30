@@ -5,9 +5,12 @@ export const GENERATION_DRAFT_SCHEMA_VERSION = 1 as const;
  * migrated. New authorized writes use CURRENT_PRACTICE_BANK_SCHEMA_VERSION.
  */
 export const PRACTICE_BANK_SCHEMA_VERSION = 2 as const;
-export const CURRENT_PRACTICE_BANK_SCHEMA_VERSION = 3 as const;
+export const PRACTICE_BANK_V3_SCHEMA_VERSION = 3 as const;
+export const CURRENT_PRACTICE_BANK_SCHEMA_VERSION = 4 as const;
 export const LEGACY_PRACTICE_BANK_SCHEMA_VERSION = 1 as const;
 export const PRACTICE_BLOCK_LANGUAGE = "practice-lab" as const;
+export const SOURCE_ALIGNMENT_SCHEMA_VERSION = 1 as const;
+export const SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION = 1 as const;
 
 export type ExerciseDifficultyV1 = "easy" | "medium" | "hard";
 export type SelfRatingV1 = "again" | "hard" | "good" | "easy";
@@ -306,6 +309,7 @@ export type SessionItemResultV2 =
 export interface SessionSummaryV2 {
   schemaVersion:
     | typeof PRACTICE_BANK_SCHEMA_VERSION
+    | typeof PRACTICE_BANK_V3_SCHEMA_VERSION
     | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   id: string;
   startedAt: string;
@@ -365,10 +369,17 @@ export interface SessionLearningScopeV3 {
 }
 
 export interface SessionSummaryV3 extends SessionSummaryV2 {
-  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
+  /** V4 preserves the V3 learning-evidence fields without rewriting history. */
+  schemaVersion:
+    | typeof PRACTICE_BANK_V3_SCHEMA_VERSION
+    | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   scope: SessionLearningScopeV3;
   evidence: SessionExerciseEvidenceV3[];
   completedTutorLessons: CompletedTutorLessonSnapshotV3[];
+}
+
+export interface SessionSummaryV4 extends SessionSummaryV3 {
+  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
 }
 
 export interface PracticeSourceV1 {
@@ -401,6 +412,136 @@ export interface SourceMaterialV1 {
   scope: SourceMaterialScopeV1;
   segmentIds: string[];
   visualIds: string[];
+}
+
+export type SourceMaterialClassificationV1 =
+  | "personal-note"
+  | "official-correction"
+  | "instructor-material"
+  | "assigned-reference"
+  | "unclassified";
+
+/**
+ * Suggested labels are never treated as authoritative until the user confirms
+ * them. Migration defaults preserve that historical banks were never labelled.
+ */
+export type SourceMaterialClassificationStateV1 =
+  | "confirmed"
+  | "suggested"
+  | "migration-default";
+
+/** Controls whether generation may add non-course-checked technical context. */
+export type AiContextCompletionPolicyV1 =
+  | "selected-sources-only"
+  | "approved-general-context";
+
+export interface SourceMaterialV2 extends SourceMaterialV1 {
+  classification: SourceMaterialClassificationV1;
+  classificationState: SourceMaterialClassificationStateV1;
+}
+
+export type SourceAlignmentStatusV1 =
+  | "aligned"
+  | "notes-incomplete"
+  | "conflict"
+  | "school-only"
+  | "notes-only-unverified"
+  | "school-sources-disagree"
+  | "insufficient-evidence";
+
+export type SourceAlignmentResolutionV1 =
+  | "course-authority"
+  | "manual-override"
+  | "excluded"
+  | "unresolved"
+  | "not-required";
+
+/** Provider result before local source-ownership and hash locking. */
+export interface SourceAlignmentDraftRecordV1 {
+  id: string;
+  status: SourceAlignmentStatusV1;
+  noteSegmentIds: string[];
+  schoolSegmentIds: string[];
+  noteClaim: string | null;
+  schoolClaim: string | null;
+  courseSupportedClaim: string | null;
+  resolution: SourceAlignmentResolutionV1;
+}
+
+export interface SourceAlignmentDraftV1 {
+  schemaVersion: typeof SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION;
+  records: SourceAlignmentDraftRecordV1[];
+}
+
+export interface SourceAlignmentSourceHashV1 {
+  sourceMaterialId: string;
+  sourceHash: string;
+  classification: SourceMaterialClassificationV1;
+  classificationState: SourceMaterialClassificationStateV1;
+}
+
+export interface SourceAlignmentRecordV1 extends SourceAlignmentDraftRecordV1 {
+  sourceHashes: SourceAlignmentSourceHashV1[];
+}
+
+export interface SourceAlignmentTargetLinkV1 {
+  targetId: string;
+  alignmentRecordIds: string[];
+}
+
+export interface SourceAlignmentProvenanceV1 {
+  provider: AiReviewProviderV2;
+  providerVersion: string;
+  model: string;
+  reasoningEffort: ReasoningEffortV1;
+  promptVersion: string;
+  generatedAt: string;
+  sourceBundleHash: string;
+}
+
+export interface SourceAlignmentLedgerV1 {
+  schemaVersion: typeof SOURCE_ALIGNMENT_SCHEMA_VERSION;
+  records: SourceAlignmentRecordV1[];
+  exerciseLinks: SourceAlignmentTargetLinkV1[];
+  tutorLessonLinks: SourceAlignmentTargetLinkV1[];
+  provenance: SourceAlignmentProvenanceV1 | null;
+}
+
+export interface SourceAlignmentCitationSnapshotV1 {
+  sourceMaterialId: string;
+  classification: SourceMaterialClassificationV1;
+  title: string;
+  vaultPath: string;
+  scope: SourceMaterialScopeV1;
+  segmentId: string;
+  headingPath: string[];
+  text: string;
+}
+
+export interface SourceAlignmentRecordSnapshotV1 {
+  recordId: string;
+  status: SourceAlignmentStatusV1;
+  noteClaim: string | null;
+  schoolClaim: string | null;
+  courseSupportedClaim: string | null;
+  resolution: SourceAlignmentResolutionV1;
+  noteEvidence: SourceAlignmentCitationSnapshotV1[];
+  schoolEvidence: SourceAlignmentCitationSnapshotV1[];
+}
+
+/** Immutable, path-complete evidence shown only after an answer is revealed. */
+export interface ExerciseAlignmentSnapshotV1 {
+  exerciseId: string;
+  /** Missing only on legacy snapshots created before explicit approval existed. */
+  aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
+  state:
+    | "course-aligned"
+    | "notes-differ"
+    | "notes-incomplete"
+    | "notes-grounded-unverified"
+    | "school-sources-disagree"
+    | "insufficient-evidence";
+  records: SourceAlignmentRecordSnapshotV1[];
 }
 
 export interface LearningAspectV1 {
@@ -528,6 +669,7 @@ export interface PracticeBankV1 {
 export interface PracticeBankV2 {
   schemaVersion:
     | typeof PRACTICE_BANK_SCHEMA_VERSION
+    | typeof PRACTICE_BANK_V3_SCHEMA_VERSION
     | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   bankId: string;
   revision: number;
@@ -542,11 +684,14 @@ export interface PracticeBankV2 {
 }
 
 /**
- * Current one-workspace contract. Flat source and exercise collections remain
- * canonical; learning-path records reference them by stable ID.
+ * V3 introduced one-workspace learning paths. Flat source and exercise
+ * collections remain canonical; learning-path records reference stable IDs.
  */
 export interface PracticeBankV3 extends PracticeBankV2 {
-  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
+  /** Includes V4 for source compatibility while PracticeBankV4 is the exact current contract. */
+  schemaVersion:
+    | typeof PRACTICE_BANK_V3_SCHEMA_VERSION
+    | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
   sessions: SessionSummaryV3[];
   sourceMaterials: SourceMaterialV1[];
   aspects: LearningAspectV1[];
@@ -555,16 +700,26 @@ export interface PracticeBankV3 extends PracticeBankV2 {
   learningPath: LearningPathV1 | null;
 }
 
-export type CurrentPracticeBank = PracticeBankV3;
-export type CurrentSessionSummary = SessionSummaryV3;
+export interface PracticeBankV4 extends PracticeBankV3 {
+  schemaVersion: typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
+  sessions: SessionSummaryV4[];
+  sourceMaterials: SourceMaterialV2[];
+  sourceAlignment: SourceAlignmentLedgerV1;
+  /** Missing only on legacy banks, whose generation allowed AI-supported context. */
+  aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
+}
+
+export type CurrentPracticeBank = PracticeBankV4;
+export type CurrentSessionSummary = SessionSummaryV4;
 
 export type PracticeBankParseResult =
   | {
       status: "ok";
-      bank: PracticeBankV3;
+      bank: PracticeBankV4;
       storedSchemaVersion:
         | typeof LEGACY_PRACTICE_BANK_SCHEMA_VERSION
         | typeof PRACTICE_BANK_SCHEMA_VERSION
+        | typeof PRACTICE_BANK_V3_SCHEMA_VERSION
         | typeof CURRENT_PRACTICE_BANK_SCHEMA_VERSION;
       warnings: string[];
     }
@@ -604,6 +759,7 @@ export interface ValidationIssue {
     | "practice-set"
     | "tutor"
     | "learning-path"
+    | "source-alignment"
     | "bank";
   path: string;
   message: string;

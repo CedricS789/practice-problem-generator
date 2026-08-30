@@ -138,6 +138,12 @@ class FakeJobFileSystem implements CliJobFileSystem {
     this.jobs.push(job);
     return job;
   }
+
+  async openRecovery(handle: DurableProcessHandle): Promise<CliJobWorkspace> {
+    const job = this.jobs.find((candidate) => candidate.absolutePath === handle.workspacePath);
+    if (job === undefined) throw new Error("Synthetic recovery workspace not found");
+    return job;
+  }
 }
 
 class FakeJobWorkspace implements CliJobWorkspace {
@@ -156,6 +162,23 @@ class FakeJobWorkspace implements CliJobWorkspace {
   async writeText(filename: string, content: string): Promise<string> {
     this.writtenText.set(filename, content);
     return `${this.absolutePath}/${filename}`;
+  }
+
+  async readText(filename: string): Promise<string | undefined> {
+    return this.writtenText.get(filename);
+  }
+
+  async resolveExisting(filename: string): Promise<string> {
+    if (!this.writtenText.has(filename)) throw new Error("Synthetic recovery file not found");
+    return `${this.absolutePath}/${filename}`;
+  }
+
+  async openMedia(media: readonly MediaInput[]): Promise<readonly NeutralMedia[]> {
+    return media.map((item, index) => ({
+      absolutePath: `${this.absolutePath}/media-${String(index + 1).padStart(3, "0")}.png`,
+      filename: `media-${String(index + 1).padStart(3, "0")}.png`,
+      ...(item.mimeType === undefined ? {} : { mimeType: item.mimeType }),
+    }));
   }
 
   async writeBinary(filename: string, content: Uint8Array): Promise<string> {
@@ -310,11 +333,13 @@ test("Codex uses fixed safe arguments, stdin, neutral media, and cleanup", async
     media: [{ filePath: authoredPath, mimeType: "image/png" }],
   });
 
-  assert.deepEqual(result, {
-    provider: "codex",
-    value: { ok: true },
-    attempts: 1,
-  });
+  assert.equal(result.provider, "codex");
+  assert.deepEqual(result.value, { ok: true });
+  assert.equal(result.attempts, 1);
+  assert.equal(result.telemetry?.attempts, 1);
+  assert.equal(result.telemetry?.tokenUsage.source, "local-estimate");
+  assert.equal(result.telemetry?.tokenUsage.inputEstimateExcludesMedia, true);
+  assert.ok((result.telemetry?.tokenUsage.inputTokens ?? 0) > 0);
   const request = runner.requests[0];
   assert.ok(request);
   assert.equal(request.executable, "codex");
@@ -576,6 +601,53 @@ test("malformed JSON receives exactly one schema-repair retry", async () => {
   assert.match(runner.requests[1]?.stdin ?? "", /previous response was rejected/u);
   assert.match(runner.requests[1]?.stdin ?? "", /not-json/u);
   assert.equal(jobs.jobs[0]?.cleanupCalls, 1);
+});
+
+test("resuming a durable repair retains attempt-one telemetry and original elapsed time", async () => {
+  const jobs = new FakeJobFileSystem();
+  const workspace = await jobs.create() as FakeJobWorkspace;
+  await workspace.writeText("schema.json", JSON.stringify(SCHEMA));
+  await workspace.writeText("generation-telemetry.json", JSON.stringify({
+    schemaVersion: 1,
+    attempts: [{
+      attempt: 1,
+      durationMs: 2_000,
+      tokenUsage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        source: "local-estimate",
+        inputEstimateExcludesMedia: false,
+      },
+    }],
+  }));
+  const handle: DurableProcessHandle = {
+    version: 1,
+    jobId: "generation-00000000-0000-4000-8000-000000000099",
+    workspacePath: workspace.absolutePath,
+    startedAt: new Date(Date.now() - 5_000).toISOString(),
+  };
+  const runner = new QueueRunner([{
+    stdout: '{"ok":true}',
+    stderr: "",
+    exitCode: 0,
+    durableAttempt: 2,
+    recoveryHandle: handle,
+  }]);
+  const adapter = new CodexCliProviderAdapter(runner, jobs);
+  const result = await adapter.generate({
+    prompt: "Synthetic approved prompt",
+    schema: SCHEMA,
+    validate: validateOk,
+    recovery: { mode: "resume", handle },
+  });
+  assert.equal(result.attempts, 2);
+  assert.equal(result.telemetry?.attempts, 2);
+  assert.ok((result.telemetry?.durationMs ?? 0) >= 4_000);
+  assert.ok((result.telemetry?.tokenUsage.inputTokens ?? 0) > 10);
+  const recoveredSidecar = JSON.parse(
+    workspace.writtenText.get("generation-telemetry.json") ?? "{}",
+  ) as { attempts?: Array<{ attempt?: number }> };
+  assert.deepEqual(recoveredSidecar.attempts?.map((attempt) => attempt.attempt), [1, 2]);
 });
 
 test("provider-declared terminal failures stop without a schema-repair call", async () => {
@@ -1432,29 +1504,29 @@ test("explicit durable recovery cancellation stops the helper and cleanup is ide
   const fileSystem = new DesktopJobFileSystem();
   const job = await fileSystem.create();
   let handle: DurableProcessHandle | undefined;
-  const running = new DesktopProcessRunner().run({
-    executable: process.execPath,
-    args: ["-e", "setInterval(()=>{},1000);"],
-    cwd: job.absolutePath,
-    stdin: "",
-    timeoutMs: 10_000,
-    durable: {
-      mode: "start",
-      jobId: "generation-00000000-0000-4000-8000-000000000004",
-      attempt: 1,
-      onReady: async (value) => {
-        handle = value;
-        await Promise.resolve();
+  const cancelled = assert.rejects(
+    new DesktopProcessRunner().run({
+      executable: process.execPath,
+      args: ["-e", "setInterval(()=>{},1000);"],
+      cwd: job.absolutePath,
+      stdin: "",
+      timeoutMs: 10_000,
+      durable: {
+        mode: "start",
+        jobId: "generation-00000000-0000-4000-8000-000000000004",
+        attempt: 1,
+        onReady: async (value) => {
+          handle = value;
+          await Promise.resolve();
+        },
       },
-    },
-  });
-  while (handle === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
-  await cancelDurableRecovery(handle);
-  await assert.rejects(
-    running,
+    }),
     (error: unknown) =>
       error instanceof CliProviderError && error.code === "cancelled",
   );
+  while (handle === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  await cancelDurableRecovery(handle);
+  await cancelled;
   await removeDurableRecovery(handle);
   await removeDurableRecovery(handle);
   assert.equal(existsSync(handle.workspacePath), false);

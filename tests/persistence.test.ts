@@ -255,6 +255,8 @@ test("round-trips readable Markdown and its versioned fenced block", () => {
     assert.doesNotMatch(markdown, new RegExp(`^${hiddenProperty}:`, "mu"));
   }
   assert.match(markdown, /```practice-lab\n\{/u);
+  assert.doesNotMatch(markdown, /Open this note in Reading view/u);
+  assert.doesNotMatch(markdown, /\[!info\] Practice Problem Generator bank/u);
   const parsed = parsePracticeBankMarkdown(markdown);
   assert.equal(parsed.status, "ok");
   if (parsed.status === "ok") {
@@ -320,13 +322,13 @@ test("validates legacy v1 strictly and migrates it losslessly in memory", () => 
   const expected = migratePracticeBankV1ToV3(legacy);
   assert.deepEqual(parsed.bank, expected);
   const rewritten = serializePracticeBank(parsed.bank);
-  assert.match(rewritten, /"schemaVersion": 3/u);
+  assert.match(rewritten, /"schemaVersion": 4/u);
   assert.doesNotMatch(rewritten, /^practice-lab-version:/mu);
 });
 
 test("opens unknown versions read-only with recovery instructions", () => {
   const markdown = serializePracticeBank(createBank()).replace(
-    '"schemaVersion": 3',
+    '"schemaVersion": 4',
     '"schemaVersion": 99',
   );
   const parsed = parsePracticeBankMarkdown(markdown);

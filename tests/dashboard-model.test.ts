@@ -9,6 +9,7 @@ import {
   type DashboardScope,
 } from "../src/dashboard-model";
 import { migratePracticeBankV2ToV3 } from "../src/learning-path";
+import { createSourceAlignmentLedger } from "../src/source-alignment";
 import type {
   ExerciseV1,
   PracticeBankV2,
@@ -664,6 +665,8 @@ function guidedLearningRecord(): DashboardBankRecord {
   current.bank.sourceMaterials = [{
     id: "source-primary",
     role: "primary",
+    classification: "unclassified",
+    classificationState: "migration-default",
     vaultPath: current.bank.source.vaultPath,
     wikilink: current.bank.source.wikilink,
     title: current.bank.source.title,
@@ -788,7 +791,7 @@ function guidedLearningRecord(): DashboardBankRecord {
       aspects: [{ id: "aspect-supported", title: "Supported mechanism" }],
     }],
   };
-  current.bank.sessions = [learningSession];
+  current.bank.sessions = [{ ...learningSession, schemaVersion: 4 }];
   return current;
 }
 
@@ -822,6 +825,77 @@ test("dashboard reports transparent guided-path evidence, support, gaps, and rec
   assert.equal(summary.learning.recoveryRatePercent, 100);
 });
 
+test("dashboard summarizes course alignment without changing performance", () => {
+  const checked = guidedLearningRecord();
+  const primary = checked.bank.sourceMaterials[0];
+  assert.ok(primary !== undefined);
+  primary.classification = "personal-note";
+  primary.classificationState = "confirmed";
+  primary.segmentIds = ["segment-1"];
+  checked.bank.sourceMaterials.push({
+    id: "school-source",
+    role: "supporting",
+    classification: "instructor-material",
+    classificationState: "confirmed",
+    vaultPath: "School/Instructor.md",
+    wikilink: "[[School/Instructor]]",
+    title: "Instructor material",
+    sourceHash: `sha256:${"b".repeat(64)}`,
+    scope: { kind: "note" },
+    segmentIds: ["segment-2"],
+    visualIds: [],
+  });
+  checked.bank.sourceAlignment = createSourceAlignmentLedger({
+    sourceMaterials: checked.bank.sourceMaterials,
+    segments: checked.bank.segments,
+    draft: {
+      schemaVersion: 1,
+      records: [
+        {
+          id: "aligned-claim",
+          status: "aligned",
+          noteSegmentIds: ["segment-1"],
+          schoolSegmentIds: ["segment-2"],
+          noteClaim: "The sources agree.",
+          schoolClaim: "The sources agree.",
+          courseSupportedClaim: "The sources agree.",
+          resolution: "not-required",
+        },
+        {
+          id: "different-claim",
+          status: "conflict",
+          noteSegmentIds: ["segment-1"],
+          schoolSegmentIds: ["segment-2"],
+          noteClaim: "The personal note differs.",
+          schoolClaim: "Use the instructor statement.",
+          courseSupportedClaim: "Use the instructor statement.",
+          resolution: "course-authority",
+        },
+      ],
+    },
+    provenance: {
+      provider: "codex",
+      providerVersion: "test",
+      model: "test-model",
+      reasoningEffort: "high",
+      promptVersion: "source-alignment-v1",
+      generatedAt: "2026-08-25T08:05:00.000Z",
+    },
+  });
+
+  const summary = aggregatePracticeDashboard([checked], { kind: "all" });
+  assert.deepEqual(summary.alignment, {
+    courseCheckedBankCount: 1,
+    notCourseCheckedBankCount: 0,
+    alignedRecordCount: 1,
+    noteDifferenceRecordCount: 1,
+    noteIncompleteRecordCount: 0,
+    schoolDisagreementRecordCount: 0,
+    unresolvedRecordCount: 0,
+  });
+  assert.equal(summary.performance.percent, 0);
+});
+
 test("migrated General practice banks keep rendering without guided-path analytics", () => {
   const summary = aggregatePracticeDashboard([
     record({ bankId: "legacy-general", sourcePath: "Notes/Legacy.md" }),
@@ -829,6 +903,7 @@ test("migrated General practice banks keep rendering without guided-path analyti
   assert.equal(summary.bankCount, 1);
   assert.equal(summary.banks[0]?.problemCount, 1);
   assert.equal(summary.banks[0]?.learningPath, null);
+  assert.equal(summary.alignment.notCourseCheckedBankCount, 1);
   assert.deepEqual(summary.learning, {
     pathBankCount: 0,
     supportedAspectCount: 0,

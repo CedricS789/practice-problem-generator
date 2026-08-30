@@ -2,6 +2,7 @@ import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   LEGACY_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
+  PRACTICE_BANK_V3_SCHEMA_VERSION,
   PRACTICE_BLOCK_LANGUAGE,
   type AiReviewSessionItemResultV2,
   type FailedAiReviewStateV2,
@@ -10,6 +11,7 @@ import {
   type PracticeBankV1,
   type PracticeBankV2,
   type PracticeBankV3,
+  type PracticeBankV4,
   type ReviewedAiReviewStateV2,
   type SessionSummaryV2,
 } from "./model";
@@ -19,9 +21,11 @@ import {
   validatePracticeBankV1,
   validatePracticeBankV2,
   validatePracticeBankV3,
+  validatePracticeBankV4,
 } from "./schema";
 import {
   migratePracticeBankV2ToV3,
+  migratePracticeBankV3ToV4,
   migrateSessionSummaryV2ToV3,
   type PdfSourceScopeMigrationV1,
 } from "./learning-path";
@@ -290,7 +294,7 @@ function yamlString(value: string): string {
 }
 
 function formatValidationErrors(bank: unknown): string {
-  const validation = validatePracticeBankV3(bank);
+  const validation = validatePracticeBankV4(bank);
   if (validation.ok) return "";
   return validation.issues
     .map((issue) => `${issue.path}: ${issue.message}`)
@@ -298,7 +302,7 @@ function formatValidationErrors(bank: unknown): string {
 }
 
 export function serializePracticeBank(
-  bank: PracticeBankV1 | PracticeBankV2 | PracticeBankV3,
+  bank: PracticeBankV1 | PracticeBankV2 | PracticeBankV3 | PracticeBankV4,
   generationRecipe?: GenerationRecipeV2,
   generationHistory?: GenerationHistoryV1,
   sourceImport?: SourceImportV1,
@@ -316,7 +320,10 @@ export function serializePracticeBank(
     sourceImport !== undefined
     && (
       sourceImport.sourceHash !== (
-        bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+        (
+          bank.schemaVersion === PRACTICE_BANK_V3_SCHEMA_VERSION
+          || bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+        )
           ? (bank as PracticeBankV3).sourceMaterials.find((material) =>
               material.role === "primary"
             )?.sourceHash
@@ -331,13 +338,17 @@ export function serializePracticeBank(
     ? migratePracticeBankV1ToV2(bank)
     : bank;
   const persisted = v2.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
-    ? structuredClone(v2)
-    : migratePracticeBankV2ToV3(v2, sourceImport);
+    && "sourceAlignment" in v2
+    ? structuredClone(v2) as PracticeBankV4
+    : v2.schemaVersion === PRACTICE_BANK_V3_SCHEMA_VERSION
+      || (v2.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION && "sourceMaterials" in v2)
+      ? migratePracticeBankV3ToV4(v2 as PracticeBankV3)
+      : migratePracticeBankV2ToV3(v2, sourceImport);
   const errors = formatValidationErrors(persisted);
   if (errors.length > 0) {
     throw new Error(`Cannot serialize an invalid Practice Problem Generator bank: ${errors}`);
   }
-  const currentBank = persisted as PracticeBankV3;
+  const currentBank = persisted;
   const fallbackSetId = currentBank.practiceSets.some((set) => set.id === "set-general")
     ? "set-general"
     : [...currentBank.practiceSets].sort((left, right) => left.order - right.order)[0]?.id;
@@ -391,9 +402,6 @@ export function serializePracticeBank(
     "---",
     "",
     `# ${title} - Practice`,
-    "",
-    "> [!info] Practice Problem Generator bank",
-    "> Open this note in Reading view to study. The JSON block below is the portable source of truth; edits made through Practice Problem Generator are preserved across desktop and mobile.",
     "",
     ...(hiddenMetadata === undefined ? [] : [hiddenMetadata, ""]),
     `\`\`\`${PRACTICE_BLOCK_LANGUAGE}`,
@@ -461,6 +469,7 @@ export function parsePracticeBankMarkdown(
   const version = (parsed as Record<string, unknown>).schemaVersion;
   if (
     version !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    && version !== PRACTICE_BANK_V3_SCHEMA_VERSION
     && version !== PRACTICE_BANK_SCHEMA_VERSION
     && version !== LEGACY_PRACTICE_BANK_SCHEMA_VERSION
   ) {
@@ -483,7 +492,9 @@ export function parsePracticeBankMarkdown(
     ? validatePracticeBankV1(parsed)
     : version === PRACTICE_BANK_SCHEMA_VERSION
       ? validatePracticeBankV2(parsed)
-      : validatePracticeBankV3(parsed);
+      : version === PRACTICE_BANK_V3_SCHEMA_VERSION
+        ? validatePracticeBankV3(parsed)
+        : validatePracticeBankV4(parsed);
   if (!validation.ok) {
     return {
       status: "invalid",
@@ -499,7 +510,10 @@ export function parsePracticeBankMarkdown(
     ? migratePracticeBankV1ToV2(validated as PracticeBankV1)
     : validated as PracticeBankV2;
   let pdfScope: SourceImportV1 | undefined;
-  if (version !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION && /\.pdf$/iu.test(v2.source.vaultPath)) {
+  if (
+    (version === LEGACY_PRACTICE_BANK_SCHEMA_VERSION || version === PRACTICE_BANK_SCHEMA_VERSION)
+    && /\.pdf$/iu.test(v2.source.vaultPath)
+  ) {
     const sourceImport = parseSourceImportMarkdown(markdown);
     if (sourceImport.status !== "ok") {
       return {
@@ -514,9 +528,11 @@ export function parsePracticeBankMarkdown(
     pdfScope = sourceImport.sourceImport;
   }
   const bank = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
-    ? validated as PracticeBankV3
-    : migratePracticeBankV2ToV3(v2, pdfScope);
-  const migratedValidation = validatePracticeBankV3(bank);
+    ? validated as PracticeBankV4
+    : version === PRACTICE_BANK_V3_SCHEMA_VERSION
+      ? migratePracticeBankV3ToV4(validated as PracticeBankV3)
+      : migratePracticeBankV2ToV3(v2, pdfScope);
+  const migratedValidation = validatePracticeBankV4(bank);
   if (!migratedValidation.ok) {
     return {
       status: "invalid",
@@ -527,7 +543,7 @@ export function parsePracticeBankMarkdown(
   }
   const warnings: string[] = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
     ? []
-    : [`Stored schema version ${version} was migrated in memory; the next authorized write will save version 3.`];
+    : [`Stored schema version ${version} was migrated in memory; the next authorized write will save version 4.`];
   const frontmatterVersion = frontmatterValue(markdown, "practice-lab-version");
   if (
     frontmatterVersion !== undefined &&
@@ -560,8 +576,16 @@ export function migratePracticeBankV1ToV2(bank: PracticeBankV1): PracticeBankV2 
 export function migratePracticeBankV1ToV3(
   bank: PracticeBankV1,
   pdf?: PdfSourceScopeMigrationV1,
-): PracticeBankV3 {
+): PracticeBankV4 {
   return migratePracticeBankV2ToV3(migratePracticeBankV1ToV2(bank), pdf);
+}
+
+/** Canonical v4 migration name; V1ToV3 remains as a compatible public alias. */
+export function migratePracticeBankV1ToV4(
+  bank: PracticeBankV1,
+  pdf?: PdfSourceScopeMigrationV1,
+): PracticeBankV4 {
+  return migratePracticeBankV1ToV3(bank, pdf);
 }
 
 export interface StaleSourceState {

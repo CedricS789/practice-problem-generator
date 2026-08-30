@@ -23,19 +23,19 @@ test("saved banks route flat regeneration and learning-path management separatel
     "private renderReadOnlyBlock(",
   );
   assert.match(block, /text: "Regenerate \/ tweak"/u);
-  assert.match(block, /regenerateBank\(context\.sourcePath, bank\)/u);
+  assert.match(block, /regenerateBank\(bankPath, bank\)/u);
   assert.match(
     block,
-    /if \(!Platform\.isMobileApp && bank\.learningPath === null\)/u,
+    /if \(Platform\.isMobileApp\)[\s\S]*?else if \(bank\.learningPath === null\)/u,
   );
   assert.match(
     block,
-    /else if \(!Platform\.isMobileApp && bank\.learningPath !== null\)/u,
+    /else \{[\s\S]*?text: "Manage path"/u,
   );
   assert.match(block, /text: "Manage path"/u);
   assert.match(
     block,
-    /openSavedLearningPathManager\(context\.sourcePath, bank\)/u,
+    /openSavedLearningPathManager\(bankPath, bank\)/u,
   );
 });
 
@@ -76,7 +76,7 @@ test("whole-note regeneration uses current note content while selections stay bo
   );
   assert.match(
     sourceModule,
-    /collectSourceFromFile\(app, file, "note"\)/u,
+    /collectSourceFromFile\(\s*app,\s*file,\s*"note",\s*undefined,\s*classificationRules,\s*\)/u,
   );
   assert.match(
     sourceModule,

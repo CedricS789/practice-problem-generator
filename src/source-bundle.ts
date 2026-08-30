@@ -1,9 +1,10 @@
-import type { SourceMaterialScopeV1, SourceMaterialV1 } from "./model";
+import type { SourceMaterialScopeV1, SourceMaterialV2 } from "./model";
 import {
   pdfSourceBudgetProblem,
   type PdfSourceBudgetLimitsV1,
 } from "./pdf-source-budget";
 import { createSourceHash, sha256Hex } from "./segmenter";
+import { sourceClassificationSelection } from "./source-classification";
 import type { CollectedSource } from "./source";
 import type { SourcePresentation } from "./ui/contracts";
 
@@ -14,7 +15,7 @@ export interface ApprovedSourceBundleV1 {
   readonly supporting: readonly CollectedSource[];
   /** A provider-ready source whose segment and visual IDs are globally unique. */
   readonly combined: CollectedSource;
-  readonly materials: readonly SourceMaterialV1[];
+  readonly materials: readonly SourceMaterialV2[];
   readonly bundleHash: string;
 }
 
@@ -61,6 +62,8 @@ export function createApprovedSourceBundle(
   const bundleHash = createSourceHash(JSON.stringify(materials.map((material) => ({
     id: material.id,
     role: material.role,
+    classification: material.classification,
+    classificationState: material.classificationState,
     vaultPath: material.vaultPath,
     sourceHash: material.sourceHash,
     scope: material.scope,
@@ -213,11 +216,13 @@ export function namespaceCollectedSource(
 function sourceMaterialRecord(
   source: CollectedSource,
   id: string,
-  role: SourceMaterialV1["role"],
-): SourceMaterialV1 {
+  role: SourceMaterialV2["role"],
+): SourceMaterialV2 {
+  const classification = sourceClassificationSelection(source);
   return {
     id,
     role,
+    ...classification,
     vaultPath: source.path,
     wikilink: sourceWikilink(source.path),
     title: source.title,

@@ -268,7 +268,10 @@ test("review disclosure covers provider transmission and durable Practice Markdo
   assert.match(viewSource, /ANSWER_REVIEW_PAYLOAD_DISCLOSURE/u);
   assert.match(ANSWER_REVIEW_PAYLOAD_DISCLOSURE, /review request ID; exercise title, type, and prompt/u);
   assert.match(ANSWER_REVIEW_PAYLOAD_DISCLOSURE, /key-point rubric with generated criterion IDs/u);
-  assert.match(ANSWER_REVIEW_PAYLOAD_DISCLOSURE, /cited source segment IDs, heading labels, and text/u);
+  assert.match(
+    ANSWER_REVIEW_PAYLOAD_DISCLOSURE,
+    /cited source segment IDs, source classifications, heading labels, and text/u,
+  );
   assert.match(viewSource, /stored in the Practice Markdown/u);
   assert.match(viewSource, /resume after a restart and remain visible in history/u);
 });
@@ -300,7 +303,7 @@ test("persisted history exposes stable retry identity and exact-ID pause hooks",
   assert.match(bankStatisticsSource, /retryAnswerReview\?:/u);
   assert.match(bankStatisticsSource, /pauseAnswerReview\?: \(requestId: string\)/u);
   assert.match(bankStatisticsSource, /bankId: bank\.bankId/u);
-  assert.match(bankStatisticsSource, /sessionId: session\.id/u);
+  assert.match(bankStatisticsSource, /sessionId,/u);
   assert.match(bankStatisticsSource, /requestId: review\.request\.requestId/u);
   assert.match(bankStatisticsSource, /requestHash: review\.request\.requestHash/u);
   assert.match(bankStatisticsSource, /Pause review/u);

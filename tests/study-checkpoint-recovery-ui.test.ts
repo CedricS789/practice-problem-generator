@@ -48,9 +48,9 @@ test("saved-bank actions explain whether they resume or resolve a checkpoint", (
     "private async renderPracticeBlock",
     "private renderReadOnlyBlock",
   );
-  assert.match(bank, /Saved practice ready at question/u);
+  assert.match(bank, /Resume where you stopped/u);
   assert.match(bank, /Another saved session must be resolved/u);
-  assert.match(bank, /"Resume saved practice"/u);
+  assert.match(bank, /"Resume session"/u);
   assert.match(bank, /"Resolve saved session…"/u);
   assert.match(bank, /role: "status"/u);
 });

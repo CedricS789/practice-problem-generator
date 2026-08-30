@@ -2,6 +2,7 @@ import type { ExerciseV1 } from "./model";
 
 export type InterfaceDensity = "comfortable" | "compact";
 export type VisualSelectionDefault = "manual" | "all-local";
+export type SavedBankOpenMode = "reading" | "preserve";
 export type StudyOrderDefault =
   | "bank"
   | "shuffle"
@@ -54,6 +55,7 @@ export interface PracticeViewPreferences {
 }
 
 export interface BankStatisticsPreferences {
+  expandStatisticsPanel: boolean;
   showBankMetadata: boolean;
   showGenerationHistory: boolean;
   showOverallScore: boolean;
@@ -129,6 +131,7 @@ export const DEFAULT_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     celebrateCompletion: true,
   },
   bank: {
+    expandStatisticsPanel: false,
     showBankMetadata: true,
     showGenerationHistory: true,
     showOverallScore: true,
@@ -240,6 +243,7 @@ const MINIMAL_DISPLAY_PREFERENCES: PracticeLabDisplayPreferences = {
     celebrateCompletion: false,
   },
   bank: {
+    expandStatisticsPanel: false,
     showBankMetadata: false,
     showGenerationHistory: false,
     showOverallScore: true,
@@ -345,6 +349,10 @@ export function normalizeDisplayPreferences(
       celebrateCompletion: booleanValue(practice.celebrateCompletion, defaults.practice.celebrateCompletion),
     },
     bank: {
+      expandStatisticsPanel: booleanValue(
+        bank.expandStatisticsPanel,
+        defaults.bank.expandStatisticsPanel,
+      ),
       showBankMetadata: booleanValue(bank.showBankMetadata, defaults.bank.showBankMetadata),
       showGenerationHistory: booleanValue(bank.showGenerationHistory, defaults.bank.showGenerationHistory),
       showOverallScore: booleanValue(bank.showOverallScore, defaults.bank.showOverallScore),

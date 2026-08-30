@@ -50,7 +50,8 @@ const foundational: GenerationConfiguration = {
   difficulty: "foundational",
   exerciseTypes: ["short-answer"],
   exerciseTypePercentages: balanceExerciseTypes(["short-answer"]),
-  selectedVisualIds: []
+  selectedVisualIds: [],
+  aiContextCompletionPolicy: "selected-sources-only",
 };
 
 test("generation prompt treats note content as untrusted and exposes exact segment IDs", () => {
@@ -68,10 +69,47 @@ test("generation prompt treats note content as untrusted and exposes exact segme
   assert.match(prompt, /Do not reveal reasoning or planning notes/);
   assert.match(prompt, /short-answer: Ask for a concise reconstruction/);
   assert.match(prompt, /short-answer: 100% => exactly 1 exercise/);
+  assert.match(prompt, /Context-completion policy: selected-sources-only/u);
+  assert.match(prompt, /Do not add general technical knowledge/u);
+  assert.match(prompt, /topical anchors/u);
   assert.match(prompt, /Use LaTeX for every learner-visible mathematical/u);
   assert.match(prompt, /\$\.\.\.\$ for inline math and \$\$\.\.\.\$\$/u);
   assert.match(prompt, /JSON-escape LaTeX backslashes correctly/u);
   assert.doesNotMatch(prompt, /C:\\|private-vault/);
+});
+
+test("generation adds general context only after the approved policy is present", () => {
+  const selectedOnly = buildGenerationPrompt(source, foundational, []);
+  const approved = buildGenerationPrompt(source, {
+    ...foundational,
+    aiContextCompletionPolicy: "approved-general-context",
+  }, []);
+  assert.doesNotMatch(selectedOnly, /learner explicitly approved the minimum general technical knowledge/iu);
+  assert.match(approved, /learner explicitly approved the minimum general technical knowledge/iu);
+  assert.match(approved, /explicit synthetic problem givens/iu);
+  assert.match(approved, /not course-checked/iu);
+});
+
+test("generation omits raw Notability locator JSON while retaining substantive source text", () => {
+  const submittedText = [
+    "# Topic",
+    "",
+    "The depletion region supports drift transport.",
+    "",
+    "```notability-region",
+    "{\"title\":\"private-lecture.pdf\",\"page\":13,\"rect\":{\"x\":0.1}}",
+    "```",
+  ].join("\n");
+  const locatorSource = {
+    ...source,
+    characterCount: submittedText.length,
+    excerpt: submittedText,
+    submittedText,
+    ...prepareSource(submittedText),
+  } satisfies CollectedSource;
+  const prompt = buildGenerationPrompt(locatorSource, foundational, []);
+  assert.match(prompt, /depletion region supports drift transport/u);
+  assert.doesNotMatch(prompt, /notability-region|private-lecture\.pdf|"page":13/iu);
 });
 
 test("generation prompt applies the selected difficulty to reasoning and item labels", () => {
@@ -182,7 +220,7 @@ test("generation prompt includes trusted user focus without weakening source gro
   assert.ok(prompt.includes(JSON.stringify(focusInstructions)));
   assert.match(
     prompt,
-    /cannot override the submitted-source boundary, exact exercise distribution, output schema, grounding requirements, or visual rules/u,
+    /cannot expand beyond the submitted topics, override confirmed course authority/u,
   );
   assert.match(prompt, /the generation contract wins/u);
 });

@@ -19,7 +19,7 @@ import {
   validatePracticeSetReplacement,
   type PracticeSetDraftV1,
 } from "./learning-path-generation";
-import type { PracticeBankV3, PracticeSetV1, VisualSourceV1 } from "./model";
+import type { PracticeBankV4, PracticeSetV1, VisualSourceV1 } from "./model";
 import { parsePracticeBankMarkdown } from "./persistence";
 import {
   createGenerationRecipe,
@@ -31,11 +31,16 @@ import {
   type GenerationRecipeCatalogV1,
 } from "./regeneration";
 import {
+  appendSavedSetSourceAlignment,
   createSavedSetPayloadContext,
+  savedSetSourceAlignmentLinks,
   type SavedSetPayloadContextV1,
 } from "./saved-set-generation";
+import { sourceAlignmentLedgerHash } from "./source-alignment";
 import { parseSourceImportMarkdown } from "./source-import";
 import { validatePracticeBank } from "./schema";
+import { effectiveAiContextCompletionPolicy } from "./ai-context-completion";
+import type { GenerationTelemetryV1 } from "./generation-telemetry";
 import type {
   EditableDraftExercise,
   GenerationConfiguration,
@@ -46,7 +51,7 @@ import { applyDraftEdits, presentExercises } from "./ui/presenters";
 
 export interface SavedSetGenerationRequestV1 {
   readonly bankPath: string;
-  readonly bank: PracticeBankV3;
+  readonly bank: PracticeBankV4;
   readonly targetSet: PracticeSetV1;
   readonly targetAspectIds?: readonly string[];
   readonly configuration: GenerationConfiguration;
@@ -78,6 +83,7 @@ interface PendingSavedSetV1 {
   draft?: PracticeSetDraftV1;
   jobId?: string;
   attempts?: 1 | 2;
+  telemetry?: GenerationTelemetryV1;
 }
 
 export interface SavedSetControllerOptions {
@@ -96,7 +102,7 @@ export class SavedSetGenerationController {
 
   public async defaults(
     bankPath: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     setId: string,
     fallback: GenerationConfiguration,
   ): Promise<GenerationConfiguration> {
@@ -213,6 +219,8 @@ export class SavedSetGenerationController {
     pending.draft = crossSet.value;
     pending.jobId = jobId;
     pending.attempts = result.attempts;
+    if (result.telemetry === undefined) delete pending.telemetry;
+    else pending.telemetry = result.telemetry;
     const visualUrls = new Map(pending.visuals.map((visual) => [
       visual.source.id,
       this.options.app.vault.adapter.getResourcePath(visual.source.vaultPath),
@@ -235,7 +243,7 @@ export class SavedSetGenerationController {
   public async save(
     request: SavedSetGenerationRequestV1,
     review: SavedSetReviewV1,
-  ): Promise<{ readonly path: string; readonly bank: PracticeBankV3 }> {
+  ): Promise<{ readonly path: string; readonly bank: PracticeBankV4 }> {
     const pending = this.requirePending(request);
     const original = pending.draft;
     if (original === undefined || pending.jobId === undefined || pending.attempts === undefined) {
@@ -269,6 +277,17 @@ export class SavedSetGenerationController {
       throw new Error(crossSet.errors?.join("; ") ?? "The reviewed set conflicts with a sibling set.");
     }
     const { markdown, bank } = await this.currentBank(request.bankPath, request.bank);
+    const approvedAlignment = pending.context.payload.sourceAlignment;
+    if (approvedAlignment === undefined) {
+      throw new Error("The approved saved-set payload omitted its course-alignment ledger. Preview it again before saving.");
+    }
+    if (sourceAlignmentLedgerHash(approvedAlignment) !== sourceAlignmentLedgerHash(bank.sourceAlignment)) {
+      throw new Error("The source-alignment decisions changed after payload approval. Preview the set again before saving.");
+    }
+    const sourceAlignmentLinks = savedSetSourceAlignmentLinks(
+      approvedAlignment,
+      crossSet.value,
+    );
     const provider = this.provider(request.configuration.provider);
     const catalog = setGenerationRecipeForSet(
       generationCatalog(markdown, bank),
@@ -294,6 +313,10 @@ export class SavedSetGenerationController {
       exerciseTypePercentages: { ...request.configuration.exerciseTypePercentages },
       selectedVisualCount: request.configuration.selectedVisualIds.length,
       attempts: pending.attempts,
+      ...(pending.telemetry === undefined ? {} : { telemetry: pending.telemetry }),
+      aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+        request.configuration.aiContextCompletionPolicy,
+      ),
       batchId: pending.context.payload.batchId,
       blueprintId: pending.context.payload.blueprintId,
       setId: request.targetSet.id,
@@ -306,7 +329,7 @@ export class SavedSetGenerationController {
       generationHistory: history,
       ...(sourceImport.status === "ok" ? { sourceImport: sourceImport.sourceImport } : {}),
     };
-    let saved: PracticeBankV3;
+    let saved: PracticeBankV4;
     if (request.addingSet) {
       const path = bank.learningPath;
       if (path === null) throw new Error("The live workspace no longer contains a learning path.");
@@ -315,13 +338,17 @@ export class SavedSetGenerationController {
         order: bank.practiceSets.length,
         assignments: crossSet.value.assignments.map((assignment) => structuredClone(assignment)),
       };
-      const next: PracticeBankV3 = {
+      const next: PracticeBankV4 = {
         ...structuredClone(bank),
         revision: bank.revision + 1,
         updatedAt: new Date().toISOString(),
         exercises: [...bank.exercises.map((exercise) => structuredClone(exercise)), ...crossSet.value.exercises],
         practiceSets: [...bank.practiceSets.map((entry) => structuredClone(entry)), set],
         tutorLessons: [...bank.tutorLessons.map((lesson) => structuredClone(lesson)), ...crossSet.value.tutorLessons],
+        sourceAlignment: appendSavedSetSourceAlignment(
+          bank.sourceAlignment,
+          crossSet.value,
+        ),
         learningPath: {
           ...structuredClone(path),
           aspectIds: [...new Set([...path.aspectIds, ...set.assignments.flatMap((assignment) => assignment.aspectIds)])],
@@ -336,6 +363,9 @@ export class SavedSetGenerationController {
           promptVersion: LEARNING_PATH_PROMPT_VERSION,
           reasoningEffort: request.configuration.reasoningEffort,
         },
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          request.configuration.aiContextCompletionPolicy,
+        ),
       };
       const validation = validatePracticeBank(next);
       if (!validation.ok) {
@@ -360,6 +390,7 @@ export class SavedSetGenerationController {
           },
           exercises: crossSet.value.exercises,
           tutorLessons: crossSet.value.tutorLessons,
+          sourceAlignmentLinks,
         },
         ...sidecars,
       });
@@ -388,8 +419,8 @@ export class SavedSetGenerationController {
 
   private async currentBank(
     bankPath: string,
-    expected: PracticeBankV3,
-  ): Promise<{ readonly markdown: string; readonly bank: PracticeBankV3 }> {
+    expected: PracticeBankV4,
+  ): Promise<{ readonly markdown: string; readonly bank: PracticeBankV4 }> {
     const file = this.options.app.vault.getAbstractFileByPath(bankPath);
     if (!(file instanceof TFile)) throw new Error("The saved learning workspace no longer exists.");
     const markdown = await this.options.app.vault.cachedRead(file);
@@ -406,7 +437,7 @@ export class SavedSetGenerationController {
   }
 }
 
-function generationCatalog(markdown: string, bank: PracticeBankV3): GenerationRecipeCatalogV1 {
+function generationCatalog(markdown: string, bank: PracticeBankV4): GenerationRecipeCatalogV1 {
   const parsed = parseGenerationRecipeCatalogMarkdown(markdown);
   if (parsed.status === "invalid") throw new Error(parsed.message);
   if (parsed.status === "ok") return parsed.catalog;

@@ -1,9 +1,11 @@
 import { exerciseLatexMarkupProblems, latexMarkupProblem } from "./latex";
 import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  PRACTICE_BANK_V3_SCHEMA_VERSION,
   type LearningAspectV1,
   type PracticeBankV2,
   type PracticeBankV3,
+  type PracticeBankV4,
   type ExerciseV1,
   type PracticeSetV1,
   type CompletedTutorLessonSnapshotV3,
@@ -12,9 +14,12 @@ import {
   type SessionSummaryV2,
   type SessionSummaryV3,
   type SourceMaterialScopeV1,
+  type SourceAlignmentTargetLinkV1,
   type TutorLessonV1,
   type ValidationIssue,
 } from "./model";
+import { emptySourceAlignmentLedger } from "./source-alignment";
+import { tutorTeachingBlocksAreOrdered } from "./tutor-teaching-blocks";
 
 export const GENERAL_SOURCE_MATERIAL_ID = "source-primary" as const;
 export const GENERAL_ASPECT_ID = "aspect-general" as const;
@@ -54,7 +59,10 @@ export function defaultSessionLearningMetadataV3(
   bank: PracticeBankV2,
   exerciseIds: readonly string[],
 ): SessionLearningMetadataV3 {
-  const v3 = bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  const v3 = (
+    bank.schemaVersion === PRACTICE_BANK_V3_SCHEMA_VERSION
+    || bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  )
     ? bank as PracticeBankV3
     : undefined;
   const fallbackSet = { id: GENERAL_PRACTICE_SET_ID, title: "General practice" };
@@ -144,10 +152,15 @@ export function migrateSessionSummaryV2ToV3(
 export function migratePracticeBankV2ToV3(
   bank: PracticeBankV2,
   pdf?: PdfSourceScopeMigrationV1,
-): PracticeBankV3 {
-  if (bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
-    return structuredClone(bank) as PracticeBankV3;
-  }
+): PracticeBankV4 {
+  if (
+    bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    && "sourceAlignment" in bank
+  ) return structuredClone(bank) as PracticeBankV4;
+  if (
+    bank.schemaVersion === PRACTICE_BANK_V3_SCHEMA_VERSION
+    && "sourceMaterials" in bank
+  ) return migratePracticeBankV3ToV4(bank as PracticeBankV3);
   const segmentIds = bank.segments.map((segment) => segment.id);
   const generalAspect: LearningAspectV1 = {
     id: GENERAL_ASPECT_ID,
@@ -157,9 +170,9 @@ export function migratePracticeBankV2ToV3(
     sourceSegmentIds: segmentIds,
     status: "supported",
   };
-  return {
+  const v3: PracticeBankV3 = {
     ...structuredClone(bank),
-    schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+    schemaVersion: PRACTICE_BANK_V3_SCHEMA_VERSION,
     sessions: bank.sessions.map((session) => migrateSessionSummaryV2ToV3(bank, session)),
     sourceMaterials: [{
       id: GENERAL_SOURCE_MATERIAL_ID,
@@ -188,15 +201,56 @@ export function migratePracticeBankV2ToV3(
     tutorLessons: [],
     learningPath: null,
   };
+  return migratePracticeBankV3ToV4(v3);
+}
+
+/** Canonical name for new callers; the V2ToV3 export remains for compatibility. */
+export function migratePracticeBankV2ToV4(
+  bank: PracticeBankV2,
+  pdf?: PdfSourceScopeMigrationV1,
+): PracticeBankV4 {
+  return migratePracticeBankV2ToV3(bank, pdf);
+}
+
+/** Adds course-alignment metadata without inferring authority for historical sources. */
+export function migratePracticeBankV3ToV4(bank: PracticeBankV3): PracticeBankV4 {
+  if (
+    bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    && "sourceAlignment" in bank
+  ) return structuredClone(bank) as PracticeBankV4;
+  return {
+    ...structuredClone(bank),
+    schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+    sessions: bank.sessions.map((session) => ({
+      ...structuredClone(session),
+      schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+    })),
+    sourceMaterials: bank.sourceMaterials.map((material) => ({
+      ...structuredClone(material),
+      classification: "unclassified",
+      classificationState: "migration-default",
+    })),
+    sourceAlignment: emptySourceAlignmentLedger(),
+  };
 }
 
 export interface PracticeSetContentReplacementV1 {
   readonly set: PracticeSetV1;
   readonly exercises: readonly ExerciseV1[];
   readonly tutorLessons: readonly TutorLessonV1[];
+  readonly sourceAlignmentLinks?: {
+    readonly exerciseLinks: readonly SourceAlignmentTargetLinkV1[];
+    readonly tutorLessonLinks: readonly SourceAlignmentTargetLinkV1[];
+  };
 }
 
 /** Replaces only one live set. Historical session snapshots are never rewritten. */
+export function replacePracticeSetContent(
+  bank: PracticeBankV4,
+  setId: string,
+  replacement: PracticeSetContentReplacementV1,
+  updatedAt: string,
+): PracticeBankV4;
 export function replacePracticeSetContent(
   bank: PracticeBankV3,
   setId: string,
@@ -296,6 +350,28 @@ export function replacePracticeSetContent(
           .map((step, order) => ({ ...step, order })),
       };
 
+  const sourceAlignment = "sourceAlignment" in bank
+    ? {
+        ...(bank as PracticeBankV4).sourceAlignment,
+        exerciseLinks: [
+          ...(bank as PracticeBankV4).sourceAlignment.exerciseLinks.filter((link) =>
+            !previousExerciseIds.has(link.targetId)
+          ),
+          ...(replacement.sourceAlignmentLinks?.exerciseLinks.map((link) =>
+            structuredClone(link)
+          ) ?? []),
+        ],
+        tutorLessonLinks: [
+          ...(bank as PracticeBankV4).sourceAlignment.tutorLessonLinks.filter((link) =>
+            !priorLessonIds.has(link.targetId)
+          ),
+          ...(replacement.sourceAlignmentLinks?.tutorLessonLinks.map((link) =>
+            structuredClone(link)
+          ) ?? []),
+        ],
+      }
+    : undefined;
+
   return {
     ...structuredClone(bank),
     revision: bank.revision + 1,
@@ -307,6 +383,7 @@ export function replacePracticeSetContent(
     tutorLessons,
     learningPath,
     sessions: bank.sessions.map((session) => structuredClone(session)),
+    ...(sourceAlignment === undefined ? {} : { sourceAlignment }),
   };
 }
 
@@ -551,15 +628,7 @@ export function learningPathBankIssues(bank: PracticeBankV3): ValidationIssue[] 
     if (!blockKinds.has("why") || !blockKinds.has("prerequisite") || !blockKinds.has("explanation")) {
       issue(issues, "tutor", `${path}/teachingBlocks`, "a tutor lesson requires why, prerequisite, and connected explanation blocks");
     }
-    const blockRank: Record<TutorLessonV1["teachingBlocks"][number]["kind"], number> = {
-      why: 0,
-      prerequisite: 1,
-      explanation: 2,
-      "worked-example": 3,
-      "causal-walkthrough": 3,
-    };
-    const ranks = lesson.teachingBlocks.map((block) => blockRank[block.kind]);
-    if (ranks.some((rank, index) => index > 0 && rank < (ranks[index - 1] ?? rank))) {
+    if (!tutorTeachingBlocksAreOrdered(lesson.teachingBlocks)) {
       issue(
         issues,
         "tutor",

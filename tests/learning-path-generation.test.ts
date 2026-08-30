@@ -30,6 +30,7 @@ const planningInput: LearningBlueprintPlanningInputV1 = {
   startingLevel: "new-to-topic",
   desiredSetCount: 2,
   globalFocusInstructions: "Build the causal story before transfer.",
+  aiContextCompletionPolicy: "selected-sources-only",
   sources: [
     {
       id: "primary",
@@ -165,6 +166,7 @@ function configuration(quantity = 2): GenerationConfiguration {
     exerciseTypes: ["short-answer"],
     exerciseTypePercentages: balanceExerciseTypes(["short-answer"]),
     selectedVisualIds: [],
+    aiContextCompletionPolicy: "selected-sources-only",
   };
 }
 
@@ -342,8 +344,35 @@ test("blueprint prompt carries the exact approved multi-source payload without v
   assert.match(prompt, /deep-exam \(Deep exam practice\)/u);
   assert.match(prompt, /challenge \(Challenge\)/u);
   assert.match(prompt, /source-gap/u);
+  assert.match(prompt, /selected material is the topical backbone/iu);
+  assert.match(prompt, /general technical knowledge/iu);
+  assert.match(prompt, /not course-checked/iu);
   assert.match(prompt, /not flashcards, spaced repetition/u);
   assert.doesNotMatch(prompt, /C:\\|OneDrive|School Vault/u);
+});
+
+test("guided provider payloads omit structural Notability locator metadata", () => {
+  const structuralInput: LearningBlueprintPlanningInputV1 = {
+    ...planningInput,
+    sources: planningInput.sources.map((source, index) => index === 0
+      ? {
+          ...source,
+          segments: [
+            ...source.segments,
+            {
+              id: "seg-locator",
+              kind: "paragraph" as const,
+              ordinal: 1,
+              headingPath: ["Captured page"],
+              text: "```notability-region\n{\"title\":\"private.pdf\",\"page\":13}\n```",
+            },
+          ],
+        }
+      : source),
+  };
+  const prompt = buildLearningBlueprintPrompt(structuralInput);
+  assert.match(prompt, /seg-foundation/u);
+  assert.doesNotMatch(prompt, /seg-locator|notability-region|private\.pdf/iu);
 });
 
 test("blueprint validator accepts disclosed inactive gaps and rejects forward, gap, and LaTeX misuse", () => {
@@ -393,6 +422,61 @@ test("blueprint validator accepts disclosed inactive gaps and rejects forward, g
   assert.match(duplicateResult.errors?.join(" ") ?? "", /sourceSegmentIds.*unique/iu);
 });
 
+test("blueprint validation owns every supported aspect and locks prerequisite progression", () => {
+  const unowned: LearningBlueprintDraftV1 = {
+    ...blueprint,
+    aspects: [
+      ...blueprint.aspects,
+      {
+        id: "aspect-unowned",
+        title: "Unowned supported detail",
+        purpose: "Remain visibly owned by a path step.",
+        status: "supported",
+        prerequisiteAspectIds: [],
+        sourceSegmentIds: ["seg-foundation"],
+      },
+    ],
+  };
+  const unownedResult = validateLearningBlueprintDraft(unowned, planningInput);
+  assert.equal(unownedResult.valid, false);
+  assert.match(unownedResult.errors?.join(" ") ?? "", /aspect-unowned.*not owned/iu);
+
+  const forwardPath: LearningBlueprintDraftV1 = {
+    ...blueprint,
+    sets: blueprint.sets.map((set) => ({
+      ...set,
+      order: set.order === 0 ? 1 : 0,
+    })),
+  };
+  const forwardPathResult = validateLearningBlueprintDraft(forwardPath, planningInput);
+  assert.equal(forwardPathResult.valid, false);
+  assert.match(
+    forwardPathResult.errors?.join(" ") ?? "",
+    /prerequisite aspect aspect-foundation must be introduced before dependent aspect aspect-application/iu,
+  );
+
+  const sharedLesson: LearningBlueprintDraftV1 = {
+    ...blueprint,
+    tutorLessonBriefs: [{
+      id: "lesson-shared",
+      title: "Connected foundation and application",
+      objective: "Introduce the premise and consequence together.",
+      aspectIds: ["aspect-foundation", "aspect-application"],
+      prerequisiteAspectIds: [],
+      sourceSegmentIds: ["seg-foundation", "support:seg-application"],
+    }],
+    sets: [{
+      ...blueprint.sets[0]!,
+      aspectIds: ["aspect-foundation", "aspect-application"],
+      tutorLessonBriefIds: ["lesson-shared"],
+    }, {
+      ...blueprint.sets[1]!,
+      tutorLessonBriefIds: [],
+    }],
+  };
+  assert.equal(validateLearningBlueprintDraft(sharedLesson, planningInput).valid, true);
+});
+
 test("supporting segment and visual IDs must be namespaced", () => {
   const unsafe: LearningBlueprintPlanningInputV1 = {
     ...planningInput,
@@ -428,7 +512,33 @@ test("per-set payloads are exact, sequentially ordered, and contain global sibli
   assert.match(prompt, /Difficulty profile: deep-exam/u);
   assert.match(prompt, /medium and hard items/u);
   assert.match(prompt, /Do not manufacture difficulty by withholding necessary evidence/u);
+  assert.match(prompt, /Context-completion policy: selected-sources-only/iu);
+  assert.match(prompt, /Do not introduce synthetic scenario values/iu);
   assert.doesNotMatch(prompt, /C:\\|OneDrive|School Vault/u);
+
+  const approvedPlanning = {
+    ...planningInput,
+    aiContextCompletionPolicy: "approved-general-context" as const,
+  };
+  const approvedPayload = createPracticeSetPayloads({
+    batchId: "batch-approved",
+    planningInput: approvedPlanning,
+    blueprint,
+    setConfigurations: blueprint.sets.map((set) => ({
+      setId: set.id,
+      configuration: {
+        ...configuration(),
+        aiContextCompletionPolicy: "approved-general-context" as const,
+      },
+    })),
+  })[1]!;
+  const approvedPrompt = buildPracticeSetPrompt(approvedPayload);
+  assert.match(approvedPrompt, /Context-completion policy: approved-general-context/iu);
+  assert.match(approvedPrompt, /explicit synthetic scenario values/iu);
+  assert.notEqual(
+    practiceSetPayloadHash(generatedPayloads[1]!),
+    practiceSetPayloadHash(approvedPayload),
+  );
 });
 
 test("payload creation enforces per-set and whole-path exercise limits", () => {
@@ -552,6 +662,46 @@ test("workspace-bound set validation rejects relationships that would fail only 
   assert.equal(tutorResult.valid, false);
   assert.match(tutorResult.errors?.join(" ") ?? "", /non-overlapping/iu);
   assert.match(tutorResult.errors?.join(" ") ?? "", /evidence owned/iu);
+
+  const unorderedTutor = structuredClone(draftFor(payload));
+  unorderedTutor.tutorLessons[0]!.teachingBlocks = [
+    unorderedTutor.tutorLessons[0]!.teachingBlocks[1]!,
+    unorderedTutor.tutorLessons[0]!.teachingBlocks[0]!,
+    unorderedTutor.tutorLessons[0]!.teachingBlocks[2]!,
+  ];
+  assert.equal(validatePracticeSetDraft(unorderedTutor, payload).valid, true);
+  const unorderedResult = validatePracticeSetDraftForWorkspace(unorderedTutor, payload);
+  assert.equal(unorderedResult.valid, false);
+  assert.match(unorderedResult.errors?.join(" ") ?? "", /teaching blocks must follow/iu);
+
+  const driftedLesson = structuredClone(draftFor(payload));
+  driftedLesson.tutorLessons[0]!.prerequisiteAspectIds = ["aspect-application"];
+  const driftedResult = validatePracticeSetDraftForWorkspace(driftedLesson, payload);
+  assert.equal(driftedResult.valid, false);
+  assert.match(
+    driftedResult.errors?.join(" ") ?? "",
+    /generated lesson prerequisites must match the approved lesson brief/iu,
+  );
+
+  const expandedBlueprint: LearningBlueprintDraftV1 = {
+    ...blueprint,
+    sets: blueprint.sets.map((set, index) => index === 0
+      ? { ...set, aspectIds: ["aspect-foundation", "aspect-application"] }
+      : set),
+  };
+  const expandedPayload = createPracticeSetPayloads({
+    batchId: "batch-expanded",
+    planningInput,
+    blueprint: expandedBlueprint,
+    setConfigurations: expandedBlueprint.sets.map((set) => ({
+      setId: set.id,
+      configuration: configuration(),
+    })),
+  })[0]!;
+  const omittedAspect = draftFor(expandedPayload);
+  const omittedResult = validatePracticeSetDraftForWorkspace(omittedAspect, expandedPayload);
+  assert.equal(omittedResult.valid, false);
+  assert.match(omittedResult.errors?.join(" ") ?? "", /aspect-application.*not taught or practised/iu);
 });
 
 test("whole-batch validation rejects duplicate exercises across otherwise valid sets", () => {
@@ -567,4 +717,13 @@ test("whole-batch validation rejects duplicate exercises across otherwise valid 
   const result = validatePracticeSetBatch({ payloads: generatedPayloads, drafts: duplicated });
   assert.equal(result.valid, false);
   assert.match(result.errors?.join(" ") ?? "", /duplicated across/iu);
+
+  const duplicatedTutor = structuredClone(drafts);
+  duplicatedTutor[1]!.tutorLessons[0]!.id = duplicatedTutor[0]!.tutorLessons[0]!.id;
+  const tutorResult = validatePracticeSetBatch({
+    payloads: generatedPayloads,
+    drafts: duplicatedTutor,
+  });
+  assert.equal(tutorResult.valid, false);
+  assert.match(tutorResult.errors?.join(" ") ?? "", /Tutor lesson ID.*duplicated across/iu);
 });

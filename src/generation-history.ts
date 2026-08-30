@@ -1,6 +1,12 @@
 import { exerciseTypeDistributionProblem } from "./exercise-distribution";
 import { modelIdProblem } from "./model-selection";
 import { parseHiddenPracticeMetadata } from "./hidden-practice-metadata";
+import type { AiContextCompletionPolicyV1 } from "./model";
+import { isAiContextCompletionPolicy } from "./ai-context-completion";
+import {
+  generationTelemetryProblem,
+  type GenerationTelemetryV1,
+} from "./generation-telemetry";
 import {
   EXERCISE_TYPES,
   type Difficulty,
@@ -35,6 +41,10 @@ export interface GenerationHistoryEntryV2 {
   readonly exerciseTypePercentages: ExerciseTypePercentages;
   readonly selectedVisualCount: number;
   readonly attempts: 1 | 2;
+  /** Missing on pre-policy history and interpreted as legacy approved context. */
+  readonly aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
+  /** Safe provider usage/timing metadata. Missing on older generations. */
+  readonly telemetry?: GenerationTelemetryV1;
   /** Present together for a generation owned by one learning-path set. */
   readonly batchId?: string;
   readonly blueprintId?: string;
@@ -224,7 +234,8 @@ function generationHistoryEntryProblem(
     "model", "reasoningEffort", "promptVersion", "sourceHash", "sourceScope",
     "requestedQuantity", "draftExerciseCount", "savedExerciseCount",
     "difficulty", "focusInstructions", "exerciseTypePercentages",
-    "selectedVisualCount", "attempts", "batchId", "blueprintId", "setId",
+    "selectedVisualCount", "attempts", "aiContextCompletionPolicy", "telemetry",
+    "batchId", "blueprintId", "setId",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     return "the entry contains an unknown field.";
@@ -269,6 +280,19 @@ function generationHistoryEntryProblem(
   }
   if (!integerInRange(value.selectedVisualCount, 0, 1_000)) return "the visual count is invalid.";
   if (value.attempts !== 1 && value.attempts !== 2) return "the attempt count is invalid.";
+  if (
+    value.aiContextCompletionPolicy !== undefined
+    && !isAiContextCompletionPolicy(value.aiContextCompletionPolicy)
+  ) {
+    return "the context-completion policy is invalid.";
+  }
+  if (value.telemetry !== undefined) {
+    const telemetryProblem = generationTelemetryProblem(value.telemetry);
+    if (telemetryProblem !== null) return telemetryProblem;
+    if ((value.telemetry as GenerationTelemetryV1).attempts !== value.attempts) {
+      return "generation telemetry attempts do not match the provider attempt count.";
+    }
+  }
   const pathIds = [value.batchId, value.blueprintId, value.setId];
   const presentPathIds = pathIds.filter((item) => item !== undefined);
   if (!allowPathOwnership && presentPathIds.length > 0) {
@@ -305,9 +329,12 @@ function cloneHistory(history: unknown): GenerationHistoryV2 {
       const entry = raw as GenerationHistoryEntryV2;
       return {
         ...entry,
-      exerciseTypePercentages: Object.fromEntries(
-        EXERCISE_TYPES.map((type) => [type, entry.exerciseTypePercentages[type]]),
-      ) as Record<ExerciseType, number>,
+        exerciseTypePercentages: Object.fromEntries(
+          EXERCISE_TYPES.map((type) => [type, entry.exerciseTypePercentages[type]]),
+        ) as Record<ExerciseType, number>,
+        ...(entry.telemetry === undefined
+          ? {}
+          : { telemetry: structuredClone(entry.telemetry) }),
       };
     }),
   };

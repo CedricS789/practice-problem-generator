@@ -39,6 +39,7 @@ function entry(
     ]),
     selectedVisualCount: 2,
     attempts: 2,
+    aiContextCompletionPolicy: "selected-sources-only",
   };
 }
 
@@ -59,6 +60,36 @@ test("generation history round-trips as a strict quoted frontmatter sidecar", ()
     history,
   });
   assert.match(markdown, /practice-lab-generation-history: "\{/u);
+});
+
+test("generation history preserves timing, token, and reported-cost provenance", () => {
+  const history = appendGenerationHistory(
+    emptyGenerationHistory(),
+    {
+      ...entry("generation-telemetry", "2026-08-21T10:05:00.000Z"),
+      telemetry: {
+        schemaVersion: 1,
+        durationMs: 125_000,
+        attempts: 2,
+        tokenUsage: {
+          inputTokens: 12_000,
+          outputTokens: 3_500,
+          cachedInputTokens: 2_000,
+          reasoningTokens: 900,
+          source: "provider-reported",
+          inputEstimateExcludesMedia: false,
+        },
+        reportedCostUsd: 0.123,
+      },
+    },
+    0,
+  );
+  const markdown = `---\n${serializeGenerationHistoryFrontmatter(history)}\n---\n`;
+  const parsed = parseGenerationHistoryMarkdown(markdown);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status === "ok") {
+    assert.deepEqual(parsed.history.entries[0]?.telemetry, history.entries[0]?.telemetry);
+  }
 });
 
 test("session revisions resolve to the newest generation at or before their start", () => {
@@ -151,9 +182,11 @@ test("learning-path generation history stores exact set ownership at one atomic 
 });
 
 test("legacy generation history migrates in memory and partial path provenance fails closed", () => {
+  const current = entry("generation-legacy", "2026-08-21T09:00:00.000Z");
+  const { aiContextCompletionPolicy: _legacyPolicy, ...legacyEntry } = current;
   const legacy = {
     schemaVersion: 1,
-    entries: [{ ...entry("generation-legacy", "2026-08-21T09:00:00.000Z"), bankRevision: 0 }],
+    entries: [{ ...legacyEntry, bankRevision: 0 }],
   };
   const markdown = [
     "---",
@@ -163,7 +196,10 @@ test("legacy generation history migrates in memory and partial path provenance f
   ].join("\n");
   const parsed = parseGenerationHistoryMarkdown(markdown);
   assert.equal(parsed.status, "ok");
-  if (parsed.status === "ok") assert.equal(parsed.history.schemaVersion, 2);
+  if (parsed.status === "ok") {
+    assert.equal(parsed.history.schemaVersion, 2);
+    assert.equal(parsed.history.entries[0]?.aiContextCompletionPolicy, undefined);
+  }
 
   assert.throws(
     () => appendGenerationHistory(

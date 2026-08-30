@@ -46,6 +46,7 @@ const configuration: GenerationConfiguration = {
   exerciseTypes: ["short-answer"],
   exerciseTypePercentages: percentages,
   selectedVisualIds: [],
+  aiContextCompletionPolicy: "selected-sources-only",
 };
 const jobId = "generation-00000000-0000-4000-8000-000000000002";
 
@@ -64,6 +65,17 @@ test("generation recovery context round-trips the exact approved source and conf
   );
   assert.equal(context.source.submittedText, text);
   assert.equal(context.configuration.model, "gpt-5.6-sol");
+  assert.equal(context.configuration.aiContextCompletionPolicy, "selected-sources-only");
+
+  const legacy = structuredClone(context) as unknown as {
+    configuration: Record<string, unknown>;
+  };
+  delete legacy.configuration.aiContextCompletionPolicy;
+  assert.equal(
+    parseGenerationRecoveryContext(JSON.stringify(legacy)).configuration
+      .aiContextCompletionPolicy,
+    "approved-general-context",
+  );
 });
 
 test("generation recovery rejects mismatched visuals and unsafe vault paths", () => {
@@ -130,6 +142,17 @@ test("validated recovery drafts retain the original generation job and attempts"
     jobId,
     attempts: 2,
     draft,
+    telemetry: {
+      schemaVersion: 1,
+      durationMs: 9_000,
+      attempts: 2,
+      tokenUsage: {
+        inputTokens: 500,
+        outputTokens: 120,
+        source: "local-estimate",
+        inputEstimateExcludesMedia: true,
+      },
+    },
   });
   assert.deepEqual(
     parseGenerationRecoveryDraft(JSON.stringify(checkpoint)),
@@ -141,5 +164,12 @@ test("validated recovery drafts retain the original generation job and attempts"
       jobId: "other-job",
     })),
     /job ID/iu,
+  );
+  assert.throws(
+    () => parseGenerationRecoveryDraft(JSON.stringify({
+      ...checkpoint,
+      telemetry: { ...checkpoint.telemetry, attempts: 1 },
+    })),
+    /attempt count changed/iu,
   );
 });

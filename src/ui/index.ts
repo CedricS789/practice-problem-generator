@@ -10,4 +10,5 @@ export * from "./presenters";
 export * from "./review-state";
 export * from "./session-outcomes";
 export * from "./source-material-picker-modal";
+export * from "./theme-bridge";
 export * from "./visual-selection";

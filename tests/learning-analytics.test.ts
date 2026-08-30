@@ -6,17 +6,18 @@ import {
   recommendNextLearningStep,
 } from "../src/learning-analytics";
 import type {
-  PracticeBankV3,
-  SessionSummaryV3,
+  PracticeBankV4,
+  SessionSummaryV4,
 } from "../src/model";
+import { emptySourceAlignmentLedger } from "../src/source-alignment";
 
 function session(
   id: string,
   finishedAt: string,
   results: Array<{ readonly exerciseId: string; readonly correct: boolean }>,
-): SessionSummaryV3 {
+): SessionSummaryV4 {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id,
     startedAt: finishedAt,
     finishedAt,
@@ -41,9 +42,9 @@ function session(
   };
 }
 
-function bank(sessions: SessionSummaryV3[]): PracticeBankV3 {
+function bank(sessions: SessionSummaryV4[]): PracticeBankV4 {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     bankId: "bank-a",
     revision: 0,
     createdAt: "2026-08-20T00:00:00.000Z",
@@ -53,7 +54,8 @@ function bank(sessions: SessionSummaryV3[]): PracticeBankV3 {
     visuals: [],
     exercises: [],
     sessions,
-    sourceMaterials: [{ id: "source-a", role: "primary", vaultPath: "Notes/A.md", wikilink: "[[Notes/A]]", title: "A", sourceHash: "sha256:a", scope: { kind: "note" }, segmentIds: ["seg-a"], visualIds: [] }],
+    sourceMaterials: [{ id: "source-a", role: "primary", classification: "unclassified", classificationState: "migration-default", vaultPath: "Notes/A.md", wikilink: "[[Notes/A]]", title: "A", sourceHash: "sha256:a", scope: { kind: "note" }, segmentIds: ["seg-a"], visualIds: [] }],
+    sourceAlignment: emptySourceAlignmentLedger(),
     aspects: [{ id: "aspect-a", title: "Aspect A", purpose: "Learn A", prerequisiteAspectIds: [], sourceSegmentIds: ["seg-a"], status: "supported" }],
     practiceSets: [{ id: "set-a", title: "Set A", purpose: "Practice A", instructionalRole: "foundations", order: 0, assignments: [] }],
     tutorLessons: [],

@@ -1,4 +1,8 @@
-import type { ExerciseV1, SourceSegmentV1 } from "../model";
+import type {
+  ExerciseAlignmentSnapshotV1,
+  ExerciseV1,
+  SourceSegmentV1,
+} from "../model";
 import type {
   ChoicePresentation,
   DraftExercisePresentation,
@@ -20,6 +24,7 @@ function choices(
 function answerReviewContext(
   exercise: ExerciseV1,
   sourceSegments: readonly SourceSegmentV1[],
+  alignment?: ExerciseAlignmentSnapshotV1,
 ) {
   const keyPoints =
     exercise.type === "short-answer" ||
@@ -28,15 +33,32 @@ function answerReviewContext(
       ? [...exercise.keyPoints]
       : [];
   const citedIds = new Set(exercise.sourceSegmentIds);
+  const citations = new Map(
+    (alignment?.records ?? []).flatMap((record) =>
+      [...record.noteEvidence, ...record.schoolEvidence].map((citation) => [
+        citation.segmentId,
+        citation,
+      ] as const)
+    ),
+  );
   return {
     keyPoints,
     sourceSegments: sourceSegments
       .filter((segment) => citedIds.has(segment.id))
-      .map((segment) => ({
-        id: segment.id,
-        headingPath: [...segment.headingPath],
-        text: segment.text,
-      })),
+      .map((segment) => {
+        const citation = citations.get(segment.id);
+        return {
+          id: segment.id,
+          headingPath: [...segment.headingPath],
+          text: segment.text,
+          ...(citation === undefined
+            ? {}
+            : {
+                classification: citation.classification,
+                sourceTitle: citation.title,
+              }),
+        };
+      }),
   } as const;
 }
 
@@ -45,6 +67,7 @@ export function presentExercise(
   exercise: ExerciseV1,
   resolveVisualUrl: VisualUrlResolver = () => undefined,
   sourceSegments: readonly SourceSegmentV1[] = [],
+  alignment?: ExerciseAlignmentSnapshotV1,
 ): DraftExercisePresentation {
   const base = {
     id: exercise.id,
@@ -53,7 +76,8 @@ export function presentExercise(
     prompt: exercise.prompt,
     groundedAnswer: exercise.groundedAnswer,
     sourceSegmentIds: exercise.sourceSegmentIds,
-    answerReviewContext: answerReviewContext(exercise, sourceSegments),
+    answerReviewContext: answerReviewContext(exercise, sourceSegments, alignment),
+    ...(alignment === undefined ? {} : { alignment: structuredClone(alignment) }),
   } as const;
 
   switch (exercise.type) {
@@ -172,9 +196,18 @@ export function presentExercises(
   exercises: readonly ExerciseV1[],
   resolveVisualUrl: VisualUrlResolver = () => undefined,
   sourceSegments: readonly SourceSegmentV1[] = [],
+  alignments: readonly ExerciseAlignmentSnapshotV1[] = [],
 ): readonly DraftExercisePresentation[] {
+  const alignmentByExerciseId = new Map(
+    alignments.map((alignment) => [alignment.exerciseId, alignment]),
+  );
   return exercises.map((exercise) =>
-    presentExercise(exercise, resolveVisualUrl, sourceSegments),
+    presentExercise(
+      exercise,
+      resolveVisualUrl,
+      sourceSegments,
+      alignmentByExerciseId.get(exercise.id),
+    ),
   );
 }
 

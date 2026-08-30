@@ -1,7 +1,7 @@
 import type {
   ExerciseV1,
   LearningPathStartingLevelV1,
-  PracticeBankV3,
+  PracticeBankV4,
 } from "./model";
 import {
   deriveLearningAnalytics,
@@ -21,7 +21,7 @@ import {
 
 export interface DashboardBankRecord {
   readonly bankPath: string;
-  readonly bank: PracticeBankV3;
+  readonly bank: PracticeBankV4;
   readonly sourceTags: readonly string[];
   readonly sourceExists: boolean;
 }
@@ -166,6 +166,16 @@ export interface DashboardLearningOverview {
   readonly recoveryRatePercent: number | null;
 }
 
+export interface DashboardAlignmentHealth {
+  readonly courseCheckedBankCount: number;
+  readonly notCourseCheckedBankCount: number;
+  readonly alignedRecordCount: number;
+  readonly noteDifferenceRecordCount: number;
+  readonly noteIncompleteRecordCount: number;
+  readonly schoolDisagreementRecordCount: number;
+  readonly unresolvedRecordCount: number;
+}
+
 /**
  * A concrete member of a bank-ID collision group. The paths are normalized
  * vault paths so callers can identify and open every conflicting file
@@ -215,6 +225,7 @@ export interface PracticeDashboardSummary {
   readonly recentSessions: readonly DashboardRecentSession[];
   readonly banks: readonly DashboardBankSummary[];
   readonly learning: DashboardLearningOverview;
+  readonly alignment: DashboardAlignmentHealth;
 }
 
 const EXERCISE_TYPE_ORDER = [
@@ -426,7 +437,7 @@ interface GuidedAttemptSummary {
   readonly unresolvedCount: number;
 }
 
-function guidedAttemptSummary(bank: PracticeBankV3): GuidedAttemptSummary {
+function guidedAttemptSummary(bank: PracticeBankV4): GuidedAttemptSummary {
   let guidedAttempts = 0;
   let assistedGuidedAttemptCount = 0;
   let hintsRevealed = 0;
@@ -493,7 +504,7 @@ function learningEvidenceRow(
   };
 }
 
-function learningPathSummary(bank: PracticeBankV3): DashboardLearningPathSummary | null {
+function learningPathSummary(bank: PracticeBankV4): DashboardLearningPathSummary | null {
   const path = bank.learningPath;
   if (path === null) return null;
   const analytics = deriveLearningAnalytics(bank);
@@ -710,6 +721,41 @@ function aggregateBank(record: DashboardBankRecord): BankAggregation {
   };
 }
 
+function aggregateAlignmentHealth(
+  records: readonly DashboardBankRecord[],
+): DashboardAlignmentHealth {
+  const ledgers = records.map((record) => record.bank.sourceAlignment);
+  const courseCheckedBankCount = ledgers.filter((ledger) => (
+    ledger.provenance !== null
+    && ledger.records.some((record) => record.status !== "notes-only-unverified")
+  )).length;
+  const alignmentRecords = ledgers.flatMap((ledger) => ledger.records);
+  return {
+    courseCheckedBankCount,
+    notCourseCheckedBankCount: records.length - courseCheckedBankCount,
+    alignedRecordCount: alignmentRecords.filter((record) => (
+      record.status === "aligned" || record.status === "school-only"
+    )).length,
+    noteDifferenceRecordCount: alignmentRecords.filter(
+      (record) => record.status === "conflict",
+    ).length,
+    noteIncompleteRecordCount: alignmentRecords.filter(
+      (record) => record.status === "notes-incomplete",
+    ).length,
+    schoolDisagreementRecordCount: alignmentRecords.filter(
+      (record) => record.status === "school-sources-disagree",
+    ).length,
+    unresolvedRecordCount: alignmentRecords.filter(
+      (record) => (
+        record.resolution === "unresolved"
+        && record.status !== "notes-only-unverified"
+        && record.status !== "insufficient-evidence"
+        && record.status !== "school-sources-disagree"
+      ),
+    ).length,
+  };
+}
+
 function compareRecentSessions(
   left: DashboardRecentSession,
   right: DashboardRecentSession,
@@ -863,5 +909,6 @@ export function aggregatePracticeDashboard(
       .sort(compareRecentSessions),
     banks,
     learning: aggregateLearningOverview(banks),
+    alignment: aggregateAlignmentHealth(selectedRecords),
   };
 }

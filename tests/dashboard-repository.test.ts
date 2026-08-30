@@ -154,7 +154,7 @@ test("malformed and unsupported banks cannot suppress valid dashboard records", 
   const unsupported = file(
     "Notes/Term/Course/Practice/Future - Practice.md",
     serializePracticeBank(bank("bank-future", source.path)).replace(
-      '"schemaVersion": 3',
+      '"schemaVersion": 4',
       '"schemaVersion": 99',
     ),
   );

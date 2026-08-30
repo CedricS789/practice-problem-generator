@@ -147,7 +147,7 @@ test("answer-review payload is source-bounded, path-free, and injection resistan
     submittedAnswer: /submitted answer/u,
     groundedAnswer: /grounded answer/u,
     criteria: /key-point rubric with generated criterion IDs/u,
-    segments: /source segment IDs, heading labels, and text/u,
+    segments: /source segment IDs, source classifications, heading labels, and text/u,
   };
   for (const key of Object.keys(parsed)) {
     const check = disclosureChecks[key];

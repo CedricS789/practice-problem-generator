@@ -5,6 +5,9 @@ import {
   GENERATION_DRAFT_SCHEMA_VERSION,
   LEGACY_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
+  PRACTICE_BANK_V3_SCHEMA_VERSION,
+  SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION,
+  SOURCE_ALIGNMENT_SCHEMA_VERSION,
   type AiReviewRequestV2,
   type AiReviewSessionItemResultV2,
   type ExerciseV1,
@@ -12,6 +15,8 @@ import {
   type PracticeBankV1,
   type PracticeBankV2,
   type PracticeBankV3,
+  type PracticeBankV4,
+  type SourceAlignmentDraftV1,
   type SessionSummaryV1,
   type SessionSummaryV2,
   type ValidationIssue,
@@ -19,6 +24,7 @@ import {
   type VisualSourceV1,
 } from "./model";
 import { learningPathBankIssues } from "./learning-path";
+import { sourceAlignmentIssues } from "./source-alignment";
 import { sha256Hex } from "./segmenter";
 
 type JsonSchema = Record<string, unknown>;
@@ -515,7 +521,7 @@ const completedTutorLessonSnapshotSchema = objectSchema(
 );
 
 function sessionSchema(version: number): JsonSchema {
-  const learningProperties = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  const learningProperties = version >= PRACTICE_BANK_V3_SCHEMA_VERSION
     ? {
         scope: sessionLearningScopeSchema,
         evidence: { type: "array", items: sessionExerciseEvidenceSchema },
@@ -525,7 +531,7 @@ function sessionSchema(version: number): JsonSchema {
         },
       }
     : {};
-  const learningRequired = version === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  const learningRequired = version >= PRACTICE_BANK_V3_SCHEMA_VERSION
     ? ["scope", "evidence", "completedTutorLessons"]
     : [];
   return objectSchema(
@@ -590,6 +596,12 @@ const currentDefinitions: Record<string, JsonSchema> = {
 const v3Definitions: Record<string, JsonSchema> = {
   ...sharedDefinitions,
   sessionResult: currentSessionResultSchema,
+  session: sessionSchema(PRACTICE_BANK_V3_SCHEMA_VERSION),
+};
+
+const v4Definitions: Record<string, JsonSchema> = {
+  ...sharedDefinitions,
+  sessionResult: currentSessionResultSchema,
   session: sessionSchema(CURRENT_PRACTICE_BANK_SCHEMA_VERSION),
 };
 
@@ -651,6 +663,174 @@ const sourceMaterialSchema = objectSchema(
     "visualIds",
   ],
 );
+
+const sourceMaterialV2Schema = objectSchema(
+  {
+    id: ID_STRING,
+    role: { enum: ["primary", "supporting"] },
+    vaultPath: NON_EMPTY_STRING,
+    wikilink: NON_EMPTY_STRING,
+    title: NON_EMPTY_STRING,
+    sourceHash: SHA256_STRING,
+    scope: sourceMaterialScopeSchema,
+    segmentIds: { type: "array", minItems: 1, items: ID_STRING },
+    visualIds: { type: "array", items: ID_STRING },
+    classification: {
+      enum: [
+        "personal-note",
+        "official-correction",
+        "instructor-material",
+        "assigned-reference",
+        "unclassified",
+      ],
+    },
+    classificationState: { enum: ["confirmed", "suggested", "migration-default"] },
+  },
+  [
+    "id",
+    "role",
+    "vaultPath",
+    "wikilink",
+    "title",
+    "sourceHash",
+    "scope",
+    "segmentIds",
+    "visualIds",
+    "classification",
+    "classificationState",
+  ],
+);
+
+const nullableNonEmptyString: JsonSchema = {
+  anyOf: [{ type: "null" }, NON_EMPTY_STRING],
+};
+
+const sourceAlignmentDraftRecordSchema = objectSchema(
+  {
+    id: ID_STRING,
+    status: {
+      enum: [
+        "aligned",
+        "notes-incomplete",
+        "conflict",
+        "school-only",
+        "notes-only-unverified",
+        "school-sources-disagree",
+        "insufficient-evidence",
+      ],
+    },
+    noteSegmentIds: { type: "array", items: ID_STRING },
+    schoolSegmentIds: { type: "array", items: ID_STRING },
+    noteClaim: nullableNonEmptyString,
+    schoolClaim: nullableNonEmptyString,
+    courseSupportedClaim: nullableNonEmptyString,
+    resolution: {
+      enum: [
+        "course-authority",
+        "manual-override",
+        "excluded",
+        "unresolved",
+        "not-required",
+      ],
+    },
+  },
+  [
+    "id",
+    "status",
+    "noteSegmentIds",
+    "schoolSegmentIds",
+    "noteClaim",
+    "schoolClaim",
+    "courseSupportedClaim",
+    "resolution",
+  ],
+);
+
+const sourceAlignmentRecordSchema = objectSchema(
+  {
+    ...(sourceAlignmentDraftRecordSchema.properties as Record<string, JsonSchema>),
+    sourceHashes: {
+      type: "array",
+      minItems: 1,
+      items: objectSchema(
+        {
+          sourceMaterialId: ID_STRING,
+          sourceHash: SHA256_STRING,
+          classification: {
+            enum: [
+              "personal-note",
+              "official-correction",
+              "instructor-material",
+              "assigned-reference",
+              "unclassified",
+            ],
+          },
+          classificationState: { enum: ["confirmed", "suggested", "migration-default"] },
+        },
+        ["sourceMaterialId", "sourceHash", "classification", "classificationState"],
+      ),
+    },
+  },
+  [
+    ...(sourceAlignmentDraftRecordSchema.required as string[]),
+    "sourceHashes",
+  ],
+);
+
+const sourceAlignmentTargetLinkSchema = objectSchema(
+  {
+    targetId: ID_STRING,
+    alignmentRecordIds: { type: "array", minItems: 1, items: ID_STRING },
+  },
+  ["targetId", "alignmentRecordIds"],
+);
+
+const sourceAlignmentProvenanceSchema = objectSchema(
+  {
+    provider: { enum: ["codex", "claude", "agy"] },
+    providerVersion: NON_EMPTY_STRING,
+    model: NON_EMPTY_STRING,
+    reasoningEffort: {
+      enum: ["low", "medium", "high", "xhigh", "max", "ultra", "ultracode"],
+    },
+    promptVersion: NON_EMPTY_STRING,
+    generatedAt: NON_EMPTY_STRING,
+    sourceBundleHash: SHA256_STRING,
+  },
+  [
+    "provider",
+    "providerVersion",
+    "model",
+    "reasoningEffort",
+    "promptVersion",
+    "generatedAt",
+    "sourceBundleHash",
+  ],
+);
+
+const sourceAlignmentLedgerSchema = objectSchema(
+  {
+    schemaVersion: { const: SOURCE_ALIGNMENT_SCHEMA_VERSION },
+    records: { type: "array", items: sourceAlignmentRecordSchema },
+    exerciseLinks: { type: "array", items: sourceAlignmentTargetLinkSchema },
+    tutorLessonLinks: { type: "array", items: sourceAlignmentTargetLinkSchema },
+    provenance: { anyOf: [{ type: "null" }, sourceAlignmentProvenanceSchema] },
+  },
+  ["schemaVersion", "records", "exerciseLinks", "tutorLessonLinks", "provenance"],
+);
+
+/** Provider-neutral schema for the comparison pass before local hash locking. */
+export const sourceAlignmentDraftV1JsonSchema: JsonSchema = {
+  $schema: "http://json-schema.org/draft-07/schema#",
+  $id: "https://practice-lab.local/schema/source-alignment-draft-v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "records"],
+  properties: {
+    schemaVersion: { type: "integer", const: SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION },
+    records: { type: "array", items: sourceAlignmentDraftRecordSchema },
+  },
+};
 
 const learningAspectSchema = objectSchema(
   {
@@ -886,7 +1066,7 @@ export const practiceBankV2JsonSchema: JsonSchema = practiceBankSchema(
 );
 
 export const practiceBankV3JsonSchema: JsonSchema = practiceBankSchema(
-  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  PRACTICE_BANK_V3_SCHEMA_VERSION,
   "https://practice-lab.local/schema/practice-bank-v3.json",
   v3Definitions,
   {
@@ -909,15 +1089,54 @@ export const practiceBankV3JsonSchema: JsonSchema = practiceBankSchema(
   ["sourceMaterials", "aspects", "practiceSets", "tutorLessons", "learningPath"],
 );
 
+export const practiceBankV4JsonSchema: JsonSchema = practiceBankSchema(
+  CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  "https://practice-lab.local/schema/practice-bank-v4.json",
+  v4Definitions,
+  {
+    sourceMaterials: {
+      type: "array",
+      minItems: 1,
+      maxItems: 5,
+      items: sourceMaterialV2Schema,
+    },
+    aspects: { type: "array", minItems: 1, items: learningAspectSchema },
+    practiceSets: {
+      type: "array",
+      minItems: 1,
+      maxItems: 6,
+      items: practiceSetSchema,
+    },
+    tutorLessons: { type: "array", items: tutorLessonSchema },
+    learningPath: { anyOf: [{ type: "null" }, learningPathSchema] },
+    sourceAlignment: sourceAlignmentLedgerSchema,
+    aiContextCompletionPolicy: {
+      enum: ["selected-sources-only", "approved-general-context"],
+    },
+  },
+  [
+    "sourceMaterials",
+    "aspects",
+    "practiceSets",
+    "tutorLessons",
+    "learningPath",
+    "sourceAlignment",
+  ],
+);
+
 const ajv = new Ajv({ allErrors: true, strict: true });
 const validateDraftSchema: ValidateFunction<GenerationDraftV1> =
   ajv.compile<GenerationDraftV1>(generationDraftV1JsonSchema);
+const validateAlignmentDraftSchema: ValidateFunction<SourceAlignmentDraftV1> =
+  ajv.compile<SourceAlignmentDraftV1>(sourceAlignmentDraftV1JsonSchema);
 const validateLegacyBankSchema: ValidateFunction<PracticeBankV1> =
   ajv.compile<PracticeBankV1>(practiceBankV1JsonSchema);
 const validateBankSchema: ValidateFunction<PracticeBankV2> =
   ajv.compile<PracticeBankV2>(practiceBankV2JsonSchema);
 const validateBankV3Schema: ValidateFunction<PracticeBankV3> =
   ajv.compile<PracticeBankV3>(practiceBankV3JsonSchema);
+const validateBankV4Schema: ValidateFunction<PracticeBankV4> =
+  ajv.compile<PracticeBankV4>(practiceBankV4JsonSchema);
 
 export interface GenerationValidationContext {
   segmentIds: Iterable<string>;
@@ -1387,6 +1606,15 @@ export function validateGenerationDraft(
     : { ok: false, issues };
 }
 
+export function validateSourceAlignmentDraft(
+  value: unknown,
+): ValidationResult<SourceAlignmentDraftV1> {
+  if (!validateAlignmentDraftSchema(value)) {
+    return { ok: false, issues: schemaIssues(validateAlignmentDraftSchema.errors) };
+  }
+  return { ok: true, value, issues: [] };
+}
+
 function validateVisual(
   visual: VisualSourceV1,
   index: number,
@@ -1653,7 +1881,7 @@ function validateSession(
   }
 }
 
-function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2 | PracticeBankV3>(
+function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2 | PracticeBankV3 | PracticeBankV4>(
   value: T,
 ): ValidationResult<T> {
   const issues: ValidationIssue[] = [];
@@ -1747,8 +1975,14 @@ function validateBankSemantics<T extends PracticeBankV1 | PracticeBankV2 | Pract
       });
     }
   }
-  if (value.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+  if (
+    value.schemaVersion === PRACTICE_BANK_V3_SCHEMA_VERSION
+    || value.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  ) {
     issues.push(...learningPathBankIssues(value as PracticeBankV3));
+  }
+  if (value.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
+    issues.push(...sourceAlignmentIssues(value as PracticeBankV4));
   }
   const created = Date.parse(value.createdAt);
   const updated = Date.parse(value.updatedAt);
@@ -1788,6 +2022,17 @@ export function validatePracticeBank(
     && (value as { schemaVersion?: unknown }).schemaVersion
       === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
   ) {
+    const validation = validatePracticeBankV4(value);
+    return validation.ok
+      ? { ok: true, value: validation.value, issues: [] }
+      : validation;
+  }
+  if (
+    typeof value === "object"
+    && value !== null
+    && (value as { schemaVersion?: unknown }).schemaVersion
+      === PRACTICE_BANK_V3_SCHEMA_VERSION
+  ) {
     const validation = validatePracticeBankV3(value);
     return validation.ok
       ? { ok: true, value: validation.value, issues: [] }
@@ -1807,8 +2052,28 @@ export function validatePracticeBankV2(
 export function validatePracticeBankV3(
   value: unknown,
 ): ValidationResult<PracticeBankV3> {
+  if (
+    typeof value === "object"
+    && value !== null
+    && (value as { schemaVersion?: unknown }).schemaVersion
+      === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+  ) {
+    const validation = validatePracticeBankV4(value);
+    return validation.ok
+      ? { ok: true, value: validation.value, issues: [] }
+      : validation;
+  }
   if (!validateBankV3Schema(value)) {
     return { ok: false, issues: schemaIssues(validateBankV3Schema.errors) };
+  }
+  return validateBankSemantics(value);
+}
+
+export function validatePracticeBankV4(
+  value: unknown,
+): ValidationResult<PracticeBankV4> {
+  if (!validateBankV4Schema(value)) {
+    return { ok: false, issues: schemaIssues(validateBankV4Schema.errors) };
   }
   return validateBankSemantics(value);
 }

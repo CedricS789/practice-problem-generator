@@ -1,10 +1,25 @@
-import type { GenerationDraftV1, SourceSegmentV1, VisualSourceV1 } from "./model";
+import type {
+  GenerationDraftV1,
+  SourceAlignmentLedgerV1,
+  SourceMaterialClassificationStateV1,
+  SourceMaterialClassificationV1,
+  SourceSegmentV1,
+  VisualSourceV1,
+} from "./model";
 import {
   sourceImportProblem,
   type PdfSourceImportV1,
 } from "./source-import";
 import type { CollectedSource } from "./source";
 import type { GenerationConfiguration } from "./ui/contracts";
+import {
+  effectiveAiContextCompletionPolicy,
+  isAiContextCompletionPolicy,
+} from "./ai-context-completion";
+import {
+  generationTelemetryProblem,
+  type GenerationTelemetryV1,
+} from "./generation-telemetry";
 
 export const GENERATION_RECOVERY_CONTEXT_VERSION = 1 as const;
 export const GENERATION_RECOVERY_DRAFT_VERSION = 1 as const;
@@ -36,6 +51,8 @@ export interface RecoverySourceSnapshotV1 {
   readonly sourceImport?: PdfSourceImportV1;
   readonly hash: string;
   readonly segments: readonly SourceSegmentV1[];
+  readonly classification?: SourceMaterialClassificationV1;
+  readonly classificationState?: SourceMaterialClassificationStateV1;
 }
 
 export interface GenerationRecoveryContextV1 {
@@ -46,6 +63,7 @@ export interface GenerationRecoveryContextV1 {
   readonly configuration: GenerationConfiguration;
   readonly prompt: string;
   readonly visuals: readonly VisualSourceV1[];
+  readonly sourceAlignment?: SourceAlignmentLedgerV1;
 }
 
 export interface GenerationRecoveryDraftV1 {
@@ -53,6 +71,7 @@ export interface GenerationRecoveryDraftV1 {
   readonly jobId: string;
   readonly completedAt: string;
   readonly attempts: 1 | 2;
+  readonly telemetry?: GenerationTelemetryV1;
   readonly draft: GenerationDraftV1;
 }
 
@@ -63,6 +82,7 @@ export function createGenerationRecoveryContext(input: {
   readonly configuration: GenerationConfiguration;
   readonly prompt: string;
   readonly visuals: readonly VisualSourceV1[];
+  readonly sourceAlignment?: SourceAlignmentLedgerV1;
 }): GenerationRecoveryContextV1 {
   const source: RecoverySourceSnapshotV1 = {
     mode: input.source.mode,
@@ -77,6 +97,12 @@ export function createGenerationRecoveryContext(input: {
       : { sourceImport: structuredClone(input.source.sourceImport) }),
     hash: input.source.hash,
     segments: structuredClone(input.source.segments),
+    ...(input.source.classification === undefined
+      ? {}
+      : { classification: input.source.classification }),
+    ...(input.source.classificationState === undefined
+      ? {}
+      : { classificationState: input.source.classificationState }),
   };
   const context: GenerationRecoveryContextV1 = {
     schemaVersion: GENERATION_RECOVERY_CONTEXT_VERSION,
@@ -86,6 +112,9 @@ export function createGenerationRecoveryContext(input: {
     configuration: structuredClone(input.configuration),
     prompt: input.prompt,
     visuals: structuredClone(input.visuals),
+    ...(input.sourceAlignment === undefined
+      ? {}
+      : { sourceAlignment: structuredClone(input.sourceAlignment) }),
   };
   return parseGenerationRecoveryContext(JSON.stringify(context));
 }
@@ -111,6 +140,9 @@ export function parseGenerationRecoveryContext(
   const configuration = parseConfiguration(value.configuration);
   const prompt = safeText(value.prompt, 1, MAX_RECOVERY_TEXT_CHARACTERS, "prompt");
   const visuals = parseVisuals(value.visuals);
+  const sourceAlignment = value.sourceAlignment === undefined
+    ? undefined
+    : parseRecoverySourceAlignment(value.sourceAlignment);
   const visualIds = new Set(visuals.map((visual) => visual.id));
   if (
     configuration.selectedVisualIds.some((id) => !visualIds.has(id))
@@ -126,12 +158,14 @@ export function parseGenerationRecoveryContext(
     configuration,
     prompt,
     visuals,
+    ...(sourceAlignment === undefined ? {} : { sourceAlignment }),
   };
 }
 
 export function createGenerationRecoveryDraft(input: {
   readonly jobId: string;
   readonly attempts: 1 | 2;
+  readonly telemetry?: GenerationTelemetryV1;
   readonly draft: GenerationDraftV1;
 }): GenerationRecoveryDraftV1 {
   return {
@@ -139,6 +173,9 @@ export function createGenerationRecoveryDraft(input: {
     jobId: safeJobId(input.jobId),
     completedAt: new Date().toISOString(),
     attempts: input.attempts,
+    ...(input.telemetry === undefined
+      ? {}
+      : { telemetry: structuredClone(input.telemetry) }),
     draft: structuredClone(input.draft),
   };
 }
@@ -163,17 +200,30 @@ export function parseGenerationRecoveryDraft(
   ) {
     throw new Error("The recovered draft checkpoint is invalid.");
   }
+  if (value.telemetry !== undefined) {
+    const problem = generationTelemetryProblem(value.telemetry);
+    if (problem !== null) throw new Error(`The recovered draft telemetry is invalid: ${problem}`);
+    if ((value.telemetry as GenerationTelemetryV1).attempts !== value.attempts) {
+      throw new Error("The recovered draft telemetry attempt count changed.");
+    }
+  }
   return {
     schemaVersion: GENERATION_RECOVERY_DRAFT_VERSION,
     jobId: safeJobId(value.jobId),
     completedAt: safeTimestamp(value.completedAt, "completion timestamp"),
     attempts: value.attempts,
+    ...(value.telemetry === undefined
+      ? {}
+      : { telemetry: structuredClone(value.telemetry) as GenerationTelemetryV1 }),
     draft: structuredClone(value.draft) as unknown as GenerationDraftV1,
   };
 }
 
 function parseSource(value: unknown): RecoverySourceSnapshotV1 {
   if (!isRecord(value)) throw new Error("The interrupted generation's source snapshot is invalid.");
+  if ((value.classification === undefined) !== (value.classificationState === undefined)) {
+    throw new Error("The interrupted generation's source classification is incomplete.");
+  }
   const mode = value.mode;
   if (mode !== "selection" && mode !== "note" && mode !== "pdf") {
     throw new Error("The interrupted generation's source mode is invalid.");
@@ -224,7 +274,47 @@ function parseSource(value: unknown): RecoverySourceSnapshotV1 {
       : { sourceImport: structuredClone(sourceImport) as unknown as PdfSourceImportV1 }),
     hash,
     segments,
+    ...(value.classification === undefined
+      ? {}
+      : { classification: safeClassification(value.classification) }),
+    ...(value.classificationState === undefined
+      ? {}
+      : { classificationState: safeClassificationState(value.classificationState) }),
   };
+}
+
+function parseRecoverySourceAlignment(value: unknown): SourceAlignmentLedgerV1 {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    throw new Error("The interrupted generation's course-alignment ledger is invalid.");
+  }
+  if (
+    !Array.isArray(value.records)
+    || value.records.length > 2_000
+    || !Array.isArray(value.exerciseLinks)
+    || !Array.isArray(value.tutorLessonLinks)
+    || (value.provenance !== null && !isRecord(value.provenance))
+  ) {
+    throw new Error("The interrupted generation's course-alignment ledger is malformed.");
+  }
+  return structuredClone(value) as unknown as SourceAlignmentLedgerV1;
+}
+
+function safeClassification(value: unknown): SourceMaterialClassificationV1 {
+  if (
+    value !== "personal-note"
+    && value !== "official-correction"
+    && value !== "instructor-material"
+    && value !== "assigned-reference"
+    && value !== "unclassified"
+  ) throw new Error("The interrupted generation source classification is invalid.");
+  return value;
+}
+
+function safeClassificationState(value: unknown): SourceMaterialClassificationStateV1 {
+  if (value !== "confirmed" && value !== "suggested" && value !== "migration-default") {
+    throw new Error("The interrupted generation source classification state is invalid.");
+  }
+  return value;
 }
 
 function parseSegments(value: unknown): readonly SourceSegmentV1[] {
@@ -272,6 +362,12 @@ function parseConfiguration(value: unknown): GenerationConfiguration {
   const difficulty = value.difficulty;
   if (difficulty !== "foundational" && difficulty !== "deep-exam" && difficulty !== "challenge") {
     throw new Error("The interrupted generation difficulty is invalid.");
+  }
+  if (
+    value.aiContextCompletionPolicy !== undefined
+    && !isAiContextCompletionPolicy(value.aiContextCompletionPolicy)
+  ) {
+    throw new Error("The interrupted generation context-completion policy is invalid.");
   }
   if (!Array.isArray(value.exerciseTypes) || value.exerciseTypes.length === 0) {
     throw new Error("The interrupted generation exercise types are invalid.");
@@ -330,6 +426,9 @@ function parseConfiguration(value: unknown): GenerationConfiguration {
     exerciseTypes,
     exerciseTypePercentages: exerciseTypePercentages as GenerationConfiguration["exerciseTypePercentages"],
     selectedVisualIds,
+    aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+      value.aiContextCompletionPolicy,
+    ),
   };
 }
 

@@ -20,7 +20,7 @@ test("release metadata keeps the review runtime mobile-installable", async () =>
   assert.equal(packageLock.version, manifest.version);
 });
 
-test("production bundle contains the PDF workflow, commands, and dashboard without personal vault paths", async () => {
+test("production bundle contains the PDF workflow, commands, dashboard, and local usage display without private paths or tracking SDKs", async () => {
   const bundle = await readFile(new URL("../main.js", import.meta.url), "utf8");
   for (const command of [
     "Generate from selection",
@@ -35,14 +35,19 @@ test("production bundle contains the PDF workflow, commands, and dashboard witho
   assert.match(bundle, /practice-lab-dashboard-view/);
   assert.match(bundle, /Practice dashboard/);
   assert.match(bundle, /parent tags include nested tags/);
-  assert.match(bundle, /Generation, session, and performance history/);
+  assert.match(bundle, /Practice now/);
+  assert.match(bundle, /Your progress/);
+  assert.match(bundle, /Manage this practice/);
+  assert.match(bundle, /Practice data managed by the plugin/);
   assert.match(bundle, /Provider default \(not pinned\)/);
   assert.match(bundle, /Choose PDF pages/);
   assert.match(bundle, /text extracted locally/);
   assert.match(bundle, /Practice run/);
   assert.match(bundle, /Best answer streak/);
+  assert.match(bundle, /Monetary cost not reported by CLI/);
+  assert.match(bundle, /Local text estimate/);
   assert.doesNotMatch(bundle, /C:\\Users\\|\/Users\/|\/home\/|CloudStorage/i);
-  assert.doesNotMatch(bundle, /telemetry/i);
+  assert.doesNotMatch(bundle, /segment\.io|mixpanel|amplitude|posthog|sentry|opentelemetry|applicationinsights/i);
 });
 
 test("production bundle has no browser-native Node dynamic imports", async () => {

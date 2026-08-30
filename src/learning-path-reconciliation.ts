@@ -6,11 +6,16 @@ import type {
   LearningAspectV1,
   TutorLessonV1,
 } from "./model";
+import {
+  orderTutorTeachingBlocks,
+  tutorTeachingBlocksAreOrdered,
+} from "./tutor-teaching-blocks";
 
 export interface LearningWorkspaceReconciliationV1 {
   readonly aspects: readonly LearningAspectV1[];
   readonly drafts: readonly PracticeSetDraftV1[];
   readonly reconciledLinkCount: number;
+  readonly reconciledTutorBlockOrderCount: number;
 }
 
 function unique(ids: readonly string[]): string[] {
@@ -37,6 +42,7 @@ export function reconcileLearningWorkspaceDrafts(
   drafts: readonly PracticeSetDraftV1[],
 ): LearningWorkspaceReconciliationV1 {
   let reconciledLinkCount = 0;
+  let reconciledTutorBlockOrderCount = 0;
   const aspects: LearningAspectV1[] = blueprint.aspects
     .filter((aspect) => aspect.status === "supported")
     .map((aspect) => ({
@@ -105,6 +111,11 @@ export function reconcileLearningWorkspaceDrafts(
       draft.assignments.map((assignment) => [assignment.exerciseId, assignment]),
     );
     const tutorLessons = draft.tutorLessons.map((lesson) => {
+      const clonedLesson = structuredClone(lesson);
+      const teachingBlocks = orderTutorTeachingBlocks(clonedLesson.teachingBlocks);
+      if (!tutorTeachingBlocksAreOrdered(clonedLesson.teachingBlocks)) {
+        reconciledTutorBlockOrderCount += 1;
+      }
       const taught = [...lesson.aspectIds];
       const guidedAssignment = assignmentByExercise.get(lesson.guidedExerciseId);
       for (const aspectId of guidedAssignment?.aspectIds ?? []) {
@@ -151,9 +162,10 @@ export function reconcileLearningWorkspaceDrafts(
         }
       }
       return {
-        ...structuredClone(lesson),
+        ...clonedLesson,
         aspectIds: normalizedTaught,
         prerequisiteAspectIds: sortAspectIds(prerequisites),
+        teachingBlocks,
       };
     });
     return {
@@ -166,5 +178,6 @@ export function reconcileLearningWorkspaceDrafts(
     aspects,
     drafts: reconciledDrafts,
     reconciledLinkCount,
+    reconciledTutorBlockOrderCount,
   };
 }

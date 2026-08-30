@@ -6,10 +6,11 @@ import type {
   GenerationMetadataV1,
   PracticeBankParseResult,
   PracticeBankV2,
-  PracticeBankV3,
+  PracticeBankV4,
   SessionItemResultV2,
   SessionSummaryV2,
   SessionSummaryV3,
+  SourceAlignmentLedgerV1,
   VisualSourceV1
 } from "./model";
 import {
@@ -58,6 +59,12 @@ import {
   type SessionLearningMetadataV3,
 } from "./learning-path";
 import {
+  emptySourceAlignmentLedger,
+} from "./source-alignment";
+import { linkSourceAlignmentTargets } from "./source-alignment-generation";
+import { sourceClassificationSelection } from "./source-classification";
+import { effectiveAiContextCompletionPolicy } from "./ai-context-completion";
+import {
   clearPracticeSessions,
   removePracticeSession,
   type SessionRemovalResult,
@@ -76,6 +83,7 @@ export interface SaveBankInput {
   readonly generation: GenerationMetadataV1;
   readonly generationRecipe: GenerationRecipeV2;
   readonly generationHistoryEntry: GenerationHistoryEntryDraftV1;
+  readonly sourceAlignment?: SourceAlignmentLedgerV1;
 }
 
 export interface LearningWorkspaceSidecarsV1 {
@@ -86,7 +94,7 @@ export interface LearningWorkspaceSidecarsV1 {
 }
 
 export interface SaveLearningWorkspaceInput extends LearningWorkspaceSidecarsV1 {
-  readonly bank: PracticeBankV3;
+  readonly bank: PracticeBankV4;
   /** Required only when the derived workspace already exists. */
   readonly expectedRevision?: number;
 }
@@ -116,12 +124,13 @@ export class PracticeBankRepository {
     return this.resolveForSource(sourcePath);
   }
 
-  async saveGenerated(input: SaveBankInput): Promise<{ path: string; bank: PracticeBankV3 }> {
+  async saveGenerated(input: SaveBankInput): Promise<{ path: string; bank: PracticeBankV4 }> {
     const target = await this.resolveForSource(input.source.path);
     const path = target.path;
     await ensureParentFolder(this.app, path);
     const now = new Date().toISOString();
-    const createBank = (previous?: PracticeBankV2): PracticeBankV3 => migratePracticeBankV2ToV3({
+    const createBank = (previous?: PracticeBankV2): PracticeBankV4 => {
+      const migrated = migratePracticeBankV2ToV3({
       schemaVersion: PRACTICE_BANK_SCHEMA_VERSION,
       bankId: previous?.bankId ?? `bank-${crypto.randomUUID()}`,
       revision: (previous?.revision ?? -1) + 1,
@@ -141,8 +150,27 @@ export class PracticeBankRepository {
       visuals: input.visuals.map((visual) => ({ ...visual })),
       exercises: input.exercises.map(cloneExercise),
       sessions: previous?.sessions.map((session) => structuredClone(session)) ?? [],
-      generation: { ...input.generation }
-    }, input.source.sourceImport);
+        generation: { ...input.generation }
+      }, input.source.sourceImport);
+      const classification = sourceClassificationSelection(input.source);
+      const sourceMaterials = migrated.sourceMaterials.map((material) => ({
+        ...material,
+        ...classification,
+      }));
+      const sourceAlignment = linkSourceAlignmentTargets({
+        ledger: input.sourceAlignment ?? emptySourceAlignmentLedger(),
+        exercises: migrated.exercises,
+        tutorLessons: [],
+      });
+      return {
+        ...migrated,
+        sourceMaterials,
+        sourceAlignment,
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          input.generationRecipe.aiContextCompletionPolicy,
+        ),
+      };
+    };
 
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (!isVaultFile(existing)) {
@@ -204,7 +232,7 @@ export class PracticeBankRepository {
 
   async saveLearningWorkspace(
     input: SaveLearningWorkspaceInput,
-  ): Promise<{ path: string; bank: PracticeBankV3 }> {
+  ): Promise<{ path: string; bank: PracticeBankV4 }> {
     const target = await this.resolveForSource(input.bank.source.vaultPath);
     const path = target.path;
     await ensureParentFolder(this.app, path);
@@ -229,7 +257,7 @@ export class PracticeBankRepository {
     if (input.expectedRevision === undefined) {
       throw new Error("expectedRevision is required when replacing a learning workspace.");
     }
-    let saved: PracticeBankV3 | undefined;
+    let saved: PracticeBankV4 | undefined;
     await this.app.vault.process(existing, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -241,7 +269,7 @@ export class PracticeBankRepository {
           `The learning workspace changed from revision ${input.expectedRevision} to ${parsed.bank.revision}. Refresh before saving.`,
         );
       }
-      const bank: PracticeBankV3 = {
+      const bank: PracticeBankV4 = {
         ...structuredClone(input.bank),
         schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
         bankId: parsed.bank.bankId,
@@ -273,10 +301,10 @@ export class PracticeBankRepository {
 
   async replacePracticeSet(
     input: ReplacePracticeSetInput,
-  ): Promise<PracticeBankV3> {
+  ): Promise<PracticeBankV4> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(input.bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV3 | undefined;
+    let saved: PracticeBankV4 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -320,10 +348,10 @@ export class PracticeBankRepository {
     bankPath: string,
     session: SessionSummaryV2,
     expectedRevision: number
-  ): Promise<PracticeBankV3> {
+  ): Promise<PracticeBankV4> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV3 | undefined;
+    let saved: PracticeBankV4 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -331,7 +359,7 @@ export class PracticeBankRepository {
       if (merged.status === "conflict" || merged.status === "invalid-session") {
         throw new Error(merged.message);
       }
-      saved = requireV3Bank(merged.bank);
+      saved = requireCurrentBank(merged.bank);
       const recipe = generationRecipeForWrite(markdown);
       const recipeCatalog = generationRecipeCatalogForWrite(markdown, merged.bank);
       const history = requireGenerationHistoryForWrite(markdown);
@@ -354,7 +382,7 @@ export class PracticeBankRepository {
     bankPath: string,
     bankId: string,
     sessionId: string,
-  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV4; removedSessions: number }> {
     return this.updateSessions(
       bankPath,
       bankId,
@@ -366,7 +394,7 @@ export class PracticeBankRepository {
   async clearSessions(
     bankPath: string,
     bankId: string,
-  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV4; removedSessions: number }> {
     return this.updateSessions(
       bankPath,
       bankId,
@@ -379,7 +407,7 @@ export class PracticeBankRepository {
     bankPath: string,
     patch: AiReviewResolutionPatchV2,
     expectedRevision?: number,
-  ): Promise<PracticeBankV3> {
+  ): Promise<PracticeBankV4> {
     return this.applyAiReviewStateTransition(bankPath, patch, expectedRevision);
   }
 
@@ -387,10 +415,10 @@ export class PracticeBankRepository {
     bankPath: string,
     patch: AiReviewStateTransitionPatchV2,
     expectedRevision?: number,
-  ): Promise<PracticeBankV3> {
+  ): Promise<PracticeBankV4> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV3 | undefined;
+    let saved: PracticeBankV4 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -400,7 +428,7 @@ export class PracticeBankRepository {
       if (merged.status === "conflict" || merged.status === "invalid-review") {
         throw new Error(merged.message);
       }
-      saved = requireV3Bank(merged.bank);
+      saved = requireCurrentBank(merged.bank);
       const recipe = generationRecipeForWrite(markdown);
       const recipeCatalog = generationRecipeCatalogForWrite(markdown, merged.bank);
       const history = requireGenerationHistoryForWrite(markdown);
@@ -422,12 +450,12 @@ export class PracticeBankRepository {
   private async replaceExisting(
     file: TFile,
     expectedSourcePath: string,
-    createBank: (previous: PracticeBankV2) => PracticeBankV3,
+    createBank: (previous: PracticeBankV2) => PracticeBankV4,
     generationRecipe: GenerationRecipeV2,
     generationHistoryEntry: GenerationHistoryEntryDraftV1,
     sourceImport?: SourceImportV1,
-  ): Promise<{ path: string; bank: PracticeBankV3 }> {
-    let saved: PracticeBankV3 | undefined;
+  ): Promise<{ path: string; bank: PracticeBankV4 }> {
+    let saved: PracticeBankV4 | undefined;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
       if (parsed.status !== "ok") throw readOnlyError(parsed);
@@ -527,10 +555,10 @@ export class PracticeBankRepository {
     bankId: string,
     update: (bank: PracticeBankV2, updatedAt: string) => SessionRemovalResult,
     unchangedMessage: string,
-  ): Promise<{ bank: PracticeBankV3; removedSessions: number }> {
+  ): Promise<{ bank: PracticeBankV4; removedSessions: number }> {
     const file = this.app.vault.getAbstractFileByPath(normalizeVaultPath(bankPath));
     if (!isVaultFile(file)) throw new Error("The Practice Problem Generator bank no longer exists.");
-    let saved: PracticeBankV3 | undefined;
+    let saved: PracticeBankV4 | undefined;
     let removedSessions = 0;
     await this.app.vault.process(file, (markdown) => {
       const parsed = parsePracticeBankMarkdown(markdown);
@@ -540,7 +568,7 @@ export class PracticeBankRepository {
       }
       const result = update(parsed.bank, new Date().toISOString());
       if (result.status === "unchanged") throw new Error(unchangedMessage);
-      saved = requireV3Bank(result.bank);
+      saved = requireCurrentBank(result.bank);
       removedSessions = result.removed.length;
       return serializePracticeBank(
         result.bank,
@@ -586,7 +614,7 @@ function generationRecipeForWrite(
   );
 }
 
-function quickGenerationReplacementProblem(bank: PracticeBankV3): string | null {
+function quickGenerationReplacementProblem(bank: PracticeBankV4): string | null {
   const set = bank.practiceSets[0];
   const isCanonicalQuickWorkspace = bank.learningPath === null
     && bank.tutorLessons.length === 0
@@ -626,7 +654,7 @@ function generationRecipeCatalogForWrite(
   }
   if (legacy.status === "missing") return undefined;
 
-  const currentBank = requireV3Bank(bank);
+  const currentBank = requireCurrentBank(bank);
   const fallbackSetId = currentBank.practiceSets.some((set) => set.id === "set-general")
     ? "set-general"
     : [...currentBank.practiceSets]
@@ -639,8 +667,8 @@ function generationRecipeCatalogForWrite(
 function learningWorkspaceSidecars(
   markdown: string,
   input: LearningWorkspaceSidecarsV1,
-  bank: PracticeBankV3,
-  previousBank: PracticeBankV3,
+  bank: PracticeBankV4,
+  previousBank: PracticeBankV4,
   mutableRecipeSetId?: string,
 ): {
   readonly generationRecipe: GenerationRecipeV2 | undefined;
@@ -959,11 +987,14 @@ function createSourceWikilink(path: string): string {
   return `[[${linkPath}]]`;
 }
 
-function requireV3Bank(bank: PracticeBankV2): PracticeBankV3 {
+function requireCurrentBank(bank: PracticeBankV2): PracticeBankV4 {
   if (bank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
     throw new Error("An authorized bank update did not produce the current schema version.");
   }
-  return bank as PracticeBankV3;
+  if (!("sourceAlignment" in bank)) {
+    throw new Error("An authorized bank update omitted the current course-alignment contract.");
+  }
+  return bank as PracticeBankV4;
 }
 
 function readOnlyError(parsed: Exclude<PracticeBankParseResult, { status: "ok" }>): Error {

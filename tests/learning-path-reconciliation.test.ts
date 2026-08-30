@@ -133,4 +133,34 @@ test("legacy guided drafts reconcile relationship arrays without changing learne
   assert.equal(reconciled.tutorLessons[0]?.teachingBlocks[0]?.content,
     draft.tutorLessons[0]?.teachingBlocks[0]?.content);
   assert.ok(result.reconciledLinkCount >= 3);
+  assert.equal(result.reconciledTutorBlockOrderCount, 0);
+});
+
+test("legacy guided drafts normalize tutor teaching order without changing content", () => {
+  const unordered = structuredClone(draft);
+  const originalBlocks = unordered.tutorLessons[0]!.teachingBlocks;
+  unordered.tutorLessons[0]!.teachingBlocks = [
+    originalBlocks[2]!,
+    originalBlocks[0]!,
+    originalBlocks[1]!,
+  ];
+  const before = structuredClone(unordered);
+
+  const result = reconcileLearningWorkspaceDrafts(blueprint, [unordered]);
+  const reconciled = result.drafts[0]?.tutorLessons[0];
+  assert.deepEqual(
+    reconciled?.teachingBlocks.map((block) => block.kind),
+    ["why", "prerequisite", "explanation"],
+  );
+  assert.deepEqual(
+    [...(reconciled?.teachingBlocks ?? [])]
+      .sort((left, right) => left.id.localeCompare(right.id)),
+    [...before.tutorLessons[0]!.teachingBlocks]
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  );
+  assert.equal(result.reconciledTutorBlockOrderCount, 1);
+  assert.deepEqual(unordered, before);
+
+  const repeated = reconcileLearningWorkspaceDrafts(blueprint, result.drafts);
+  assert.equal(repeated.reconciledTutorBlockOrderCount, 0);
 });

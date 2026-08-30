@@ -12,6 +12,7 @@ import {
   nextGenerationBatchSet,
   parseGenerationBatchRecovery,
   retryGenerationBatchSet,
+  saveGenerationBatchReviewSnapshot,
   serializeGenerationBatchRecovery,
   skipGenerationBatchSet,
   startGenerationBatchSet,
@@ -29,6 +30,7 @@ const planningInput: LearningBlueprintPlanningInputV1 = {
   startingLevel: "exam-review",
   desiredSetCount: 2,
   globalFocusInstructions: "Keep the two sets distinct.",
+  aiContextCompletionPolicy: "selected-sources-only",
   sources: [
     {
       id: "primary",
@@ -103,6 +105,7 @@ const configuration: GenerationConfiguration = {
   exerciseTypes: ["short-answer"],
   exerciseTypePercentages: balanceExerciseTypes(["short-answer"]),
   selectedVisualIds: [],
+  aiContextCompletionPolicy: "selected-sources-only",
 };
 
 const payloads = createPracticeSetPayloads({
@@ -161,6 +164,29 @@ test("batch recovery round-trips exact approved payloads and hashes", () => {
   assert.deepEqual(state.queue.map((entry) => entry.status), ["queued", "queued"]);
   assert.equal(state.approvedPayloads[0]!.payload.targetSet.id, "set-one");
   assert.match(state.approvedPayloads[0]!.payloadHash, /^sha256:[a-f0-9]{64}$/u);
+
+  const approvedPayloads = createPracticeSetPayloads({
+    batchId: "batch-approved-context",
+    planningInput: {
+      ...planningInput,
+      aiContextCompletionPolicy: "approved-general-context",
+    },
+    blueprint,
+    setConfigurations: blueprint.sets.map((set) => ({
+      setId: set.id,
+      configuration: {
+        ...configuration,
+        aiContextCompletionPolicy: "approved-general-context",
+      },
+    })),
+  });
+  const approved = createGenerationBatchRecovery({
+    batchId: "batch-approved-context",
+    blueprintId: "blueprint-recovery",
+    createdAt: "2026-08-22T10:00:00.000Z",
+    payloads: approvedPayloads,
+  });
+  assert.notEqual(approved.sourceBundleHash, state.sourceBundleHash);
 });
 
 test("batch helpers enforce one active job and exact sequential order", () => {
@@ -216,6 +242,18 @@ test("completed drafts survive later failure, retry, save, and final completion"
     setId: "set-one",
     draft: draft("set-one"),
     attempts: 1,
+    telemetry: {
+      schemaVersion: 1,
+      durationMs: 4_500,
+      attempts: 1,
+      tokenUsage: {
+        inputTokens: 800,
+        outputTokens: 160,
+        source: "provider-reported",
+        inputEstimateExcludesMedia: false,
+      },
+      reportedCostUsd: 0.02,
+    },
     completedAt: "2026-08-22T10:02:00.000Z",
   });
   assert.equal(nextGenerationBatchSet(state)?.setId, "set-two");
@@ -233,6 +271,7 @@ test("completed drafts survive later failure, retry, save, and final completion"
     failedAt: "2026-08-22T10:04:00.000Z",
   });
   assert.equal(state.completedDrafts[0]!.setId, "set-one");
+  assert.equal(state.completedDrafts[0]!.telemetry?.reportedCostUsd, 0.02);
   assert.equal(state.queue[1]!.status, "failed");
   state = retryGenerationBatchSet(state, "set-two", "2026-08-22T10:05:00.000Z");
   state = startGenerationBatchSet(
@@ -271,6 +310,107 @@ test("failed sets may be skipped without discarding prior completed work", () =>
   );
   assert.equal(state.queue[0]!.status, "cancelled");
   assert.equal(nextGenerationBatchSet(state)?.setId, "set-two");
+});
+
+test("review snapshots reopen with exact edits, rejections, acceptance, and approvals", () => {
+  let state = createGenerationBatchRecovery({
+    batchId: "batch-recovery",
+    blueprintId: "blueprint-recovery",
+    createdAt: "2026-08-22T10:00:00.000Z",
+    payloads,
+  });
+  state = startGenerationBatchSet(state, "set-one", handle(1), "2026-08-22T10:01:00.000Z");
+  state = completeGenerationBatchSet(state, {
+    setId: "set-one",
+    draft: draft("set-one"),
+    attempts: 1,
+    completedAt: "2026-08-22T10:02:00.000Z",
+  });
+  state = startGenerationBatchSet(state, "set-two", handle(2), "2026-08-22T10:03:00.000Z");
+  state = completeGenerationBatchSet(state, {
+    setId: "set-two",
+    draft: draft("set-two"),
+    attempts: 1,
+    completedAt: "2026-08-22T10:04:00.000Z",
+  });
+  const firstPayloadHash = state.completedDrafts[0]!.payloadHash;
+  const secondPayloadHash = state.completedDrafts[1]!.payloadHash;
+  state = saveGenerationBatchReviewSnapshot(state, {
+    setId: "set-one",
+    payloadHash: firstPayloadHash,
+    updatedAt: "2026-08-22T10:05:00.000Z",
+    exercises: [{
+      id: "set-one-exercise",
+      type: "short-answer",
+      prompt: "A partially edited prompt",
+      groundedAnswer: "A partially edited answer",
+      rejected: true,
+      occlusionReviewed: true,
+    }],
+    approvedExerciseIds: [],
+  });
+  state = saveGenerationBatchReviewSnapshot(state, {
+    setId: "set-two",
+    payloadHash: secondPayloadHash,
+    updatedAt: "2026-08-22T10:06:00.000Z",
+    exercises: [{
+      id: "set-two-exercise",
+      type: "short-answer",
+      prompt: "An approved edited prompt",
+      groundedAnswer: "An approved edited answer",
+      rejected: false,
+      occlusionReviewed: true,
+    }],
+    approvedExerciseIds: ["set-two-exercise"],
+  });
+
+  const serialized = serializeGenerationBatchRecovery(state);
+  const reopened = parseGenerationBatchRecovery(serialized);
+  assert.deepEqual(reopened.reviewSnapshots, state.reviewSnapshots);
+  assert.equal(reopened.reviewSnapshots?.[0]?.exercises[0]?.rejected, true);
+  assert.equal(reopened.reviewSnapshots?.[1]?.exercises[0]?.prompt, "An approved edited prompt");
+  assert.deepEqual(reopened.reviewSnapshots?.[1]?.approvedExerciseIds, ["set-two-exercise"]);
+  assert.doesNotMatch(serialized, /visualUrl/u);
+});
+
+test("a cross-set collision leaves the active set fail-able and retryable", () => {
+  let state = createGenerationBatchRecovery({
+    batchId: "batch-recovery",
+    blueprintId: "blueprint-recovery",
+    createdAt: "2026-08-22T10:00:00.000Z",
+    payloads,
+  });
+  state = startGenerationBatchSet(state, "set-one", handle(1), "2026-08-22T10:01:00.000Z");
+  state = completeGenerationBatchSet(state, {
+    setId: "set-one",
+    draft: draft("set-one"),
+    attempts: 1,
+    completedAt: "2026-08-22T10:02:00.000Z",
+  });
+  state = startGenerationBatchSet(state, "set-two", handle(2), "2026-08-22T10:03:00.000Z");
+  const colliding = structuredClone(draft("set-two"));
+  colliding.exercises[0]!.prompt = draft("set-one").exercises[0]!.prompt;
+  assert.throws(
+    () => completeGenerationBatchSet(state, {
+      setId: "set-two",
+      draft: colliding,
+      attempts: 1,
+      completedAt: "2026-08-22T10:04:00.000Z",
+    }),
+    /prompt is duplicated/iu,
+  );
+  assert.equal(state.queue[1]?.status, "running");
+  state = failGenerationBatchSet(state, {
+    setId: "set-two",
+    message: "Cross-set validation failed.",
+    failedAt: "2026-08-22T10:04:00.000Z",
+  });
+  assert.equal(state.queue[1]?.status, "failed");
+  assert.doesNotThrow(() => retryGenerationBatchSet(
+    state,
+    "set-two",
+    "2026-08-22T10:05:00.000Z",
+  ));
 });
 
 test("recovery parsing rejects payload tampering and missing durable handles", () => {

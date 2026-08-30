@@ -1,4 +1,8 @@
 import type { ReasoningEffortV1 } from "../model";
+import type {
+  GenerationAttemptTelemetryV1,
+  GenerationTelemetryV1,
+} from "../generation-telemetry";
 
 export type ProviderId = "codex" | "claude" | "agy";
 
@@ -25,6 +29,8 @@ export interface CliActivityEvent {
   readonly phase: CliActivityPhase;
   readonly message: string;
   readonly attempt?: 1 | 2;
+  /** Safe token/cost/timing metadata only; never raw provider content. */
+  readonly telemetry?: GenerationAttemptTelemetryV1;
 }
 
 export type CliActivityListener = (event: CliActivityEvent) => void;
@@ -132,6 +138,7 @@ export interface StructuredGenerationResult<T> {
   readonly provider: ProviderId;
   readonly value: T;
   readonly attempts: 1 | 2;
+  readonly telemetry?: GenerationTelemetryV1;
   readonly recoveryHandle?: DurableProcessHandle;
 }
 
@@ -201,6 +208,7 @@ export interface ProcessRunResult {
   readonly exitCode: number;
   readonly durableAttempt?: 1 | 2;
   readonly recoveryHandle?: DurableProcessHandle;
+  readonly telemetry?: GenerationAttemptTelemetryV1;
 }
 
 export interface CliProcessRunner {
@@ -216,6 +224,8 @@ export interface NeutralMedia {
 export interface CliJobWorkspace {
   readonly absolutePath: string;
   writeText(filename: string, content: string): Promise<string>;
+  /** Read a small neutral recovery sidecar; returns undefined when absent. */
+  readText?(filename: string): Promise<string | undefined>;
   writeBinary(filename: string, content: Uint8Array): Promise<string>;
   copyMedia(media: readonly MediaInput[]): Promise<readonly NeutralMedia[]>;
   /** Resolve an already-created recovery file without rewriting it. */

@@ -80,9 +80,18 @@ test("single-source guided saves use the primary compatibility snapshot", () => 
 });
 
 test("legacy completed batches reconcile relationship links before final validation", () => {
-  assert.match(controllerSource, /reconcileLearningWorkspaceDrafts\(request\.blueprint, finalDrafts\)/u);
+  assert.match(controllerSource, /reconcileLearningWorkspaceDrafts\(savedBlueprint, finalDrafts\)/u);
   assert.match(controllerSource, /aspects: reconciliation\.aspects/u);
   assert.match(controllerSource, /reconciledLinkCount: reconciliation\.reconciledLinkCount/u);
+});
+
+test("partial guided saves retain durable recovery and merge previously saved sets", () => {
+  assert.match(controllerSource, /const previouslySaved = new Set\(pendingBatch\.recovery\.savedSetIds\)/u);
+  assert.match(controllerSource, /practiceSetDraftFromBank\(existing, payload\.targetSet\.id\)/u);
+  assert.match(controllerSource, /markGenerationBatchSetSaved\(/u);
+  assert.match(controllerSource, /completedUnsavedBatchDrafts\(pendingBatch\.recovery\)\.length === 0/u);
+  assert.match(controllerSource, /await this\.persistBatchRecovery\(pendingBatch\.recovery, this\.recoveryHandle\)/u);
+  assert.match(controllerSource, /readonly batchComplete: boolean/u);
 });
 
 test("guided PDF budgets are checked at every new provider boundary", () => {
@@ -105,4 +114,44 @@ test("guided PDF budgets are checked at every new provider boundary", () => {
     batch.indexOf("this.assertPendingPdfBudget(pendingBlueprint)")
       < batch.indexOf("nextGenerationBatchSet"),
   );
+});
+
+test("course alignment has a distinct durable recovery route before blueprint generation", () => {
+  assert.match(controllerSource, /public async previewSourceAlignment\(/u);
+  assert.match(controllerSource, /public async generateSourceAlignment\(/u);
+  assert.match(controllerSource, /public async resumeRecoverableSourceAlignment\(/u);
+  assert.match(
+    controllerSource,
+    /SOURCE_ALIGNMENT_RECOVERY_CONTEXT_FILENAME[\s\S]*SOURCE_ALIGNMENT_RECOVERY_RESULT_FILENAME/u,
+  );
+  assert.match(
+    controllerSource,
+    /inspectRecoveryKind\(\)[\s\S]*"source-alignment"[\s\S]*"generation-batch"/u,
+  );
+  assert.match(
+    controllerSource,
+    /pendingAlignment\.inputHash === sourceAlignmentInputHash\(alignmentInput\)/u,
+  );
+});
+
+test("guided saves derive alignment links locally and persist V4", () => {
+  assert.match(controllerSource, /const sourceAlignment = linkSourceAlignmentTargets\(/u);
+  assert.match(controllerSource, /const bank: PracticeBankV4 =/u);
+  assert.match(controllerSource, /sourceMaterials,\s*sourceAlignment,/u);
+});
+
+test("source classifications are resolved before one atomic controller update", () => {
+  const start = controllerSource.indexOf("public confirmSourceClassifications(");
+  const end = controllerSource.indexOf("public setRecoveryHandle(", start);
+  assert.ok(start >= 0 && end > start);
+  const method = controllerSource.slice(start, end);
+  assert.match(method, /const resolved = updates\.map/u);
+  assert.match(method, /new Set\(originalKeys\)\.size !== originalKeys\.length/u);
+  assert.ok(
+    method.indexOf("const confirmed = resolved.map") < method.indexOf("for (const key of originalKeys)"),
+    "Every source should be validated and classified before the source map is mutated.",
+  );
+  assert.match(method, /this\.pendingAlignment = undefined/u);
+  assert.match(method, /this\.pendingBlueprint = undefined/u);
+  assert.match(method, /this\.pendingBatch = undefined/u);
 });

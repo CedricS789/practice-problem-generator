@@ -1,6 +1,6 @@
 import type {
   LearningAspectV1,
-  PracticeBankV3,
+  PracticeBankV4,
   SessionItemResultV2,
   SessionSummaryV3,
 } from "./model";
@@ -76,7 +76,7 @@ interface MutableEvidence {
   failed: number;
 }
 
-export function deriveLearningAnalytics(bank: PracticeBankV3): LearningAnalyticsSummary {
+export function deriveLearningAnalytics(bank: PracticeBankV4): LearningAnalyticsSummary {
   const currentAspects = new Map(bank.aspects.map((aspect) => [aspect.id, aspect.title]));
   const currentSets = new Map(bank.practiceSets.map((set) => [set.id, set.title]));
   const aspectTitles = new Map(currentAspects);
@@ -136,7 +136,7 @@ export function deriveLearningAnalytics(bank: PracticeBankV3): LearningAnalytics
 }
 
 export function recommendNextLearningStep(
-  bank: PracticeBankV3,
+  bank: PracticeBankV4,
   analytics = deriveLearningAnalytics(bank),
 ): RecommendedNextLearningStep | null {
   const path = bank.learningPath;
@@ -298,8 +298,8 @@ type StepTarget = {
 };
 
 function stepTarget(
-  bank: PracticeBankV3,
-  step: NonNullable<PracticeBankV3["learningPath"]>["steps"][number],
+  bank: PracticeBankV4,
+  step: NonNullable<PracticeBankV4["learningPath"]>["steps"][number],
 ): StepTarget | null {
   if (step.kind === "lesson") {
     const lesson = bank.tutorLessons.find((entry) => entry.id === step.lessonId);
@@ -319,7 +319,7 @@ function stepTarget(
   };
 }
 
-function earliestStepForAspect(bank: PracticeBankV3, aspectId: string): StepTarget | null {
+function earliestStepForAspect(bank: PracticeBankV4, aspectId: string): StepTarget | null {
   const path = bank.learningPath;
   if (path === null) return null;
   for (const step of [...path.steps].sort((left, right) => left.order - right.order)) {

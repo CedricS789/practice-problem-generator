@@ -5,7 +5,7 @@ import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   PRACTICE_BANK_SCHEMA_VERSION,
   type PracticeBankV2,
-  type PracticeBankV3,
+  type PracticeBankV4,
 } from "../src/model";
 import {
   defaultSessionLearningMetadataV3,
@@ -79,7 +79,7 @@ function v2Bank(): PracticeBankV2 {
   };
 }
 
-function guidedBank(): PracticeBankV3 {
+function guidedBank(): PracticeBankV4 {
   const migrated = migratePracticeBankV2ToV3(v2Bank());
   const paragraphs = migrated.segments.filter((segment) => segment.kind === "paragraph");
   return {
@@ -572,6 +572,8 @@ test("multi-source bundles allow a bundle hash and enforce supporting ID namespa
     scope: { kind: "note" },
     segmentIds: [supportingSegment.id],
     visualIds: [],
+    classification: "unclassified",
+    classificationState: "migration-default",
   });
 
   assert.equal(validatePracticeBankV3(bank).ok, true);

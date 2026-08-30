@@ -33,6 +33,8 @@ export interface LearningPathReviewSetInput {
   readonly setTitle: string;
   readonly exercises: readonly EditableDraftExercise[];
   readonly approvedExerciseIds: ReadonlySet<string>;
+  /** Guided checks owned by tutor lessons cannot be removed in exercise review. */
+  readonly requiredExerciseIds?: ReadonlySet<string>;
 }
 
 export interface LearningPathReviewBlocker {
@@ -79,8 +81,19 @@ function exerciseReviewProblem(draft: EditableDraftExercise): string | null {
 export function learningPathSetReviewState(
   input: LearningPathReviewSetInput,
 ): LearningPathSetReviewState {
+  const required = input.requiredExerciseIds ?? new Set<string>();
   const kept = input.exercises.filter((exercise) => !exercise.rejected);
   const blockers: LearningPathReviewBlocker[] = [];
+  for (const exercise of input.exercises) {
+    if (exercise.rejected && required.has(exercise.id)) {
+      blockers.push({
+        setId: input.setId,
+        setTitle: input.setTitle,
+        exerciseId: exercise.id,
+        reason: "Keep this guided exercise because a tutor lesson depends on it, or change the path plan first.",
+      });
+    }
+  }
   if (kept.length === 0) {
     blockers.push({
       setId: input.setId,
@@ -124,9 +137,20 @@ export function approveReadyLearningPathExercises(
   let totalKeptCount = 0;
   let totalApprovedCount = 0;
   for (const input of inputs) {
+    const required = input.requiredExerciseIds ?? new Set<string>();
     const approved = new Set<string>();
     for (const exercise of input.exercises) {
-      if (exercise.rejected) continue;
+      if (exercise.rejected) {
+        if (required.has(exercise.id)) {
+          blockers.push({
+            setId: input.setId,
+            setTitle: input.setTitle,
+            exerciseId: exercise.id,
+            reason: "Keep this guided exercise because a tutor lesson depends on it, or change the path plan first.",
+          });
+        }
+        continue;
+      }
       totalKeptCount += 1;
       const problem = exerciseReviewProblem(exercise);
       if (problem !== null) {

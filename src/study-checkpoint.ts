@@ -4,15 +4,17 @@ import {
   PRACTICE_BANK_SCHEMA_VERSION,
   type CompletedTutorLessonSnapshotV3,
   type ExerciseV1,
+  type ExerciseAlignmentSnapshotV1,
   type LearningAspectV1,
   type LearningPathV1,
   type PracticeBankV2,
-  type PracticeBankV3,
+  type PracticeBankV4,
   type PracticeSetV1,
   type PracticeSourceV1,
   type SessionExerciseEvidenceV3,
   type SessionLearningScopeV3,
-  type SourceMaterialV1,
+  type SourceAlignmentLedgerV1,
+  type SourceMaterialV2,
   type SourceSegmentV1,
   type TutorLessonV1,
   type VisualSourceV1,
@@ -20,7 +22,13 @@ import {
 import type { GuidedAttemptRecord, GuidedLessonStudyState } from "./learning-study";
 import type { SessionLearningMetadataV3 } from "./learning-path";
 import { isReasoningEffort } from "./reasoning";
-import { validatePracticeBank, validatePracticeBankV3 } from "./schema";
+import { validatePracticeBank } from "./schema";
+import { isAiContextCompletionPolicy } from "./ai-context-completion";
+import {
+  createExerciseAlignmentSnapshots,
+  emptySourceAlignmentLedger,
+} from "./source-alignment";
+import { tutorTeachingBlocksAreOrdered } from "./tutor-teaching-blocks";
 import type {
   AnswerReviewMode,
   FinishedStudySession,
@@ -44,7 +52,8 @@ export interface StudyGuidedLessonCheckpointV1 {
 
 /** Complete approved learning workspace, excluding mutable history/provenance. */
 export interface StudyLearningContextSnapshotV1 {
-  readonly sourceMaterials: readonly SourceMaterialV1[];
+  readonly sourceMaterials: readonly SourceMaterialV2[];
+  readonly sourceAlignment: SourceAlignmentLedgerV1;
   readonly segments: readonly SourceSegmentV1[];
   readonly visuals: readonly VisualSourceV1[];
   readonly exercises: readonly ExerciseV1[];
@@ -83,6 +92,8 @@ export interface StudySessionCheckpointV1 {
   readonly visuals: readonly VisualSourceV1[];
   /** Exact bank exercises, locked in the order selected for this session. */
   readonly exercises: readonly ExerciseV1[];
+  /** Immutable post-answer course-alignment evidence for offline recovery. */
+  readonly alignmentSnapshots?: readonly ExerciseAlignmentSnapshotV1[];
   readonly sessionId: string;
   readonly startedAt: string;
   readonly updatedAt: string;
@@ -304,17 +315,9 @@ function tutorLessonProblem(
   if (!blockKinds.has("why") || !blockKinds.has("prerequisite") || !blockKinds.has("explanation")) {
     return "active tutor lesson requires why, prerequisite, and explanation blocks";
   }
-  const blockRank: Record<TutorLessonV1["teachingBlocks"][number]["kind"], number> = {
-    why: 0,
-    prerequisite: 1,
-    explanation: 2,
-    "worked-example": 3,
-    "causal-walkthrough": 3,
-  };
-  const ranks = value.teachingBlocks.map((block) =>
-    blockRank[(block as TutorLessonV1["teachingBlocks"][number]).kind]
-  );
-  if (ranks.some((rank, index) => index > 0 && rank < (ranks[index - 1] ?? rank))) {
+  if (!tutorTeachingBlocksAreOrdered(
+    value.teachingBlocks as TutorLessonV1["teachingBlocks"],
+  )) {
     return "active tutor lesson teaching blocks must follow why, prerequisite, explanation, then optional walkthrough order";
   }
 
@@ -536,11 +539,12 @@ function completedLessonProblem(value: unknown): string | null {
 
 function learningContextFromBank(bank: PracticeBankV2): StudyLearningContextSnapshotV1 {
   if (bank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION) {
-    throw new Error("Guided study checkpoints require a current PracticeBankV3 workspace.");
+    throw new Error("Guided study checkpoints require a current PracticeBankV4 workspace.");
   }
-  const current = bank as PracticeBankV3;
+  const current = bank as PracticeBankV4;
   return {
     sourceMaterials: current.sourceMaterials.map((entry) => structuredClone(entry)),
+    sourceAlignment: structuredClone(current.sourceAlignment),
     segments: current.segments.map((entry) => structuredClone(entry)),
     visuals: current.visuals.map((entry) => structuredClone(entry)),
     exercises: current.exercises.map((entry) => structuredClone(entry)),
@@ -559,7 +563,7 @@ function syntheticLearningBank(
     "bankId" | "bankRevisionAtStart" | "source" | "startedAt" | "updatedAt"
   >,
   context: StudyLearningContextSnapshotV1,
-): PracticeBankV3 {
+): PracticeBankV4 {
   return {
     schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
     bankId: checkpoint.bankId,
@@ -572,6 +576,7 @@ function syntheticLearningBank(
     exercises: context.exercises.map((entry) => structuredClone(entry)),
     sessions: [],
     sourceMaterials: context.sourceMaterials.map((entry) => structuredClone(entry)),
+    sourceAlignment: structuredClone(context.sourceAlignment),
     aspects: context.aspects.map((entry) => structuredClone(entry)),
     practiceSets: context.practiceSets.map((entry) => structuredClone(entry)),
     tutorLessons: context.tutorLessons.map((entry) => structuredClone(entry)),
@@ -591,6 +596,7 @@ function learningContextProblem(
   if (
     !isRecord(value)
     || !Array.isArray(value.sourceMaterials)
+    || !isRecord(value.sourceAlignment)
     || !Array.isArray(value.segments)
     || !Array.isArray(value.visuals)
     || !Array.isArray(value.exercises)
@@ -601,7 +607,7 @@ function learningContextProblem(
   ) return "the approved learning context snapshot is incomplete";
   const context = value as unknown as StudyLearningContextSnapshotV1;
   const bank = syntheticLearningBank(checkpoint, context);
-  const validation = validatePracticeBankV3(bank);
+  const validation = validatePracticeBank(bank);
   if (validation.ok) return null;
   const first = validation.issues[0];
   return `approved learning context is invalid: ${first?.path ?? "/"}: ${first?.message ?? "unknown error"}`;
@@ -936,6 +942,41 @@ function syntheticBank(
   };
 }
 
+function alignmentSnapshotsProblem(
+  value: unknown,
+  exerciseIds: readonly string[],
+): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > exerciseIds.length) {
+    return "alignment snapshots must be a bounded array";
+  }
+  const allowed = new Set(exerciseIds);
+  const seen = new Set<string>();
+  for (const snapshot of value) {
+    if (
+      !isRecord(snapshot)
+      || typeof snapshot.exerciseId !== "string"
+      || !allowed.has(snapshot.exerciseId)
+      || seen.has(snapshot.exerciseId)
+      || !Array.isArray(snapshot.records)
+      || (
+        snapshot.aiContextCompletionPolicy !== undefined
+        && !isAiContextCompletionPolicy(snapshot.aiContextCompletionPolicy)
+      )
+      || (
+        snapshot.state !== "course-aligned"
+        && snapshot.state !== "notes-differ"
+        && snapshot.state !== "notes-incomplete"
+        && snapshot.state !== "notes-grounded-unverified"
+        && snapshot.state !== "school-sources-disagree"
+        && snapshot.state !== "insufficient-evidence"
+      )
+    ) return "alignment snapshots are invalid or reference the wrong exercise";
+    seen.add(snapshot.exerciseId);
+  }
+  return null;
+}
+
 function checkpointProblem(value: StudySessionCheckpointV1): string | null {
   if (!safeVaultPath(value.bankPath)) return "bankPath is not a safe vault-relative path";
   if (!safeId(value.bankId) || !safeId(value.sessionId)) return "bank or session identity is invalid";
@@ -972,6 +1013,11 @@ function checkpointProblem(value: StudySessionCheckpointV1): string | null {
   if (new Set(exerciseIds).size !== exerciseIds.length) {
     return "the locked exercise order contains duplicate IDs";
   }
+  const alignmentProblem = alignmentSnapshotsProblem(
+    value.alignmentSnapshots,
+    exerciseIds,
+  );
+  if (alignmentProblem !== null) return alignmentProblem;
   if (
     !Number.isInteger(value.currentQuestionIndex)
     || value.currentQuestionIndex < 0
@@ -1063,11 +1109,67 @@ export function parseStudySessionCheckpoint(
   if (new TextEncoder().encode(serialized).byteLength > MAX_STUDY_CHECKPOINT_BYTES) {
     return { status: "invalid", message: "checkpoint exceeds the 12 MB safety limit" };
   }
-  const checkpoint = structuredClone(value) as unknown as StudySessionCheckpointV1;
+  const checkpoint = migrateLegacyCheckpointContext(
+    structuredClone(value) as unknown as StudySessionCheckpointV1,
+  );
   const problem = checkpointProblem(checkpoint);
   return problem === null
     ? { status: "ok", checkpoint }
     : { status: "invalid", message: problem };
+}
+
+function migrateLegacyCheckpointContext(
+  checkpoint: StudySessionCheckpointV1,
+): StudySessionCheckpointV1 {
+  const legacyExerciseIds = safeCheckpointExerciseIds(checkpoint.exercises);
+  const alignmentSnapshots = checkpoint.alignmentSnapshots === undefined
+    && legacyExerciseIds !== null
+    ? legacyExerciseIds.map((exerciseId) => ({
+        exerciseId,
+        state: "notes-grounded-unverified" as const,
+        records: [],
+      }))
+    : checkpoint.alignmentSnapshots;
+  const migratedCheckpoint: StudySessionCheckpointV1 = {
+    ...checkpoint,
+    ...(alignmentSnapshots === undefined ? {} : { alignmentSnapshots }),
+  };
+  const progress = migratedCheckpoint.learningProgress;
+  if (progress === undefined) return migratedCheckpoint;
+  const context = progress.context;
+  if (context === undefined) return migratedCheckpoint;
+  const raw = context as unknown as {
+    readonly sourceMaterials: readonly Record<string, unknown>[];
+    readonly sourceAlignment?: unknown;
+  };
+  const sourceMaterials = raw.sourceMaterials.map((material) => ({
+    ...material,
+    classification: material.classification ?? "unclassified",
+    classificationState: material.classificationState ?? "migration-default",
+  })) as unknown as StudyLearningContextSnapshotV1["sourceMaterials"];
+  return {
+    ...migratedCheckpoint,
+    learningProgress: {
+      ...progress,
+      context: {
+        ...context,
+        sourceMaterials,
+        sourceAlignment: raw.sourceAlignment === undefined
+          ? emptySourceAlignmentLedger()
+          : raw.sourceAlignment as SourceAlignmentLedgerV1,
+      },
+    },
+  };
+}
+
+function safeCheckpointExerciseIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const exerciseIds: string[] = [];
+  for (const exercise of value as unknown[]) {
+    if (!isRecord(exercise) || typeof exercise.id !== "string") return null;
+    exerciseIds.push(exercise.id);
+  }
+  return exerciseIds;
 }
 
 function citedSnapshot(
@@ -1092,7 +1194,7 @@ function citedSnapshot(
   const tutorLessons = learningProgress === undefined
     ? []
     : bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
-      ? (bank as PracticeBankV3).tutorLessons
+      ? (bank as PracticeBankV4).tutorLessons
       : learningProgress.activeLesson === null
         ? []
         : [learningProgress.activeLesson.lesson];
@@ -1140,6 +1242,18 @@ export function createStudySessionCheckpoint(
     ? undefined
     : lockLearningProgress(bank, suppliedLearningProgress);
   const snapshot = citedSnapshot(bank, progress.orderedExerciseIds, learningProgress);
+  const alignmentSnapshots = bank.schemaVersion === CURRENT_PRACTICE_BANK_SCHEMA_VERSION
+    ? createExerciseAlignmentSnapshots(
+        bank as PracticeBankV4,
+        progress.orderedExerciseIds,
+      )
+    : [...(progress.alignmentSnapshots ?? [])].map((entry) => structuredClone(entry));
+  if (
+    progress.alignmentSnapshots !== undefined
+    && canonicalJson(progress.alignmentSnapshots) !== canonicalJson(alignmentSnapshots)
+  ) {
+    throw new Error("The study alignment evidence no longer matches the bank that started it.");
+  }
   const checkpoint: StudySessionCheckpointV1 = {
     schemaVersion: STUDY_SESSION_CHECKPOINT_SCHEMA_VERSION,
     phase: "active",
@@ -1151,6 +1265,7 @@ export function createStudySessionCheckpoint(
     segments: snapshot.segments,
     visuals: snapshot.visuals,
     exercises: snapshot.exercises,
+    alignmentSnapshots,
     sessionId: progress.sessionId,
     startedAt: progress.startedAt,
     updatedAt,
@@ -1190,6 +1305,13 @@ export function updateStudySessionCheckpoint(
   ) {
     throw new Error("The active study progress does not match its locked checkpoint.");
   }
+  if (
+    progress.alignmentSnapshots !== undefined
+    && canonicalJson(progress.alignmentSnapshots)
+      !== canonicalJson(checkpoint.alignmentSnapshots ?? [])
+  ) {
+    throw new Error("The active study progress attempted to replace its locked alignment evidence.");
+  }
   const rawSuppliedLearningProgress = progressLearningProgress(progress);
   let suppliedLearningProgress = rawSuppliedLearningProgress;
   if (
@@ -1225,6 +1347,9 @@ export function updateStudySessionCheckpoint(
     answers: structuredClone(progress.answers),
     skippedExerciseIds: [...(progress.skippedExerciseIds ?? [])],
     currentInput: structuredClone(progress.currentInput),
+    alignmentSnapshots: checkpoint.alignmentSnapshots?.map((entry) =>
+      structuredClone(entry)
+    ) ?? [],
     answerReviewMode: progress.answerReviewMode,
     answerReviewProvider: progress.answerReviewProvider,
     answerReviewReasoningEffort: progress.answerReviewReasoningEffort,

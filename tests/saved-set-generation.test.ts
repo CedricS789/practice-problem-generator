@@ -9,19 +9,28 @@ import {
   validatePracticeSetReplacement,
   type PracticeSetDraftV1,
 } from "../src/learning-path-generation";
+import { replacePracticeSetContent } from "../src/learning-path";
 import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
+  SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION,
   type AiReviewSessionItemResultV2,
   type ExerciseV1,
-  type PracticeBankV3,
+  type PracticeBankV4,
   type SessionExerciseEvidenceV3,
-  type SessionSummaryV3,
+  type SessionSummaryV4,
 } from "../src/model";
 import {
+  createSourceAlignmentLedger,
+  emptySourceAlignmentLedger,
+} from "../src/source-alignment";
+import {
+  appendSavedSetSourceAlignment,
   createSavedSetPayloadContext,
   deriveRepairSetSeed,
   repairFocusInstructions,
+  savedSetSourceAlignmentLinks,
 } from "../src/saved-set-generation";
+import { validatePracticeBankV4 } from "../src/schema";
 import type { GenerationRecipeCatalogV1 } from "../src/regeneration";
 import type {
   FinishedStudySession,
@@ -50,7 +59,7 @@ function shortAnswer(
   };
 }
 
-function workspace(): PracticeBankV3 {
+function workspace(): PracticeBankV4 {
   const primaryExercise = shortAnswer(
     "exercise-foundation",
     "Foundation relation",
@@ -92,9 +101,12 @@ function workspace(): PracticeBankV3 {
     visuals: [],
     exercises: [primaryExercise, siblingExercise],
     sessions: [],
+    sourceAlignment: emptySourceAlignmentLedger(),
     sourceMaterials: [{
       id: "material-primary",
       role: "primary",
+      classification: "unclassified",
+      classificationState: "migration-default",
       vaultPath: "Notes/Synthetic.md",
       wikilink: "[[Notes/Synthetic]]",
       title: "Synthetic primary",
@@ -105,6 +117,8 @@ function workspace(): PracticeBankV3 {
     }, {
       id: "material-support",
       role: "supporting",
+      classification: "unclassified",
+      classificationState: "migration-default",
       vaultPath: "Sources/Synthetic.pdf",
       wikilink: "[[Sources/Synthetic.pdf]]",
       title: "Synthetic support",
@@ -170,6 +184,53 @@ function workspace(): PracticeBankV3 {
       }],
     },
   };
+}
+
+function alignedWorkspace(): PracticeBankV4 {
+  const bank = workspace();
+  bank.sourceMaterials[0] = {
+    ...bank.sourceMaterials[0]!,
+    classification: "personal-note",
+    classificationState: "confirmed",
+  };
+  bank.sourceMaterials[1] = {
+    ...bank.sourceMaterials[1]!,
+    classification: "instructor-material",
+    classificationState: "confirmed",
+  };
+  bank.sourceAlignment = createSourceAlignmentLedger({
+    sourceMaterials: bank.sourceMaterials,
+    segments: bank.segments,
+    draft: {
+      schemaVersion: SOURCE_ALIGNMENT_DRAFT_SCHEMA_VERSION,
+      records: [{
+        id: "alignment-supported-relation",
+        status: "aligned",
+        noteSegmentIds: ["seg-primary"],
+        schoolSegmentIds: ["material-support:seg-transfer"],
+        noteClaim: "The primary relation lowers the supported quantity.",
+        schoolClaim: "The lower quantity changes the transfer response.",
+        courseSupportedClaim: "The approved relation connects the quantity and transfer response.",
+        resolution: "course-authority",
+      }],
+    },
+    provenance: {
+      provider: "codex",
+      providerVersion: "codex-cli synthetic",
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      promptVersion: "practice-source-alignment-v1",
+      generatedAt: "2026-08-22T08:30:00.000Z",
+    },
+    exerciseLinks: [{
+      targetId: "exercise-foundation",
+      alignmentRecordIds: ["alignment-supported-relation"],
+    }, {
+      targetId: "exercise-transfer",
+      alignmentRecordIds: ["alignment-supported-relation"],
+    }],
+  });
+  return bank;
 }
 
 function configuration(): GenerationConfiguration {
@@ -280,6 +341,82 @@ test("set-only payload retains complete source and sibling context but only the 
   assert.deepEqual(rebuilt, context.payload);
 });
 
+test("saved-set payloads carry the approved ledger and local relinking preserves untouched alignment", () => {
+  const bank = alignedWorkspace();
+  const targetSet = bank.practiceSets[0];
+  assert.ok(targetSet);
+  const context = createSavedSetPayloadContext({
+    bank,
+    targetSet,
+    configuration: configuration(),
+    batchId: "aligned-saved-set-batch",
+  });
+  assert.deepEqual(context.planningInput.sourceAlignment, bank.sourceAlignment);
+  assert.deepEqual(context.payload.sourceAlignment, bank.sourceAlignment);
+
+  const repairSet = {
+    id: "set-repair",
+    title: "Repair",
+    purpose: "Repair incomplete independent evidence.",
+    instructionalRole: "repair" as const,
+    order: bank.practiceSets.length,
+    assignments: [],
+  };
+  const addContext = createSavedSetPayloadContext({
+    bank,
+    targetSet: repairSet,
+    targetAspectIds: ["aspect-foundation"],
+    configuration: configuration(),
+    addingSet: true,
+    batchId: "aligned-repair-set-batch",
+  });
+  assert.deepEqual(addContext.payload.sourceAlignment, bank.sourceAlignment);
+
+  const replacement = replacementDraft();
+  const replacementLinks = savedSetSourceAlignmentLinks(
+    context.payload.sourceAlignment,
+    replacement,
+  );
+  assert.deepEqual(replacementLinks.exerciseLinks, [{
+    targetId: "exercise-foundation-new",
+    alignmentRecordIds: ["alignment-supported-relation"],
+  }]);
+  assert.deepEqual(replacementLinks.tutorLessonLinks, []);
+
+  const replaced = replacePracticeSetContent(bank, targetSet.id, {
+    set: {
+      ...structuredClone(targetSet),
+      assignments: replacement.assignments.map((assignment) => structuredClone(assignment)),
+    },
+    exercises: replacement.exercises,
+    tutorLessons: replacement.tutorLessons,
+    sourceAlignmentLinks: replacementLinks,
+  }, "2026-08-22T09:30:00.000Z");
+  assert.deepEqual(replaced.sourceAlignment.records, bank.sourceAlignment.records);
+  assert.deepEqual(replaced.sourceAlignment.provenance, bank.sourceAlignment.provenance);
+  assert.deepEqual(
+    replaced.sourceAlignment.exerciseLinks.map((link) => link.targetId),
+    ["exercise-transfer", "exercise-foundation-new"],
+  );
+  assert.deepEqual(replaced.sessions, bank.sessions);
+  assert.equal(validatePracticeBankV4(replaced).ok, true);
+
+  const repairDraft: PracticeSetDraftV1 = {
+    ...replacementDraft(
+      "exercise-repair",
+      "Apply the approved relation in a fresh repair scenario.",
+    ),
+    setId: "set-repair",
+  };
+  const appended = appendSavedSetSourceAlignment(bank.sourceAlignment, repairDraft);
+  assert.deepEqual(appended.records, bank.sourceAlignment.records);
+  assert.deepEqual(appended.provenance, bank.sourceAlignment.provenance);
+  assert.deepEqual(
+    appended.exerciseLinks.map((link) => link.targetId),
+    ["exercise-foundation", "exercise-transfer", "exercise-repair"],
+  );
+});
+
 test("replacement validation rejects exercise ID and normalized prompt collisions with untouched siblings", () => {
   const bank = workspace();
   const targetSet = bank.practiceSets[0];
@@ -379,8 +516,8 @@ function reviewedAiResult(
 }
 
 function repairSession(): {
-  readonly bank: PracticeBankV3;
-  readonly session: SessionSummaryV3;
+  readonly bank: PracticeBankV4;
+  readonly session: SessionSummaryV4;
   readonly finished: FinishedStudySession;
 } {
   const bank = workspace();
@@ -414,7 +551,7 @@ function repairSession(): {
     attempts: 1,
     error: { code: "synthetic", message: "Synthetic failure", retryable: true },
   };
-  const session: SessionSummaryV3 = {
+  const session: SessionSummaryV4 = {
     schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
     id: "session-repair",
     startedAt: "2026-08-22T09:00:00.000Z",

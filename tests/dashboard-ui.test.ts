@@ -76,6 +76,59 @@ test("dashboard scope state survives workspace restoration and opens in a main t
   assert.match(openDashboard, /leaf\.view\.setScope\(scope\)/u);
 });
 
+test("dashboard uses four active-panel pages and keeps page state local to the open view", () => {
+  assert.match(
+    dashboardViewSource,
+    /export type DashboardPage = "practice-now" \| "learning" \| "activity" \| "library"/u,
+  );
+  assert.match(
+    dashboardViewSource,
+    /private activePage: DashboardPage = "practice-now"/u,
+  );
+  const render = sourceBetween(
+    dashboardViewSource,
+    "private render(): void",
+    "private dashboardContainer(",
+  );
+  assert.match(render, /renderHorizontalTabs\(this\.contentEl, \{/u);
+  for (const [id, label] of [
+    ["practice-now", "Practice now"],
+    ["learning", "Learning"],
+    ["activity", "Activity"],
+    ["library", "Library"],
+  ]) {
+    assert.match(
+      render,
+      new RegExp(`\\{ id: "${id}", label: "${label}" \\}`, "u"),
+    );
+  }
+  assert.match(render, /renderPanel: \(panel\) => \{/u);
+  assert.match(render, /this\.activePanelEl = panel/u);
+  assert.doesNotMatch(dashboardViewSource, /recordValue\(state, "activePage"\)/u);
+});
+
+test("Practice now prefers recovery, then recent guided and regular practice", () => {
+  const practiceNow = sourceBetween(
+    dashboardViewSource,
+    "private renderPracticeNow(",
+    "private mostRecentBank(",
+  );
+  assert.match(dashboardViewSource, /export interface DashboardRecoveryPresentation/u);
+  assert.match(dashboardViewSource, /readonly state: "resumable" \| "needs-resolution"/u);
+  assert.match(practiceNow, /this\.recoveryPresentation\(\)/u);
+  assert.match(practiceNow, /this\.options\.handleRecovery/u);
+  assert.match(practiceNow, /this\.mostRecentBank\(summary, true\)/u);
+  assert.match(practiceNow, /this\.mostRecentBank\(summary, false\)/u);
+  assert.match(practiceNow, /setButtonText\("Choose practice"\)/u);
+  for (const summary of ["Performance", "Practised coverage", "Recent activity", "Needs attention"]) {
+    assert.ok(practiceNow.includes(summary), `Missing Practice now summary: ${summary}`);
+  }
+  assert.match(practiceNow, /spaced-repetition schedule/u);
+  assert.match(dashboardViewSource, /typeof presentation === "function"/u);
+  assert.match(mainSource, /recoveryPresentation: \(\) => this\.dashboardRecoveryPresentation\(\)/u);
+  assert.match(mainSource, /handleRecovery: async \(action\)/u);
+});
+
 test("dashboard analytics stay scoped, accessible, and descriptive rather than scheduled", () => {
   const analytics = sourceBetween(
     dashboardViewSource,
@@ -121,6 +174,36 @@ test("dashboard analytics stay scoped, accessible, and descriptive rather than s
   assert.match(options, /weekStart: this\.settings\.dashboardWeekStart/u);
 });
 
+test("Activity shows one local visualization and Library keeps secondary actions collapsed", () => {
+  const analytics = sourceBetween(
+    dashboardViewSource,
+    "private renderActivityAnalytics(",
+    "private renderActivityHeatmap(",
+  );
+  for (const view of ["Heatmap", "Trend", "Performance", "Outcomes"]) {
+    assert.ok(analytics.includes(view), `Missing activity view: ${view}`);
+  }
+  assert.match(dashboardViewSource, /private activityView: DashboardActivityView = "heatmap"/u);
+  assert.match(analytics, /if \(this\.activityView === "heatmap"\)/u);
+  assert.match(analytics, /if \(this\.activityView === "trend"\)/u);
+  assert.match(analytics, /if \(this\.activityView === "performance"\)/u);
+  assert.match(analytics, /if \(this\.activityView === "outcomes"\)/u);
+  assert.match(analytics, /Changes this dashboard view only\./u);
+
+  const library = sourceBetween(
+    dashboardViewSource,
+    "private renderBankSection(",
+    "private async runAction(",
+  );
+  assert.match(library, /"Library"/u);
+  assert.match(library, /text: "More…"/u);
+  assert.match(library, /recovery\.state === "resumable" \? "Resume" : "Resolve"/u);
+  assert.match(library, /setButtonText\("Continue"\)/u);
+  assert.match(library, /setButtonText\("Start"\)/u);
+  assert.match(library, /this\.options\.openBank\(record\)/u);
+  assert.match(library, /this\.options\.openSource\(record\)/u);
+});
+
 test("guided-path dashboard separates evidence, assistance, coverage, and advisory next steps", () => {
   const guided = sourceBetween(
     dashboardViewSource,
@@ -128,30 +211,24 @@ test("guided-path dashboard separates evidence, assistance, coverage, and adviso
     "private renderActivityAnalytics(",
   );
   for (const label of [
+    "Learning",
     "Guided learning paths",
-    "Independent performance",
-    "Guided lessons",
-    "Source coverage",
-    "Assistance used",
-    "Recovery after difficulty",
-    "Consistent evidence",
-    "Developing",
-    "Unpracticed",
-    "Recommended next",
-    "View set and aspect evidence",
+    "Current step",
+    "Independent evidence",
+    "Lesson progress",
+    "Evidence state",
+    "Continue learning",
+    "Details",
     "Aspect evidence",
     "Practice-set evidence",
   ]) {
     assert.ok(guided.includes(label), `Missing guided dashboard label: ${label}`);
   }
-  assert.match(guided, /Independent attempts determine performance/u);
-  assert.match(guided, /never create a schedule or inflate a score/u);
+  assert.match(guided, /selectedLearningBankId/u);
+  assert.match(guided, /role: "listbox"/u);
+  assert.match(guided, /role: "option"/u);
   assert.match(guided, /recommendation\.reasons/u);
-  assert.match(guided, /derived locally from prerequisites and independent evidence/u);
-  assert.match(guided, /setButtonText\("Ignore for now"\)/u);
-  assert.match(guided, /No learning data is changed/u);
-  assert.match(guided, /role: "note"/u);
-  assert.match(guided, /"aria-label": `Recommended next:/u);
+  assert.match(guided, /Guided support never inflates independent performance/u);
   assert.match(guided, /data-practice-lab-description/u);
   assert.match(guided, /cell\.scope = "col"/u);
 
@@ -161,7 +238,6 @@ test("guided-path dashboard separates evidence, assistance, coverage, and adviso
     "private contextualTagOptions(",
   );
   assert.match(render, /display\.showLearningPathAnalytics/u);
-  assert.match(render, /summary\.learning\.pathBankCount > 0/u);
   assert.match(render, /this\.renderLearningPathAnalytics\(summary, snapshot\.records\)/u);
 });
 
@@ -173,11 +249,18 @@ test("restored unavailable filters stay selected and visible", () => {
     "private contextualTagOptions(",
   );
   assert.ok(
-    render.indexOf("this.renderFilters(scopeOptions, tagOptions)")
+    render.indexOf("this.renderScopeBar(scopeOptions, tagOptions)")
       < render.indexOf("if (snapshot.records.length === 0)"),
-    "Filters must render even when every saved bank disappeared",
+    "The compact scope bar must render even when every saved bank disappeared",
   );
-  assert.match(render, /display\.showScopeControls/u);
+  const scopeBar = sourceBetween(
+    dashboardViewSource,
+    "private renderScopeBar(",
+    "private scopeLabel(",
+  );
+  assert.match(scopeBar, /showScopeControls/u);
+  assert.match(scopeBar, /Change scope…/u);
+  assert.match(scopeBar, /scopeEditorOpen/u);
 
   const filters = sourceBetween(
     dashboardViewSource,
@@ -263,7 +346,7 @@ test("dashboard actions reuse saved-bank practice and exact Obsidian links", () 
   );
   assert.match(
     options,
-    /openLinkText\(record\.bankPath, "", true\)/u,
+    /openPracticeBank\(record\.bankPath\)/u,
   );
   assert.match(
     options,
@@ -284,6 +367,22 @@ test("dashboard actions reuse saved-bank practice and exact Obsidian links", () 
   assert.match(dashboardViewSource, /this\.options\.openSource\(record\)/u);
   assert.match(dashboardViewSource, /setButtonText\("Regenerate \/ tweak"\)/u);
   assert.match(dashboardViewSource, /this\.options\.regenerate\?\.\(record\)/u);
+});
+
+test("saved Practice notes open by exact TFile without an empty mobile link origin", () => {
+  const openPracticeBank = sourceBetween(
+    mainSource,
+    "private async openPracticeBank(",
+    "private async requestRemovePracticeSession(",
+  );
+  assert.match(openPracticeBank, /normalizePath\(bankPath\)/u);
+  assert.match(openPracticeBank, /getAbstractFileByPath\(normalized\)/u);
+  assert.match(openPracticeBank, /file instanceof TFile/u);
+  assert.match(openPracticeBank, /getLeaf\("tab"\)/u);
+  assert.match(openPracticeBank, /await leaf\.openFile\(/u);
+  assert.match(openPracticeBank, /await this\.app\.workspace\.revealLeaf\(leaf\)/u);
+  assert.doesNotMatch(openPracticeBank, /openLinkText/u);
+  assert.doesNotMatch(mainSource, /openPracticeBank\([^\n]*,\s*""\)/u);
 });
 
 test("open dashboards refresh once after a burst of vault or tag changes", () => {

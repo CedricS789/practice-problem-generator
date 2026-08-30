@@ -3,9 +3,13 @@ import type { StudySessionLearningProgressV1 } from "../study-checkpoint";
 import type { CliActivityEvent } from "../cli/contracts";
 import type {
   ExerciseV1,
+  ExerciseAlignmentSnapshotV1,
+  AiContextCompletionPolicyV1,
   GifFramePositionV1,
   ReasoningEffortV1,
   SelfRatingV1,
+  SourceMaterialClassificationStateV1,
+  SourceMaterialClassificationV1,
 } from "../model";
 import type {
   PracticeLabDisplayPreferences,
@@ -58,6 +62,9 @@ export interface SourcePresentation {
   /** Exact PDF scope chosen by the learner; absent for Markdown sources. */
   readonly pdfPageSelection?: PdfPageSelectionPresentation;
   readonly visuals: readonly DetectedVisual[];
+  /** Epistemic role is independent from primary/supporting bundle ownership. */
+  readonly classification?: SourceMaterialClassificationV1;
+  readonly classificationState?: SourceMaterialClassificationStateV1;
 }
 
 export interface PdfPageSelectionPresentation {
@@ -99,6 +106,8 @@ export interface GenerationConfiguration {
   readonly exerciseTypes: readonly ExerciseType[];
   readonly exerciseTypePercentages: ExerciseTypePercentages;
   readonly selectedVisualIds: readonly string[];
+  /** Optional only so interrupted legacy jobs remain recoverable. */
+  readonly aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
 }
 
 export interface PracticeLabConfigurationDefaults {
@@ -118,6 +127,7 @@ export interface PracticeLabConfigurationDefaults {
   readonly answerReviewMode?: AnswerReviewMode;
   readonly answerReviewProvider?: ProviderId;
   readonly answerReviewReasoningEffort?: ReasoningEffort;
+  readonly aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
 }
 
 export interface PayloadPreview {
@@ -194,6 +204,8 @@ export interface DraftExercisePresentation {
   readonly visualUrl?: string;
   readonly masks?: readonly OcclusionMaskCandidate[];
   readonly answerReviewContext?: AnswerReviewContextPresentation;
+  /** Immutable course-alignment evidence, revealed only after submission. */
+  readonly alignment?: ExerciseAlignmentSnapshotV1;
   readonly grading: GradingRule;
 }
 
@@ -214,6 +226,8 @@ export interface AnswerReviewSourceSegment {
   readonly id: string;
   readonly headingPath: readonly string[];
   readonly text: string;
+  readonly classification?: SourceMaterialClassificationV1;
+  readonly sourceTitle?: string;
 }
 
 export interface AnswerReviewContextPresentation {
@@ -325,6 +339,8 @@ export interface StudySessionProgressV1 extends StudySessionOriginV1 {
   /** Questions deliberately left unanswered in this run. */
   readonly skippedExerciseIds?: readonly string[];
   readonly currentInput: StudyCurrentInputStateV1 | null;
+  /** Locked post-answer evidence; absence keeps historical checkpoints readable. */
+  readonly alignmentSnapshots?: readonly ExerciseAlignmentSnapshotV1[];
   readonly answerReviewMode: AnswerReviewMode;
   readonly answerReviewProvider: ProviderId;
   readonly answerReviewReasoningEffort: ReasoningEffort;
@@ -370,6 +386,11 @@ export interface PracticeLabCallbacks {
   /** Opens a searchable vault picker and returns the selected complete note. */
   readonly requestNoteSource?: () => Promise<SourcePresentation | null>;
   readonly requestPdfSource?: () => Promise<SourcePresentation | null>;
+  /** Confirms a suggested source label without changing the source file. */
+  readonly confirmSourceClassification?: (
+    source: SourcePresentation,
+    classification: SourceMaterialClassificationV1,
+  ) => Promise<SourcePresentation>;
   readonly previewPayload: (
     source: SourcePresentation,
     configuration: GenerationConfiguration,

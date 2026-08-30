@@ -11,10 +11,12 @@ import {
 } from "./learning-path-generation";
 import type {
   ExerciseV1,
-  PracticeBankV3,
+  PracticeBankV4,
   PracticeSetV1,
   SessionItemResultV2,
   SessionSummaryV3,
+  SourceAlignmentLedgerV1,
+  SourceAlignmentTargetLinkV1,
 } from "./model";
 import type {
   GenerationRecipeCatalogV1,
@@ -25,6 +27,8 @@ import type {
   GenerationConfiguration,
   StudyAnswerRecord,
 } from "./ui/contracts";
+import { linkSourceAlignmentTargets } from "./source-alignment-generation";
+import { effectiveAiContextCompletionPolicy } from "./ai-context-completion";
 
 export interface SavedSetPayloadContextV1 {
   readonly planningInput: LearningBlueprintPlanningInputV1;
@@ -32,6 +36,11 @@ export interface SavedSetPayloadContextV1 {
   readonly payload: PracticeSetPayloadV1;
   readonly siblingDrafts: readonly PracticeSetDraftV1[];
   readonly addingSet: boolean;
+}
+
+export interface SavedSetSourceAlignmentLinksV1 {
+  readonly exerciseLinks: readonly SourceAlignmentTargetLinkV1[];
+  readonly tutorLessonLinks: readonly SourceAlignmentTargetLinkV1[];
 }
 
 export interface RepairSetSeedEntryV1 {
@@ -60,7 +69,7 @@ export interface RepairPayloadDisclosureV1 {
 
 /** Reconstructs the exact approved path context for one set-only AI call. */
 export function createSavedSetPayloadContext(input: {
-  readonly bank: PracticeBankV3;
+  readonly bank: PracticeBankV4;
   readonly targetSet: PracticeSetV1;
   readonly configuration: GenerationConfiguration;
   readonly recipeCatalog?: GenerationRecipeCatalogV1;
@@ -140,6 +149,11 @@ export function createSavedSetPayloadContext(input: {
     desiredSetCount: setBriefs.length,
     globalFocusInstructions: "",
     sources,
+    sourceAlignment: structuredClone(input.bank.sourceAlignment),
+    aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+      input.configuration.aiContextCompletionPolicy
+        ?? input.bank.aiContextCompletionPolicy,
+    ),
   };
   const payload = createPracticeSetPayload({
     batchId: input.batchId ?? `set-update-${crypto.randomUUID()}`,
@@ -160,8 +174,47 @@ export function createSavedSetPayloadContext(input: {
   };
 }
 
+/**
+ * Derive target links locally from the exact approved alignment ledger and the
+ * generated citations. The provider never chooses or invents these links.
+ */
+export function savedSetSourceAlignmentLinks(
+  ledger: SourceAlignmentLedgerV1,
+  draft: PracticeSetDraftV1,
+): SavedSetSourceAlignmentLinksV1 {
+  const linked = linkSourceAlignmentTargets({
+    ledger,
+    exercises: draft.exercises,
+    tutorLessons: draft.tutorLessons,
+  });
+  return {
+    exerciseLinks: linked.exerciseLinks,
+    tutorLessonLinks: linked.tutorLessonLinks,
+  };
+}
+
+/**
+ * Add one new set's target links without changing alignment records,
+ * provenance, or links owned by the rest of the saved workspace.
+ */
+export function appendSavedSetSourceAlignment(
+  ledger: SourceAlignmentLedgerV1,
+  draft: PracticeSetDraftV1,
+): SourceAlignmentLedgerV1 {
+  const links = savedSetSourceAlignmentLinks(ledger, draft);
+  return {
+    schemaVersion: ledger.schemaVersion,
+    records: ledger.records.map((record) => structuredClone(record)),
+    exerciseLinks: mergeTargetLinks(ledger.exerciseLinks, links.exerciseLinks),
+    tutorLessonLinks: mergeTargetLinks(ledger.tutorLessonLinks, links.tutorLessonLinks),
+    provenance: ledger.provenance === null
+      ? null
+      : structuredClone(ledger.provenance),
+  };
+}
+
 export function practiceSetDraftFromBank(
-  bank: PracticeBankV3,
+  bank: PracticeBankV4,
   set: PracticeSetV1,
 ): PracticeSetDraftV1 {
   const exerciseById = new Map(bank.exercises.map((exercise) => [exercise.id, exercise]));
@@ -186,7 +239,7 @@ export function practiceSetDraftFromBank(
 
 /** Build a local repair brief from the just-finished independent evidence. */
 export function deriveRepairSetSeed(
-  bank: PracticeBankV3,
+  bank: PracticeBankV4,
   session: SessionSummaryV3,
   finished?: FinishedStudySession,
 ): RepairSetSeedV1 | null {
@@ -258,7 +311,7 @@ export function repairFocusInstructions(
   return lines.join("\n").slice(0, 4_000);
 }
 
-function tutorBriefs(bank: PracticeBankV3): TutorLessonBriefDraftV1[] {
+function tutorBriefs(bank: PracticeBankV4): TutorLessonBriefDraftV1[] {
   return bank.tutorLessons.map((lesson) => ({
     id: lesson.id,
     title: lesson.title,
@@ -296,6 +349,17 @@ function submittedAnswerText(answer: StudyAnswerRecord): string {
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function mergeTargetLinks(
+  existing: readonly SourceAlignmentTargetLinkV1[],
+  replacements: readonly SourceAlignmentTargetLinkV1[],
+): SourceAlignmentTargetLinkV1[] {
+  const replacementTargets = new Set(replacements.map((link) => link.targetId));
+  return [
+    ...existing.filter((link) => !replacementTargets.has(link.targetId)),
+    ...replacements,
+  ].map((link) => structuredClone(link));
 }
 
 export function exerciseTitle(exercise: ExerciseV1): string {

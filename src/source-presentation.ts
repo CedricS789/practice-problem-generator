@@ -25,6 +25,12 @@ export function snapshotSourcePresentation(
             documentPageCount: source.pdfPageSelection.documentPageCount,
           },
         }),
+    ...(source.classification === undefined
+      ? {}
+      : { classification: source.classification }),
+    ...(source.classificationState === undefined
+      ? {}
+      : { classificationState: source.classificationState }),
     visuals: source.visuals.map(snapshotDetectedVisual),
   };
 }

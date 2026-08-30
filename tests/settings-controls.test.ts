@@ -41,6 +41,7 @@ test("settings expose generation, study, view, bank, and dashboard control group
     "practiceBankCustomFolder",
     "practiceBankPathTemplate",
     "practiceViewLocation",
+    "savedBankOpenMode",
     "studyOrderDefault",
     "studyTypeSequence",
     "studyShuffleWithinTypesDefault",
@@ -101,8 +102,8 @@ test("mobile registers review surfaces but hides desktop-only creation entry poi
     mainSource,
     /Platform\.isMobileApp\s*\|\| !\(file instanceof TFile\)/u,
   );
-  assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*this\.addHeading\(\s*"Generation defaults"/su);
-  assert.match(settingsSource, /if \(!Platform\.isMobileApp\) \{\s*const advanced = this\.addSettingsGroup\(\s*"Advanced runtime"/su);
+  assert.match(settingsSource, /if \(!Platform\.isMobileApp && selectedPage === "ai-sets"\) \{/u);
+  assert.match(settingsSource, /if \(!Platform\.isMobileApp && selectedPage === "advanced"\) \{/u);
   assert.match(mainSource, /creationAvailable: !Platform\.isMobileApp/u);
   assert.match(
     viewSource,
@@ -259,11 +260,11 @@ test("optional presentation never hides consent or repair controls", () => {
   assert.match(viewSource, /Preview exactly what will be sent/u);
   assert.match(viewSource, /I reviewed this exact payload/u);
   assert.match(bankSource, /requiresReviewManagement/u);
-  assert.match(bankSource, /Pending and failed reviews/u);
+  assert.match(bankSource, /Pending or failed AI reviews/u);
   assert.match(bankSource, /Generation history/u);
   assert.match(bankSource, /Model provider default \(not pinned or recorded\)/u);
   assert.match(dashboardSource, /this\.renderDiagnostics\(snapshot, summary\)/u);
-  assert.match(dashboardSource, /All optional dashboard sections are hidden/u);
+  assert.match(dashboardSource, /hidden in dashboard settings/u);
   for (const analyticsControl of [
     "Quick layout",
     "Layout and scope",
@@ -284,10 +285,51 @@ test("optional presentation never hides consent or repair controls", () => {
       `Missing analytics setting: ${analyticsControl}`,
     );
   }
-  assert.match(settingsSource, /SETTINGS_SCHEMA_VERSION = 7/u);
+  assert.match(settingsSource, /SETTINGS_SCHEMA_VERSION = 9/u);
   assert.match(settingsSource, /migrateLegacyDashboardPreferences/u);
+  assert.match(settingsSource, /sourceClassificationRules/u);
+  for (const classificationRule of [
+    "Official correction matches",
+    "Instructor material matches",
+    "Assigned reference matches",
+    "Personal note matches",
+  ]) {
+    assert.ok(
+      settingsSource.includes(classificationRule),
+      `Missing source-classification rule setting: ${classificationRule}`,
+    );
+  }
   assert.doesNotMatch(dashboardSource, /setName\("Time window"\)/u);
   assert.doesNotMatch(dashboardSource, /setName\("Weekly volume"\)/u);
+});
+
+test("settings use focused active-panel-only horizontal tabs", () => {
+  for (const tab of [
+    "AI & sets",
+    "Sources",
+    "Study",
+    "Workspace",
+    "Saved notes",
+    "Dashboard",
+    "Advanced",
+    "Data",
+  ]) {
+    assert.ok(settingsSource.includes(`label: "${tab}"`), `Missing settings tab: ${tab}`);
+  }
+  assert.match(settingsSource, /Platform\.isMobileApp \? "study" : "ai-sets"/u);
+  assert.match(settingsSource, /MOBILE_SETTINGS_TABS = SETTINGS_TABS\.filter/u);
+  assert.match(settingsSource, /this\.activePage = page;\s*this\.update\(\)/su);
+  assert.match(settingsSource, /renderPanel: \(panel\) => \{\s*this\.activeSettingsHost = panel/su);
+  assert.match(settingsSource, /practice-lab-horizontal-tabs--sticky/u);
+  assert.match(settingsSource, /details\.open = open/u);
+  assert.match(settingsSource, /"Layout and scope",\s*"Choose the dashboard framing and optional workflow panels\.",\s*true/su);
+});
+
+test("saved practice notes default to reading view with a preserve-mode opt-out", () => {
+  assert.match(settingsSource, /savedBankOpenMode: "reading"/u);
+  assert.match(settingsSource, /partial\.savedBankOpenMode === "preserve"/u);
+  assert.match(settingsSource, /addOption\("reading", "Reading view \(recommended\)"\)/u);
+  assert.match(settingsSource, /addOption\("preserve", "Preserve current mode"\)/u);
 });
 
 test("every study launch offers whole-question and type-aware ordering", () => {
@@ -321,5 +363,6 @@ test("three-hour AI defaults migrate durably and live activity stays optional", 
   assert.doesNotMatch(mainSource, /await this\.saveData\(this\.settings\)/u);
   assert.match(viewSource, /onActivity: \(event\) => this\.publishGenerationActivity\(event\)/u);
   assert.match(viewSource, /publishAnswerReviewActivity/u);
-  assert.match(viewSource, /this activity log is capped and is not saved to your vault/u);
+  assert.match(viewSource, /Private chain-of-thought and raw provider output are never exposed/u);
+  assert.match(viewSource, /Final generation telemetry is saved with generation provenance/u);
 });

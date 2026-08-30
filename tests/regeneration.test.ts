@@ -100,6 +100,7 @@ const configuration: GenerationConfiguration = {
     "image-occlusion": 0,
   },
   selectedVisualIds: [],
+  aiContextCompletionPolicy: "selected-sources-only",
 };
 
 test("stores a complete generation recipe in hidden plugin metadata", () => {
@@ -145,6 +146,7 @@ test("loads the exact saved recipe when its source hash matches the bank", () =>
     difficulty: configuration.difficulty,
     focusInstructions: configuration.focusInstructions,
     exerciseTypePercentages: configuration.exerciseTypePercentages,
+    aiContextCompletionPolicy: configuration.aiContextCompletionPolicy,
   });
 });
 
@@ -152,6 +154,7 @@ test("version-one recipes migrate in memory with an explicitly unpinned model", 
   const savedBank = bank();
   const recipe = createGenerationRecipe(configuration, savedBank.source.hash);
   const legacyLines = serializeGenerationRecipeFrontmatter(recipe)
+    .filter((line) => !line.startsWith("practice-lab-generation-context-policy:"))
     .map((line) => line.replace(
       "practice-lab-generation-recipe: 2",
       "practice-lab-generation-recipe: 1",
@@ -163,6 +166,7 @@ test("version-one recipes migrate in memory with an explicitly unpinned model", 
   if (parsed.status !== "ok") return;
   assert.equal(parsed.storedSchemaVersion, 1);
   assert.equal(parsed.recipe.model, "");
+  assert.equal(parsed.recipe.aiContextCompletionPolicy, undefined);
   const preset = regenerationPreset(savedBank, parsed, {
     provider: "agy",
     model: "gemini-3.6-flash-low",
@@ -172,6 +176,7 @@ test("version-one recipes migrate in memory with an explicitly unpinned model", 
   });
   assert.equal(preset.defaults.model, "");
   assert.match(preset.explanation, /older recipe did not record a pinned model/iu);
+  assert.equal(preset.defaults.aiContextCompletionPolicy, "approved-general-context");
 });
 
 test("older banks restore recorded provider/reasoning and infer only missing controls", () => {

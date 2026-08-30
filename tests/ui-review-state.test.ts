@@ -286,3 +286,20 @@ test("guided set review reports exact approval progress and the next invalid act
   assert.equal(state.blockers.length, 1);
   assert.match(state.blockers[0]?.reason ?? "", /prompt and a grounded answer/iu);
 });
+
+test("a tutor-guided exercise cannot be rejected during exercise review", () => {
+  const required = shortAnswerDraft("guided-check");
+  const input = {
+    setId: "set-guided",
+    setTitle: "Guided mechanisms",
+    exercises: [{ ...required, rejected: true }],
+    approvedExerciseIds: new Set<string>(),
+    requiredExerciseIds: new Set([required.id]),
+  };
+  const state = learningPathSetReviewState(input);
+  assert.equal(state.blockers.length, 2);
+  assert.match(state.blockers[0]?.reason ?? "", /tutor lesson depends/iu);
+  const bulk = approveReadyLearningPathExercises([input]);
+  assert.equal(bulk.blockers.length, 1);
+  assert.match(bulk.blockers[0]?.reason ?? "", /change the path plan/iu);
+});

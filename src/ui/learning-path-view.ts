@@ -16,8 +16,17 @@ import {
   type LearningBlueprintPlanningInputV1,
   type PracticeSetDraftV1,
 } from "../learning-path-generation";
+import { learningPathSaveRequestHash } from "../learning-path-save";
 import type { CliActivityEvent } from "../cli/contracts";
 import { formatCliErrorForUi } from "../cli/errors";
+import {
+  combineGenerationTelemetry,
+  formatGenerationCost,
+  formatGenerationDuration,
+  formatTokenUsage,
+  generationTelemetryFromActivity,
+  tokenUsageTotal,
+} from "../generation-telemetry";
 import {
   RECOMMENDED_EXERCISE_TYPE_PERCENTAGES,
   balanceExerciseTypes,
@@ -36,8 +45,19 @@ import {
 } from "../pdf-source-budget";
 import type {
   LearningPathStartingLevelV1,
-  PracticeBankV3,
+  AiContextCompletionPolicyV1,
+  PracticeBankV4,
+  SourceAlignmentLedgerV1,
+  SourceAlignmentRecordV1,
+  SourceAlignmentStatusV1,
+  SourceMaterialClassificationV1,
 } from "../model";
+import {
+  DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+  aiContextCompletionApproved,
+  effectiveAiContextCompletionPolicy,
+} from "../ai-context-completion";
+import { sourceAlignmentBlockers } from "../source-alignment-generation";
 import { displayReasoningEffort } from "../reasoning";
 import {
   validateOcclusionMasks,
@@ -48,6 +68,7 @@ import { installHoverDescriptions } from "./hover-descriptions";
 import { renderCreationModeSwitch as renderSharedCreationModeSwitch } from "./creation-mode-switch";
 import { renderDifficultySelector } from "./difficulty-selector";
 import { renderLatexMarkup } from "./latex-renderer";
+import { applyMarkdownHeadingTheme } from "./theme-bridge";
 import {
   approveReadyLearningPathExercises,
   learningPathSetReviewState,
@@ -81,6 +102,7 @@ export interface LearningBlueprintConfigurationV1 {
   readonly startingLevel: LearningPathStartingLevelV1;
   readonly desiredSetCount: number;
   readonly globalFocusInstructions: string;
+  readonly aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
 }
 
 export interface LearningPayloadPreviewV1 {
@@ -97,6 +119,35 @@ export interface LearningBlueprintPresentationV1 {
   readonly planningInput: LearningBlueprintPlanningInputV1;
 }
 
+/**
+ * UI-owned alignment contracts intentionally mirror the controller's public
+ * values without importing the controller at runtime. That keeps the view a
+ * presentation boundary and avoids a controller -> view -> controller cycle.
+ */
+export interface LearningSourceAlignmentPreviewV1 {
+  readonly providerLabel: string;
+  readonly modelLabel: string;
+  readonly reasoningEffortLabel: string;
+  readonly inputHash: string;
+  readonly text: string;
+  readonly requiresProvider: boolean;
+  readonly warning: string;
+}
+
+export interface LearningSourceAlignmentResultV1 {
+  readonly ledger: SourceAlignmentLedgerV1;
+  readonly blockerRecordIds: readonly string[];
+  readonly checked: boolean;
+}
+
+export interface RecoveredLearningSourceAlignmentV1 {
+  readonly primary: SourcePresentation;
+  readonly supporting: readonly SourcePresentation[];
+  readonly result: LearningSourceAlignmentResultV1;
+}
+
+export type LearningPathRecoveryKindV1 = "source-alignment" | "generation-batch";
+
 export interface LearningSetPayloadPreviewV1 {
   readonly setId: string;
   readonly setTitle: string;
@@ -111,6 +162,8 @@ export interface GeneratedLearningSetPresentationV1 {
   readonly setId: string;
   readonly draft: PracticeSetDraftV1;
   readonly exercises: readonly EditableDraftExercise[];
+  /** Present only when restored from a durable reviewed snapshot. */
+  readonly approvedExerciseIds?: readonly string[];
 }
 
 export interface LearningSetReviewV1 extends GeneratedLearningSetPresentationV1 {
@@ -131,8 +184,26 @@ export interface LearningPathSaveRequestV1 {
 
 export interface LearningPathSavedWorkspaceV1 {
   readonly path: string;
-  readonly bank: PracticeBankV3;
+  readonly bank: PracticeBankV4;
   readonly reconciledLinkCount?: number;
+  readonly reconciledTutorBlockOrderCount?: number;
+  readonly batchComplete?: boolean;
+}
+
+export interface LearningPathSavedWorkspaceStudyStateV1 {
+  readonly state: "ready" | "resume" | "blocked";
+  readonly description: string;
+}
+
+export interface LearningPathPreflightResultV1 {
+  readonly requestHash: string;
+  readonly valid: true;
+}
+
+interface SavePreflightStateV1 {
+  readonly requestHash: string;
+  readonly state: "checking" | "valid" | "invalid";
+  readonly message?: string;
 }
 
 export interface LearningPathViewCallbacks {
@@ -159,10 +230,38 @@ export interface LearningPathViewCallbacks {
   readonly updateGifFrameDefault?: (
     position: GifFramePosition,
   ) => Promise<void> | void;
+  readonly confirmSourceClassification?: (
+    source: SourcePresentation,
+    classification: SourceMaterialClassificationV1,
+  ) => Promise<SourcePresentation> | SourcePresentation;
+  readonly confirmSourceClassifications?: (
+    updates: readonly {
+      readonly source: SourcePresentation;
+      readonly classification: SourceMaterialClassificationV1;
+    }[],
+  ) => Promise<readonly SourcePresentation[]> | readonly SourcePresentation[];
   readonly openQuickPractice: (source: SourcePresentation | null) => Promise<void> | void;
   readonly resumeInterruptedQuickGeneration?: () => Promise<void> | void;
   readonly retryInterruptedQuickGeneration?: () => Promise<void> | void;
   readonly discardInterruptedQuickGeneration?: () => Promise<void> | void;
+  readonly inspectRecoverableKind?: () => Promise<LearningPathRecoveryKindV1 | null>;
+  readonly previewSourceAlignment: (
+    primary: SourcePresentation,
+    supporting: readonly SourcePresentation[],
+    configuration: LearningBlueprintConfigurationV1,
+  ) => Promise<LearningSourceAlignmentPreviewV1>;
+  readonly generateSourceAlignment: (
+    onActivity: (event: CliActivityEvent) => void,
+  ) => Promise<LearningSourceAlignmentResultV1>;
+  readonly approveSourceAlignment: (
+    ledger: SourceAlignmentLedgerV1,
+  ) => Promise<LearningSourceAlignmentResultV1> | LearningSourceAlignmentResultV1;
+  readonly continueWithoutCourseAlignment: () => (
+    Promise<LearningSourceAlignmentResultV1> | LearningSourceAlignmentResultV1
+  );
+  readonly resumeRecoverableSourceAlignment?: (
+    onActivity: (event: CliActivityEvent) => void,
+  ) => Promise<RecoveredLearningSourceAlignmentV1>;
   readonly previewBlueprint: (
     primary: SourcePresentation,
     supporting: readonly SourcePresentation[],
@@ -194,6 +293,12 @@ export interface LearningPathViewCallbacks {
   readonly saveLearningPath: (
     request: LearningPathSaveRequestV1,
   ) => Promise<LearningPathSavedWorkspaceV1>;
+  readonly preflightLearningPath?: (
+    request: LearningPathSaveRequestV1,
+  ) => Promise<LearningPathPreflightResultV1>;
+  readonly persistReviewSnapshots?: (
+    sets: readonly LearningSetReviewV1[],
+  ) => Promise<void>;
   readonly saveManagedWorkspace?: (
     workspace: LearningPathSavedWorkspaceV1,
   ) => Promise<LearningPathSavedWorkspaceV1>;
@@ -205,6 +310,9 @@ export interface LearningPathViewCallbacks {
     workspace: LearningPathSavedWorkspaceV1,
     action: "continue" | "choose-set" | "mixed" | "open-bank",
   ) => Promise<void> | void;
+  readonly savedWorkspaceStudyState?: (
+    workspace: LearningPathSavedWorkspaceV1,
+  ) => LearningPathSavedWorkspaceStudyStateV1;
   readonly resumeRecoverableBatch?: (
     onStatus: (setId: string, status: LearningSetGenerationStatusV1) => void,
     onActivity: (setId: string, event: CliActivityEvent) => void,
@@ -244,6 +352,7 @@ export interface LearningPathViewOptions {
   };
   readonly initialSource?: SourcePresentation;
   readonly recoverableBatch?: boolean;
+  readonly recoverableKind?: LearningPathRecoveryKindV1 | null;
   readonly quickGenerationRecovery?: GenerationRecoveryPresentation | null;
 }
 
@@ -264,6 +373,34 @@ interface EditableSetState {
 }
 
 type Stage = "source" | "map" | "review" | "saved";
+
+type StageState = "completed" | "current" | "available" | "needs-update" | "locked";
+
+type CreationPage =
+  | "material"
+  | "review-material"
+  | "learning-goal"
+  | "course-check"
+  | "path-plan"
+  | "generate-sets"
+  | "review-exercises"
+  | "ready";
+
+interface CreationPageDefinition {
+  readonly id: CreationPage;
+  readonly label: string;
+}
+
+const CREATION_PAGES: readonly CreationPageDefinition[] = [
+  { id: "material", label: "Material" },
+  { id: "review-material", label: "Review material" },
+  { id: "learning-goal", label: "Learning goal" },
+  { id: "course-check", label: "Course check" },
+  { id: "path-plan", label: "Path plan" },
+  { id: "generate-sets", label: "Generate sets" },
+  { id: "review-exercises", label: "Review exercises" },
+  { id: "ready", label: "Ready" },
+];
 
 const EXERCISE_LABELS: Readonly<Record<ExerciseType, string>> = {
   "short-answer": "Short answer",
@@ -297,6 +434,17 @@ const VISUAL_LABELS: Readonly<Record<DetectedVisual["kind"], string>> = {
 };
 
 const GIF_FRAME_POSITIONS = ["first", "middle", "last"] as const;
+
+const SOURCE_CLASSIFICATION_LABELS: Readonly<Record<
+  SourceMaterialClassificationV1,
+  string
+>> = {
+  "personal-note": "Personal note",
+  "official-correction": "Official correction",
+  "instructor-material": "Instructor material",
+  "assigned-reference": "Assigned reference",
+  unclassified: "Unclassified",
+};
 
 function displayGifFramePosition(value: GifFramePosition): string {
   if (value === "first") return "First frame";
@@ -362,27 +510,41 @@ function editableDraft(exercise: EditableDraftExercise): EditableDraftExercise {
 
 export class PracticeLearningPathView extends ItemView {
   private stage: Stage = "source";
+  private page: CreationPage = "material";
   private primary: SourcePresentation | null;
   private supporting: SourcePresentation[] = [];
   private providers: ProviderPresentation[];
   private blueprintConfiguration: LearningBlueprintConfigurationV1;
+  private alignmentPreview: LearningSourceAlignmentPreviewV1 | null = null;
+  private alignmentResult: LearningSourceAlignmentResultV1 | null = null;
+  private alignmentAccepted = false;
+  private aiContextCompletionDecisionMade = false;
   private preview: LearningPayloadPreviewV1 | null = null;
   private previewAccepted = false;
   private blueprint: LearningBlueprintPresentationV1 | null = null;
+  private staleBlueprint: LearningBlueprintPresentationV1 | null = null;
   private setStates: EditableSetState[] = [];
   private setPayloadPreviews: readonly LearningSetPayloadPreviewV1[] = [];
   private setPayloadsAccepted = false;
   private statuses = new Map<string, LearningSetGenerationStatusV1>();
   private activity = new Map<string, CliActivityEvent[]>();
   private generatedSets: GeneratedLearningSetPresentationV1[] = [];
+  private staleGeneratedSets: GeneratedLearningSetPresentationV1[] = [];
   private approvedBySet = new Map<string, Set<string>>();
   private reviewFeedback: string | null = null;
   private activeReviewSetId: string | null = null;
-  private busy: "source" | "preview" | "blueprint" | "payloads" | "batch" | "save" | "recovery" | null = null;
+  private busy: "source" | "alignment-preview" | "alignment" | "alignment-approval" | "preview" | "blueprint" | "payloads" | "batch" | "save" | "recovery" | null = null;
   private primarySourceChoiceBusy: SourceChoiceMode | null = null;
   private supportingSourceChoiceBusy: "note" | "pdf" | null = null;
   private error: string | null = null;
+  private saveValidationBlocked = false;
+  private savePreflight: SavePreflightStateV1 | null = null;
+  private savePreflightSequence = 0;
+  private reviewPersistenceTimer: number | undefined;
+  private reviewPersistencePending = false;
+  private reviewPersistenceChain: Promise<void> = Promise.resolve();
   private recoveryAvailable: boolean;
+  private recoveryKind: LearningPathRecoveryKindV1 | "unknown" | null;
   private savedWorkspace: LearningPathSavedWorkspaceV1 | null = null;
   private savedWorkspaceDirty = false;
   private gifFrameDefault: GifFramePosition;
@@ -391,11 +553,29 @@ export class PracticeLearningPathView extends ItemView {
   private primaryVisualPreparationToken: symbol | null = null;
   private quickGenerationRecovery: GenerationRecoveryPresentation | null;
   private readonly expandedVisualSources = new Set<string>();
+  private readonly classificationDrafts = new Map<string, SourceMaterialClassificationV1>();
   private readonly occlusionEditors: OcclusionEditor[] = [];
   private blueprintActivityHost: HTMLElement | null = null;
+  private alignmentActivityHost: HTMLElement | null = null;
+  private alignmentPreviewHost: HTMLElement | null = null;
+  private alignmentResultHost: HTMLElement | null = null;
   private planningPreviewHost: HTMLElement | null = null;
   private batchNavigatorHost: HTMLElement | null = null;
   private batchActivityHost: HTMLElement | null = null;
+  private batchCurrentHost: HTMLElement | null = null;
+  private setPayloadPreviewHost: HTMLElement | null = null;
+  private activeMapSetId: string | null = null;
+  private renderedStage: Stage | null = null;
+  private readonly stageScrollPositions = new Map<Stage, number>();
+  private renderedPage: CreationPage | null = null;
+  private readonly pageScrollPositions = new Map<CreationPage, number>();
+  private readonly disclosureState = new Map<string, boolean>();
+  private readonly staleStages = new Set<Stage>();
+  private activityClock: number | undefined;
+  private activitySummaryRefreshers: Array<{
+    readonly element: HTMLElement;
+    readonly refresh: () => void;
+  }> = [];
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -405,6 +585,8 @@ export class PracticeLearningPathView extends ItemView {
     this.navigation = false;
     this.primary = options.initialSource ?? null;
     this.recoveryAvailable = options.recoverableBatch === true;
+    this.recoveryKind = options.recoverableKind
+      ?? (this.recoveryAvailable ? "unknown" : null);
     this.quickGenerationRecovery = options.quickGenerationRecovery ?? null;
     this.providers = [...options.providers];
     this.gifFrameDefault = options.defaults.gifFrameDefault ?? "middle";
@@ -415,6 +597,7 @@ export class PracticeLearningPathView extends ItemView {
       startingLevel: "new-to-topic",
       desiredSetCount: Math.min(DEFAULT_MAX_LEARNING_PATH_SETS, 4),
       globalFocusInstructions: options.defaults.focusInstructions,
+      aiContextCompletionPolicy: DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
     };
   }
 
@@ -432,11 +615,27 @@ export class PracticeLearningPathView extends ItemView {
 
   override async onOpen(): Promise<void> {
     installHoverDescriptions(this.contentEl);
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        void this.flushReviewSnapshot().catch(() => undefined);
+      }
+    });
     this.render();
+    void this.refreshRecoveryKind();
   }
 
   override async onClose(): Promise<void> {
+    if (this.reviewPersistenceTimer !== undefined) {
+      window.clearTimeout(this.reviewPersistenceTimer);
+      this.reviewPersistenceTimer = undefined;
+    }
+    try {
+      await this.flushReviewSnapshot();
+    } catch (error) {
+      new Notice(`Guided review progress could not be checkpointed: ${errorMessage(error)}`, 8_000);
+    }
     this.clearOcclusionEditors();
+    this.clearActivityClock();
   }
 
   public setPrimarySource(source: SourcePresentation): void {
@@ -488,6 +687,7 @@ export class PracticeLearningPathView extends ItemView {
 
   public setRecoveryAvailable(available: boolean): void {
     this.recoveryAvailable = available;
+    this.recoveryKind = available ? (this.recoveryKind ?? "unknown") : null;
     this.render();
   }
 
@@ -500,26 +700,57 @@ export class PracticeLearningPathView extends ItemView {
 
   public manageSavedWorkspace(
     path: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
   ): void {
+    this.primary = null;
+    this.supporting = [];
+    this.alignmentPreview = null;
+    this.alignmentResult = null;
+    this.alignmentAccepted = false;
+    this.preview = null;
+    this.previewAccepted = false;
+    this.blueprint = null;
+    this.staleBlueprint = null;
+    this.setStates = [];
+    this.setPayloadPreviews = [];
+    this.setPayloadsAccepted = false;
+    this.statuses.clear();
+    this.activity.clear();
+    this.generatedSets = [];
+    this.staleGeneratedSets = [];
+    this.approvedBySet.clear();
+    this.activeMapSetId = null;
+    this.activeReviewSetId = null;
+    this.reviewFeedback = null;
+    this.classificationDrafts.clear();
     this.savedWorkspace = { path, bank: structuredClone(bank) };
     this.savedWorkspaceDirty = false;
     this.stage = "saved";
+    this.page = "ready";
+    this.staleStages.clear();
     this.error = null;
     this.render();
   }
 
   public async resumeRecovery(): Promise<void> {
-    if (this.busy !== null || this.options.callbacks.resumeRecoverableBatch === undefined) return;
+    if (this.busy !== null) return;
+    const kind = await this.resolveRecoveryKind();
+    if (kind === "source-alignment") {
+      await this.resumeSourceAlignmentRecovery();
+      return;
+    }
+    if (this.options.callbacks.resumeRecoverableBatch === undefined) return;
     this.busy = "batch";
     this.error = null;
-    this.stage = "review";
+    this.stage = "map";
+    this.page = "generate-sets";
     this.activity.clear();
     this.render();
     try {
       if (this.options.callbacks.inspectRecoverableBatch !== undefined) {
         this.applyRecoveredBatch(await this.options.callbacks.inspectRecoverableBatch());
-        this.stage = "review";
+        this.stage = "map";
+        this.page = "generate-sets";
         this.render();
       }
       const result = await this.options.callbacks.resumeRecoverableBatch(
@@ -535,7 +766,10 @@ export class PracticeLearningPathView extends ItemView {
       this.applyRecoveredBatch(result);
     } catch (error) {
       this.error = errorMessage(error);
-      if (this.blueprint === null) this.stage = "source";
+      if (this.blueprint === null) {
+        this.stage = "source";
+        this.page = "material";
+      }
     } finally {
       this.busy = null;
       this.render();
@@ -543,16 +777,31 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private render(): void {
+    if (this.renderedStage !== null) this.stageScrollPositions.set(this.renderedStage, this.contentEl.scrollTop);
+    if (this.renderedPage !== null) this.pageScrollPositions.set(this.renderedPage, this.contentEl.scrollTop);
+    this.ensureCurrentPageIsValid();
+    const renderedStage = this.stage;
+    const renderedPage = this.page;
+    const restoreScrollTop = this.pageScrollPositions.get(renderedPage)
+      ?? this.stageScrollPositions.get(renderedStage)
+      ?? 0;
     this.clearOcclusionEditors();
     this.blueprintActivityHost = null;
+    this.alignmentActivityHost = null;
+    this.alignmentPreviewHost = null;
+    this.alignmentResultHost = null;
     this.planningPreviewHost = null;
     this.batchNavigatorHost = null;
     this.batchActivityHost = null;
+    this.batchCurrentHost = null;
+    this.setPayloadPreviewHost = null;
+    this.activitySummaryRefreshers = [];
     this.contentEl.empty();
     this.contentEl.addClasses(["practice-lab", "practice-learning-path"]);
+    applyMarkdownHeadingTheme(this.contentEl);
     const shell = this.contentEl.createDiv({ cls: "practice-learning-path-shell" });
     this.renderHeader(shell);
-    this.renderCreationModeSwitch(shell);
+    if (this.page !== "ready") this.renderCreationModeSwitch(shell);
     this.renderQuickGenerationRecovery(shell);
     this.renderStageNavigation(shell);
     const body = shell.createDiv({ cls: "practice-learning-path-body" });
@@ -563,6 +812,7 @@ export class PracticeLearningPathView extends ItemView {
       const copy = error.createDiv({ cls: "practice-generation-error-copy" });
       copy.createEl("strong", { text: "This step did not finish" });
       copy.createEl("p", { text: presentation.summary });
+      copy.createEl("p", { cls: "practice-learning-path-error-recovery", text: presentation.recovery });
       if (presentation.details.length > 0) {
         const details = copy.createEl("details", { cls: "practice-learning-path-error-details" });
         details.createEl("summary", { text: `Show ${presentation.details.length} technical validation ${presentation.details.length === 1 ? "detail" : "details"}` });
@@ -570,29 +820,43 @@ export class PracticeLearningPathView extends ItemView {
         for (const detail of presentation.details) list.createEl("li", { text: detail });
       }
     }
-    if (this.stage === "source") this.renderSource(body);
-    else if (this.stage === "map") this.renderMap(body);
-    else if (this.stage === "review") this.renderReview(body);
+    if (this.page === "material") this.renderMaterialPage(body);
+    else if (this.page === "review-material") this.renderReviewMaterialPage(body);
+    else if (this.page === "learning-goal") this.renderLearningGoalPage(body);
+    else if (this.page === "course-check") this.renderCourseCheckPage(body);
+    else if (this.page === "path-plan") this.renderPathPlanPage(body);
+    else if (this.page === "generate-sets") this.renderGenerateSetsPage(body);
+    else if (this.page === "review-exercises") this.renderReview(body);
     else this.renderSaved(body);
+    this.renderedStage = renderedStage;
+    this.renderedPage = renderedPage;
+    window.requestAnimationFrame(() => {
+      if (this.stage !== renderedStage || this.page !== renderedPage || !this.contentEl.isConnected) return;
+      this.contentEl.scrollTop = restoreScrollTop;
+    });
   }
 
   private renderHeader(container: HTMLElement): void {
     const header = container.createDiv({ cls: "practice-lab-header" });
     const text = header.createDiv();
-    text.createEl("h2", { text: "Practice Problem Generator" });
+    text.createEl("h2", { text: this.page === "ready" ? "Your guided path" : "Build a guided path" });
     text.createEl("p", {
-      text: "Guided path mode builds connected tutor lessons and distinct practice sets from only the material you approve.",
+      text: this.page === "ready"
+        ? "Continue learning, choose a set, or adjust the saved path when you need to."
+        : "Build connected tutor lessons and focused practice sets from only the material you approve.",
     });
     const icon = header.createDiv({ cls: "practice-lab-header-icon" });
     setIcon(icon, "route");
   }
 
   private renderCreationModeSwitch(container: HTMLElement): void {
-    const switchBlocked = this.busy !== null || this.stage === "review";
+    const switchBlocked = this.busy !== null
+      || this.page === "generate-sets"
+      || this.page === "review-exercises";
     renderSharedCreationModeSwitch(container, {
       active: "guided",
       quickDisabled: switchBlocked,
-      guidedDisabled: true,
+      guidedDisabled: switchBlocked,
       ...(switchBlocked
         ? {
             quickDisabledReason: "Finish the current guided generation or review before changing creation mode.",
@@ -647,51 +911,160 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private renderStageNavigation(container: HTMLElement): void {
-    const navigation = container.createEl("ol", {
-      cls: "practice-learning-path-steps",
-      attr: { "aria-label": "Learning-path creation progress" },
+    const pages = this.creationPages();
+    const currentIndex = Math.max(0, pages.findIndex(({ id }) => id === this.page));
+    const current = pages[currentIndex] ?? pages[0];
+    if (current === undefined) return;
+    const locator = container.createEl("nav", {
+      cls: "practice-learning-path-page-locator",
+      attr: { "aria-label": "Guided-path creation progress" },
     });
-    const stages: ReadonlyArray<readonly [Stage, string]> = [
-      ["source", "Source & intent"],
-      ["map", "Map & configure"],
-      ["review", "Generate & review"],
-      ["saved", "Ready"],
-    ];
-    const current = stages.findIndex(([stage]) => stage === this.stage);
-    stages.forEach(([stage, label], index) => {
-      const available = this.stageAvailable(stage);
-      const isCurrent = stage === this.stage;
-      const isComplete = !isCurrent && (stage === "source" ? index < current : available);
-      const item = navigation.createEl("li", {
-        cls: [
-          isCurrent ? "is-current" : "",
-          isComplete ? "is-complete" : "",
-          !available ? "is-locked" : "",
-        ].filter(Boolean).join(" "),
+    const previous = pages[currentIndex - 1];
+    if (previous !== undefined) {
+      new ButtonComponent(locator)
+        .setClass("practice-learning-path-page-back")
+        .setIcon("arrow-left")
+        .setButtonText("Back")
+        .setDisabled(this.busy !== null)
+        .setTooltip(`Return to ${previous.label} without discarding approved work.`)
+        .onClick(() => this.navigateToPage(previous.id));
+    }
+    const identity = locator.createDiv({ cls: "practice-learning-path-page-current" });
+    identity.createSpan({ cls: "practice-lab-badge", text: "Guided path" });
+    identity.createSpan({
+      cls: "practice-learning-path-page-count",
+      text: `Step ${currentIndex + 1} of ${pages.length}`,
+    });
+    identity.createEl("strong", { text: current.label });
+    identity.createSpan({ text: this.stageStateLabel(this.pageState(current.id)) });
+    const details = locator.createEl("details", {
+      cls: "practice-learning-path-page-details",
+    });
+    this.bindDisclosure(details, "creation-page-details", false);
+    details.createEl("summary", { text: "Path details" });
+    const list = details.createEl("ol");
+    for (const [index, definition] of pages.entries()) {
+      const state = this.pageState(definition.id);
+      const item = list.createEl("li", { cls: `is-${state}` });
+      const button = item.createEl("button", {
+        attr: {
+          type: "button",
+          ...(definition.id === this.page ? { "aria-current": "step" } : {}),
+        },
       });
-      item.createSpan({ text: String(index + 1) });
-      item.createDiv({ text: label });
-      if (isCurrent) {
-        item.setAttribute("aria-current", "step");
-        item.setAttribute("title", `Current step: ${label}`);
-      } else if (available && this.busy === null) {
-        item.addClass("is-clickable");
-        item.tabIndex = 0;
-        item.setAttribute("role", "button");
-        item.setAttribute("aria-label", `Open ${label}`);
-        item.setAttribute("title", `Open ${label}`);
-        const navigate = (): void => { void this.navigateToStage(stage); };
-        item.addEventListener("click", navigate);
-        item.addEventListener("keydown", (event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          navigate();
-        });
-      } else {
-        item.setAttribute("aria-disabled", "true");
-        item.setAttribute("title", this.stageUnavailableReason(stage, label));
-      }
-    });
+      button.createSpan({ text: String(index + 1) });
+      button.createSpan({ text: definition.label });
+      button.createSpan({ text: this.stageStateLabel(state) });
+      const available = this.pageAvailable(definition.id) && this.busy === null;
+      button.disabled = definition.id === this.page || !available || this.busy !== null;
+      button.title = available
+        ? `Open ${definition.label}`
+        : this.pageUnavailableReason(definition.id, definition.label);
+      button.addEventListener("click", () => this.navigateToPage(definition.id));
+    }
+  }
+
+  private creationPages(): readonly CreationPageDefinition[] {
+    return CREATION_PAGES.filter(({ id }) => id !== "course-check" || this.shouldShowCourseCheck());
+  }
+
+  private shouldShowCourseCheck(): boolean {
+    return this.approvedSources().some((source) => (
+      source.classificationState === "confirmed"
+      && source.classification !== undefined
+      && source.classification !== "personal-note"
+      && source.classification !== "unclassified"
+    ));
+  }
+
+  private ensureCurrentPageIsValid(): void {
+    if (this.page === "course-check" && !this.shouldShowCourseCheck()) {
+      this.page = this.alignmentAccepted ? "path-plan" : "learning-goal";
+    }
+    if (this.savedWorkspace !== null && this.stage === "saved") this.page = "ready";
+  }
+
+  private pageAvailable(page: CreationPage): boolean {
+    if (page === "material") return true;
+    if (page === "review-material") return this.primary !== null;
+    if (page === "learning-goal") return this.primary !== null && this.reviewMaterialProblem() === null;
+    if (page === "course-check") return this.shouldShowCourseCheck() && this.reviewMaterialProblem() === null;
+    if (page === "path-plan") return this.alignmentAccepted || this.preview !== null || this.blueprint !== null;
+    if (page === "generate-sets") return this.blueprint !== null;
+    if (page === "review-exercises") {
+      return this.blueprint !== null && this.generatedSets.length > 0;
+    }
+    return this.savedWorkspace !== null;
+  }
+
+  private pageCompleted(page: CreationPage): boolean {
+    if (page === "material") return this.primary !== null;
+    if (page === "review-material") return this.reviewMaterialProblem() === null;
+    if (page === "learning-goal") return this.alignmentPreview !== null || this.alignmentAccepted;
+    if (page === "course-check") return this.alignmentAccepted;
+    if (page === "path-plan") return this.blueprint !== null && this.mapProblem() === null;
+    if (page === "generate-sets") {
+      return this.setStates.length > 0 && this.generatedSets.length === this.setStates.length;
+    }
+    if (page === "review-exercises") return this.savedWorkspace !== null;
+    return this.savedWorkspace !== null;
+  }
+
+  private pageStale(page: CreationPage): boolean {
+    if (page === "path-plan") return this.staleStages.has("map");
+    if (page === "generate-sets" || page === "review-exercises") {
+      return this.staleStages.has("review");
+    }
+    return page === "ready" && this.staleStages.has("saved");
+  }
+
+  private pageState(page: CreationPage): StageState {
+    if (page === this.page) return "current";
+    if (this.busy !== null) return "locked";
+    if (this.pageStale(page)) return "needs-update";
+    if (this.pageCompleted(page)) return "completed";
+    return this.pageAvailable(page) ? "available" : "locked";
+  }
+
+  private navigateToPage(page: CreationPage): void {
+    if (this.busy !== null || page === this.page || !this.pageAvailable(page)) return;
+    this.page = page;
+    this.stage = this.stageForPage(page);
+    this.error = null;
+    this.render();
+  }
+
+  private stageForPage(page: CreationPage): Stage {
+    if (page === "ready") return "saved";
+    if (page === "review-exercises") return "review";
+    if (page === "generate-sets" || (page === "path-plan" && this.blueprint !== null)) return "map";
+    return "source";
+  }
+
+  private pageUnavailableReason(page: CreationPage, label: string): string {
+    if (this.busy !== null) return `Wait for the current operation before opening ${label}.`;
+    if (page === "review-material") return "Choose the primary material first.";
+    if (page === "learning-goal") return this.reviewMaterialProblem() ?? "Review the approved material first.";
+    if (page === "course-check") return "Confirm a school-authority source before checking course alignment.";
+    if (page === "path-plan") return "Approve the source alignment before building the path.";
+    if (page === "generate-sets") return "Build and approve the editable path first.";
+    if (page === "review-exercises") return "Generate at least one set before reviewing exercises.";
+    if (page === "ready") return "Save the complete reviewed path first.";
+    return `Open ${label}`;
+  }
+
+  private reviewMaterialProblem(): string | null {
+    if (this.primary === null) return "Choose primary material before continuing.";
+    const unconfirmed = this.approvedSources().filter((source) => (
+      source.classificationState !== "confirmed"
+    )).length;
+    if (unconfirmed > 0) {
+      return `Confirm ${unconfirmed} source ${unconfirmed === 1 ? "label" : "labels"} before continuing.`;
+    }
+    if (this.primaryVisualPreparationToken !== null || this.visualSelectionBusy) {
+      return "Wait for image preparation to finish before continuing.";
+    }
+    return this.pdfBudgetProblem()?.message ?? null;
   }
 
   private stageAvailable(stage: Stage): boolean {
@@ -729,7 +1102,7 @@ export class PracticeLearningPathView extends ItemView {
   private async restoreRecoverableWorkspace(stage: "map" | "review"): Promise<void> {
     const inspect = this.options.callbacks.inspectRecoverableBatch;
     if (inspect === undefined || this.busy !== null) return;
-    this.busy = "recovery";
+    this.busy = "alignment";
     this.error = null;
     this.render();
     try {
@@ -744,6 +1117,44 @@ export class PracticeLearningPathView extends ItemView {
     }
   }
 
+  private async resumeSourceAlignmentRecovery(): Promise<void> {
+    const resume = this.options.callbacks.resumeRecoverableSourceAlignment;
+    if (resume === undefined || this.busy !== null) return;
+    this.busy = "recovery";
+    this.error = null;
+    this.activity.clear();
+    this.render();
+    try {
+      const recovered = await resume((event) => {
+        this.activity.set("source-alignment", [
+          ...(this.activity.get("source-alignment") ?? []),
+          event,
+        ].slice(-40));
+        this.refreshAlignmentActivity();
+      });
+      this.primary = recovered.primary;
+      this.supporting = [...recovered.supporting];
+      this.alignmentPreview = null;
+      this.alignmentResult = recovered.result;
+      this.alignmentAccepted = false;
+      this.aiContextCompletionDecisionMade = false;
+      this.blueprintConfiguration = {
+        ...this.blueprintConfiguration,
+        aiContextCompletionPolicy: DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+      };
+      this.stage = "source";
+      this.page = "course-check";
+      this.recoveryAvailable = false;
+      this.recoveryKind = null;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.busy = null;
+      this.render();
+      if (this.alignmentResult !== null) this.revealAlignmentResult();
+    }
+  }
+
   private applyRecoveredBatch(result: LearningPathRecoveredBatchV1): void {
     const existingStates = new Map(this.setStates.map((state) => [state.id, state]));
     const existingGenerated = new Map(this.generatedSets.map((set) => [set.setId, set]));
@@ -751,6 +1162,22 @@ export class PracticeLearningPathView extends ItemView {
     this.primary = result.primary;
     this.supporting = [...result.supporting];
     this.blueprint = result.blueprint;
+    this.blueprintConfiguration = {
+      ...this.blueprintConfiguration,
+      aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+        result.blueprint.planningInput.aiContextCompletionPolicy,
+      ),
+    };
+    this.aiContextCompletionDecisionMade = true;
+    const recoveredAlignment = result.blueprint.planningInput.sourceAlignment;
+    if (recoveredAlignment !== undefined) {
+      this.alignmentResult = {
+        ledger: structuredClone(recoveredAlignment),
+        blockerRecordIds: sourceAlignmentBlockers(recoveredAlignment).map((record) => record.id),
+        checked: recoveredAlignment.provenance !== null,
+      };
+      this.alignmentAccepted = this.alignmentResult.blockerRecordIds.length === 0;
+    }
     this.setStates = result.blueprint.draft.sets.flatMap((brief) => {
       const current = existingStates.get(brief.id);
       if (current !== undefined) return [current];
@@ -763,13 +1190,23 @@ export class PracticeLearningPathView extends ItemView {
     }));
     this.approvedBySet = new Map(result.generated.map((set) => [
       set.setId,
-      existingApprovals.get(set.setId) ?? new Set<string>(),
+      set.approvedExerciseIds === undefined
+        ? (existingApprovals.get(set.setId) ?? new Set<string>())
+        : new Set(set.approvedExerciseIds),
     ]));
     this.statuses = new Map(result.statuses.map((entry) => [entry.setId, entry.status]));
+    this.activeMapSetId = this.setStates.some((state) => state.id === this.activeMapSetId)
+      ? this.activeMapSetId
+      : (this.setStates[0]?.id ?? null);
     this.activeReviewSetId = this.generatedSets.some((set) => set.setId === this.activeReviewSetId)
       ? this.activeReviewSetId
       : (this.generatedSets[0]?.setId ?? null);
     this.recoveryAvailable = true;
+    this.staleStages.delete("map");
+    this.staleStages.delete("review");
+    this.saveValidationBlocked = false;
+    this.savePreflight = null;
+    if (this.reviewProblem() === null) void this.runSavePreflight();
   }
 
   private stageUnavailableReason(stage: Stage, label: string): string {
@@ -780,16 +1217,733 @@ export class PracticeLearningPathView extends ItemView {
     return `Open ${label}`;
   }
 
+  private stageStateLabel(state: StageState): string {
+    if (state === "completed") return "Completed";
+    if (state === "current") return "Current";
+    if (state === "available") return "Available";
+    if (state === "needs-update") return "Needs update";
+    return this.busy === null ? "Not ready" : "Locked while generating";
+  }
+
+  private renderMaterialPage(container: HTMLElement): void {
+    this.renderGuidedRecoveryPrompt(container);
+    const section = this.section(
+      container,
+      "Material",
+      "Choose only the notes or PDF page ranges this path may use. Nothing is crawled automatically.",
+    );
+    if (this.primary === null) {
+      section.createEl("h4", { text: "Choose primary material" });
+      this.renderSourceChoiceButtons(section);
+      const empty = section.createDiv({ cls: "practice-source-empty-inline" });
+      setIcon(empty.createSpan(), "file-search");
+      empty.createSpan({ text: "Open a note or PDF, then choose the material to use." });
+      return;
+    }
+
+    const sources = this.approvedSources();
+    const bundle = section.createDiv({ cls: "practice-learning-path-bundle-summary" });
+    const copy = bundle.createDiv();
+    copy.createEl("strong", { text: this.primary.title });
+    copy.createSpan({
+      text: `${this.supporting.length} supporting ${this.supporting.length === 1 ? "source" : "sources"} · ${sources.reduce((total, source) => total + source.characterCount, 0).toLocaleString()} submitted characters`,
+    });
+    const pdfCount = sources.filter((source) => source.mode === "pdf").length;
+    bundle.createSpan({
+      cls: "practice-lab-badge",
+      text: pdfCount === 0 ? "Notes and selection" : `${pdfCount} PDF ${pdfCount === 1 ? "range" : "ranges"}`,
+    });
+
+    this.renderSourceCard(section, this.primary, "Primary", () => {
+      this.primary = null;
+      this.supporting = [];
+      this.primaryVisualPreparationToken = null;
+      this.visualSelectionBusy = false;
+      this.resetAfterSourceChange();
+      this.render();
+    }, false, () => void this.choosePrimarySource("vault-note"));
+    for (const source of this.supporting) {
+      this.renderSourceCard(section, source, "Supporting", () => {
+        this.supporting = this.supporting.filter((candidate) => candidate !== source);
+        this.resetAfterSourceChange();
+        this.render();
+      }, false);
+    }
+
+    const budgetProblem = this.pdfBudgetProblem();
+    const editor = this.disclosure(
+      section,
+      "material-change",
+      "Change source bundle",
+      "Replace the primary material or add supporting material",
+      budgetProblem !== null,
+      "Change…",
+    );
+    editor.createEl("p", {
+      cls: "practice-lab-muted",
+      text: "Changing the primary material replaces the bundle. Supporting sources are added separately.",
+    });
+    this.renderSourceChoiceButtons(editor);
+    const pdfBudget = this.pdfBudgetUsage();
+    if (pdfCount > 0 || budgetProblem !== null) this.renderPdfBudget(editor, pdfBudget, budgetProblem);
+    const supportActions = editor.createDiv({ cls: "practice-learning-path-support-actions" });
+    new ButtonComponent(supportActions)
+      .setIcon("file-text")
+      .setButtonText(this.supportingSourceChoiceBusy === "note" ? "Choosing note…" : "Add supporting note")
+      .setDisabled(this.busy !== null || this.supporting.length >= 4)
+      .setTooltip("Add one explicitly chosen Markdown note.")
+      .onClick(() => void this.addSupportingSource("note"));
+    new ButtonComponent(supportActions)
+      .setIcon("file-scan")
+      .setButtonText(this.supportingSourceChoiceBusy === "pdf" ? "Choosing PDF pages…" : "Add supporting PDF pages")
+      .setDisabled(
+        this.busy !== null
+        || this.supporting.length >= 4
+        || pdfBudget === null
+        || pdfBudget.remainingPages < 1
+        || pdfBudget.remainingCharacters < 1
+      )
+      .setTooltip(budgetProblem?.message ?? "Choose one PDF and its exact page range.")
+      .onClick(() => void this.addSupportingSource("pdf"));
+
+    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+    new ButtonComponent(actions)
+      .setIcon("arrow-right")
+      .setButtonText("Continue to review material")
+      .setCta()
+      .setDisabled(this.busy !== null || budgetProblem !== null)
+      .setTooltip(budgetProblem?.message ?? "Review source labels and selected images.")
+      .onClick(() => this.navigateToPage("review-material"));
+  }
+
+  private renderReviewMaterialPage(container: HTMLElement): void {
+    const sources = this.approvedSources();
+    const visualCount = sources.reduce((total, source) => total + source.visuals.length, 0);
+    const selectedVisualCount = sources.reduce(
+      (total, source) => total + source.visuals.filter((visual) => visual.selected).length,
+      0,
+    );
+    const section = this.section(
+      container,
+      "Review material",
+      "Confirm what each source represents, then review detected images only when useful.",
+    );
+    const summary = section.createDiv({ cls: "practice-learning-path-bundle-summary" });
+    summary.createEl("strong", { text: `${sources.length} approved ${sources.length === 1 ? "source" : "sources"}` });
+    summary.createSpan({ text: this.sourceClassificationSummary(sources) });
+    summary.createSpan({
+      cls: "practice-lab-badge",
+      text: visualCount === 0 ? "No separate images" : `${selectedVisualCount}/${visualCount} images selected`,
+    });
+
+    this.renderBatchSourceClassifications(section, sources);
+    if (visualCount > 0 || this.primaryVisualPreparationToken !== null) {
+      const imageBody = this.disclosure(
+        section,
+        "review-material-images",
+        "Review images",
+        this.primaryVisualPreparationToken !== null
+          ? "Preparing default GIF frames…"
+          : `${selectedVisualCount} of ${visualCount} selected`,
+        this.visualSelectionMessage !== null,
+        "Review images…",
+      );
+      this.renderVisualBundleControls(imageBody);
+      for (const source of sources) {
+        if (source.visuals.length === 0) continue;
+        const sourceVisuals = imageBody.createDiv({ cls: "practice-source-primary-visuals" });
+        this.renderSourceVisuals(sourceVisuals, source);
+      }
+    }
+
+    const problem = this.reviewMaterialProblem();
+    if (problem !== null) {
+      const warning = section.createDiv({ cls: "practice-lab-callout is-warning", attr: { role: "status" } });
+      setIcon(warning.createSpan(), "triangle-alert");
+      warning.createSpan({ text: problem });
+    }
+    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+    new ButtonComponent(actions)
+      .setIcon("arrow-right")
+      .setButtonText("Continue to learning goal")
+      .setCta()
+      .setDisabled(problem !== null || this.busy !== null)
+      .setTooltip(problem ?? "Choose the teaching depth and path focus.")
+      .onClick(() => this.navigateToPage("learning-goal"));
+  }
+
+  private renderLearningGoalPage(container: HTMLElement): void {
+    const section = this.section(
+      container,
+      "Learning goal",
+      "Choose where teaching begins and what the path should emphasize.",
+    );
+    const levelGrid = section.createDiv({ cls: "practice-learning-path-level-grid" });
+    for (const option of STARTING_LEVELS) {
+      const label = levelGrid.createEl("label", {
+        cls: `practice-learning-path-level${this.blueprintConfiguration.startingLevel === option.id ? " is-selected" : ""}`,
+      });
+      const input = label.createEl("input", {
+        attr: { type: "radio", name: "learning-starting-level", value: option.id },
+      });
+      input.checked = this.blueprintConfiguration.startingLevel === option.id;
+      label.createEl("strong", { text: option.label });
+      label.createSpan({ text: option.description });
+      input.addEventListener("change", () => {
+        if (!input.checked) return;
+        this.blueprintConfiguration = { ...this.blueprintConfiguration, startingLevel: option.id };
+        this.invalidatePlanningPreview();
+        this.render();
+      });
+    }
+    new Setting(section)
+      .setName("Proposed set count")
+      .setDesc(`The planner may reduce this when the source cannot support distinct sets. Maximum ${MAX_LEARNING_PATH_SETS}.`)
+      .addSlider((slider) => slider
+        .setLimits(MIN_LEARNING_PATH_SETS, MAX_LEARNING_PATH_SETS, 1)
+        .setValue(this.blueprintConfiguration.desiredSetCount)
+        .onChange((value) => {
+          this.blueprintConfiguration = { ...this.blueprintConfiguration, desiredSetCount: value };
+          this.invalidatePlanningPreview();
+        }));
+    const focus = section.createEl("label", { cls: "practice-learning-path-focus" });
+    focus.createEl("strong", { text: "Comments for the planner" });
+    focus.createSpan({ text: "For example: focus on mechanisms first, compare architectures, or keep calculations for the last set." });
+    const textarea = focus.createEl("textarea", {
+      attr: { rows: "4", maxlength: String(MAX_FOCUS_INSTRUCTIONS_LENGTH) },
+    });
+    textarea.value = this.blueprintConfiguration.globalFocusInstructions;
+    textarea.addEventListener("input", () => {
+      this.blueprintConfiguration = { ...this.blueprintConfiguration, globalFocusInstructions: textarea.value };
+      this.invalidatePlanningPreview();
+    });
+    const selectedProvider = this.providers.find((entry) => entry.id === this.blueprintConfiguration.provider);
+    const engine = this.disclosure(
+      section,
+      "learning-goal-engine",
+      "Generation engine",
+      this.providerSummary(),
+      selectedProvider?.available === false,
+      "Change…",
+    );
+    this.renderProviderControls(engine);
+
+    if (!this.shouldShowCourseCheck()) {
+      const suggestion = section.createDiv({
+        cls: "practice-lab-callout practice-learning-path-context-suggestion",
+      });
+      const heading = suggestion.createDiv({
+        cls: "practice-learning-path-context-suggestion-heading",
+      });
+      setIcon(heading.createSpan(), "sparkles");
+      heading.createEl("strong", {
+        text: "Additional context could strengthen this practice",
+      });
+      if (!this.aiContextCompletionDecisionMade) {
+        suggestion.createEl("p", {
+          text: "Your selected material remains the basis. Choose once whether the generated path may use a small amount of clearly labelled AI-supported context. Your notes will not be changed.",
+        });
+        const contextActions = suggestion.createDiv({
+          cls: "practice-learning-path-actions",
+        });
+        new ButtonComponent(contextActions)
+          .setIcon("sparkles")
+          .setButtonText("Add supporting context")
+          .setCta()
+          .setTooltip("Allow minimum AI-supported context in this practice path. It remains not course-checked and never edits your notes.")
+          .onClick(() => this.chooseAiContextCompletion("approved-general-context"));
+        new ButtonComponent(contextActions)
+          .setIcon("file-check-2")
+          .setButtonText("Continue with selected material only")
+          .setTooltip("Keep generation limited to the material you selected.")
+          .onClick(() => this.chooseAiContextCompletion("selected-sources-only"));
+        return;
+      }
+      const selected = suggestion.createDiv({
+        cls: "practice-learning-path-approved-state",
+      });
+      setIcon(selected.createSpan(), "check-circle-2");
+      selected.createSpan({
+        text: aiContextCompletionApproved(
+          this.blueprintConfiguration.aiContextCompletionPolicy,
+        )
+          ? "AI-supported context approved · not course-checked"
+          : "Using selected material only",
+      });
+      new ButtonComponent(suggestion)
+        .setButtonText("Change…")
+        .setTooltip("Review the supporting-context choice before building the path.")
+        .onClick(() => {
+          this.aiContextCompletionDecisionMade = false;
+          this.invalidatePlanningPreview();
+          this.render();
+        });
+    }
+
+    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+    const nextLabel = this.shouldShowCourseCheck()
+      ? "Continue to course check"
+      : "Continue to path plan";
+    new ButtonComponent(actions)
+      .setIcon("arrow-right")
+      .setButtonText(this.busy === "alignment-preview" ? "Preparing source check…" : nextLabel)
+      .setCta()
+      .setDisabled(this.busy !== null || selectedProvider?.available === false)
+      .setTooltip("Prepare the exact classified-source boundary before planning.")
+      .onClick(() => void this.continueFromLearningGoal());
+  }
+
+  private renderCourseCheckPage(container: HTMLElement): void {
+    const section = this.section(
+      container,
+      "Course check",
+      "Compare confirmed personal notes with the approved school material before planning.",
+    );
+    const sources = this.approvedSources();
+    const summary = section.createDiv({ cls: "practice-learning-path-map-summary" });
+    summary.createSpan({ text: this.sourceClassificationSummary(sources) });
+    summary.createSpan({ text: this.providerSummary() });
+    if (this.alignmentPreview === null && this.alignmentResult === null) {
+      const actions = section.createDiv({ cls: "practice-learning-path-actions" });
+      new ButtonComponent(actions)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "alignment-preview" ? "Preparing course check…" : "Prepare course check")
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .onClick(() => void this.previewSourceAlignment());
+      return;
+    }
+    this.renderSourceAlignment(container, 0);
+    if (this.alignmentAccepted) {
+      const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+      new ButtonComponent(actions)
+        .setIcon("arrow-right")
+        .setButtonText(this.busy === "preview" ? "Preparing path plan…" : "Continue to path plan")
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .onClick(() => void this.openPathPlan());
+    }
+  }
+
+  private renderPathPlanPage(container: HTMLElement): void {
+    if (!this.alignmentAccepted) {
+      const warning = container.createDiv({ cls: "practice-lab-callout is-warning" });
+      setIcon(warning.createSpan(), "triangle-alert");
+      warning.createSpan({ text: "Approve the source check before building the path." });
+      return;
+    }
+    if (this.staleStages.has("map") && this.staleBlueprint !== null) {
+      this.renderStalePathPlan(container, this.staleBlueprint);
+      return;
+    }
+    if (this.preview === null && this.blueprint === null) {
+      const section = this.section(container, "Path plan", "Prepare the exact planning request from the approved material and learning goal.");
+      new ButtonComponent(section)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "preview" ? "Preparing planning request…" : "Prepare path plan")
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .onClick(() => void this.previewPlanningPayload());
+      return;
+    }
+    if (this.blueprint === null) {
+      this.renderPlanningPreview(container);
+      return;
+    }
+    this.renderMap(container, false);
+    const problem = this.mapProblem();
+    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+    new ButtonComponent(actions)
+      .setIcon("arrow-right")
+      .setButtonText(this.busy === "payloads" ? "Preparing set requests…" : "Continue to generate sets")
+      .setCta()
+      .setDisabled(problem !== null || this.busy !== null)
+      .setTooltip(problem ?? "Prepare the exact payload for every approved set.")
+      .onClick(() => void this.openGenerateSets());
+  }
+
+  private renderGenerateSetsPage(container: HTMLElement): void {
+    const blueprint = this.blueprint;
+    if (blueprint === null) {
+      const warning = container.createDiv({ cls: "practice-lab-callout is-warning" });
+      setIcon(warning.createSpan(), "triangle-alert");
+      warning.createSpan({ text: "Build the editable path before generating its sets." });
+      return;
+    }
+    const section = this.section(
+      container,
+      "Generate sets",
+      "Approve the complete batch once, then the sets run sequentially through one recoverable job coordinator.",
+    );
+    const summary = section.createDiv({ cls: "practice-learning-path-map-summary" });
+    summary.createSpan({ text: `${this.setStates.length} sets` });
+    summary.createSpan({ text: `${this.totalExercises()} questions` });
+    summary.createSpan({ text: `${this.setStates.filter((state) => this.statuses.get(state.id)?.state === "review").length} complete` });
+    if (this.setPayloadPreviews.length === 0 && this.busy !== "batch") {
+      new ButtonComponent(section)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "payloads" ? "Preparing exact set requests…" : "Prepare exact set requests")
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .onClick(() => void this.previewSetPayloads());
+    } else if (this.setPayloadPreviews.length > 0 && this.statuses.size === 0) {
+      this.renderSetPayloadPreviews(container);
+    }
+    if (this.statuses.size > 0 || this.busy === "batch" || this.recoveryAvailable) {
+      this.renderGenerationStatus(container, blueprint);
+    }
+    if (this.generatedSets.length === 0 && this.staleGeneratedSets.length > 0) {
+      this.renderStaleGeneratedSets(container);
+    }
+    if (
+      this.busy === null
+      && this.generatedSets.length === this.setStates.length
+      && this.generatedSets.length > 0
+    ) {
+      const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+      new ButtonComponent(actions)
+        .setIcon("arrow-right")
+        .setButtonText("Review exercises")
+        .setCta()
+        .onClick(() => this.navigateToPage("review-exercises"));
+    }
+  }
+
+  private renderStalePathPlan(
+    container: HTMLElement,
+    blueprint: LearningBlueprintPresentationV1,
+  ): void {
+    const section = this.section(
+      container,
+      "Path plan needs an update",
+      "An earlier approved plan is retained below for reference. It cannot generate or save sets until it is refreshed from the current material and learning goal.",
+    );
+    const retained = section.createDiv({
+      cls: "practice-learning-path-stale-preview",
+      attr: { "aria-label": "Previous path plan, read only" },
+    });
+    retained.setAttribute("inert", "");
+    const list = retained.createEl("ol");
+    for (const set of [...blueprint.draft.sets].sort((left, right) => left.order - right.order)) {
+      const item = list.createEl("li");
+      item.createEl("strong", { text: set.title });
+      item.createEl("p", { text: set.purpose });
+    }
+    const actions = section.createDiv({ cls: "practice-learning-path-actions" });
+    new ButtonComponent(actions)
+      .setIcon("refresh-cw")
+      .setButtonText(this.busy === "preview" ? "Refreshing path plan…" : "Refresh path plan")
+      .setCta()
+      .setDisabled(this.busy !== null)
+      .setTooltip("Rebuild the exact planning request from the current approved inputs.")
+      .onClick(() => void this.refreshStalePathPlan());
+  }
+
+  private renderStaleGeneratedSets(container: HTMLElement): void {
+    const details = container.createEl("details", {
+      cls: "practice-learning-path-stale-preview",
+    });
+    details.createEl("summary", {
+      text: `${this.staleGeneratedSets.length} previous generated ${this.staleGeneratedSets.length === 1 ? "set" : "sets"} retained for reference`,
+    });
+    details.createEl("p", {
+      text: "These drafts belong to an earlier configuration. They are read-only and cannot be reviewed or saved until the current set requests are regenerated.",
+    });
+    const list = details.createEl("ul");
+    for (const set of this.staleGeneratedSets) {
+      const title = this.staleBlueprint?.draft.sets.find((brief) => brief.id === set.setId)?.title
+        ?? this.blueprint?.draft.sets.find((brief) => brief.id === set.setId)?.title
+        ?? set.setId;
+      list.createEl("li", {
+        text: `${title} · ${set.exercises.length} ${set.exercises.length === 1 ? "exercise" : "exercises"}`,
+      });
+    }
+  }
+
+  private async refreshStalePathPlan(): Promise<void> {
+    if (this.busy !== null || !this.alignmentAccepted) return;
+    this.blueprint = null;
+    this.setStates = [];
+    this.setPayloadPreviews = [];
+    this.setPayloadsAccepted = false;
+    this.statuses.clear();
+    this.activity.clear();
+    this.generatedSets = [];
+    this.approvedBySet.clear();
+    this.preview = null;
+    this.previewAccepted = false;
+    this.staleStages.delete("map");
+    await this.previewPlanningPayload();
+  }
+
+  private renderGuidedRecoveryPrompt(container: HTMLElement): void {
+    if (
+      !this.recoveryAvailable
+      || (
+        this.options.callbacks.resumeRecoverableBatch === undefined
+        && this.options.callbacks.resumeRecoverableSourceAlignment === undefined
+      )
+    ) return;
+    const recovery = container.createDiv({
+      cls: "practice-lab-callout is-warning practice-learning-path-recovery",
+    });
+    const copy = recovery.createDiv();
+    copy.createEl("strong", { text: "Unfinished guided work is available" });
+    copy.createEl("p", {
+      text: this.recoveryKind === "source-alignment"
+        ? "Resume the exact approved source comparison."
+        : "Continue the exact approved batch from its next unfinished set.",
+    });
+    const actions = recovery.createDiv({ cls: "practice-learning-path-actions" });
+    new ButtonComponent(actions)
+      .setIcon("history")
+      .setButtonText("Resume guided work")
+      .setCta()
+      .setDisabled(this.busy !== null)
+      .onClick(() => void this.resumeRecovery());
+    if (this.options.callbacks.discardRecoverableBatch !== undefined) {
+      new ButtonComponent(actions)
+        .setIcon("trash-2")
+        .setButtonText("Discard recovery…")
+        .setDestructive()
+        .setDisabled(this.busy !== null)
+        .onClick(() => void this.discardRecovery());
+    }
+  }
+
+  private sourceDraftKey(source: SourcePresentation): string {
+    return `${source.mode}:${source.path}:${source.detail ?? ""}`;
+  }
+
+  private renderBatchSourceClassifications(
+    container: HTMLElement,
+    sources: readonly SourcePresentation[],
+  ): void {
+    const unconfirmed = sources.filter((source) => source.classificationState !== "confirmed").length;
+    const body = this.disclosure(
+      container,
+      "batch-source-labels",
+      "Review labels",
+      unconfirmed === 0 ? this.sourceClassificationSummary(sources) : `${unconfirmed} need confirmation`,
+      unconfirmed > 0,
+      unconfirmed > 0 ? "Review" : "Change…",
+    );
+    body.createEl("p", {
+      cls: "practice-lab-muted",
+      text: "Labels establish the course-authority order without changing any source file.",
+    });
+    for (const source of sources) {
+      const key = this.sourceDraftKey(source);
+      const current = this.classificationDrafts.get(key)
+        ?? source.classification
+        ?? "unclassified";
+      const row = body.createDiv({
+        cls: `practice-learning-path-source-label${source.classificationState === "confirmed" ? " is-confirmed" : " is-unconfirmed"}`,
+      });
+      const copy = row.createDiv({ cls: "practice-learning-path-source-label-copy" });
+      copy.createEl("strong", { text: source.title });
+      copy.createSpan({
+        text: source.classificationState === "confirmed" ? "Confirmed" : "Confirmation needed",
+      });
+      const select = row.createEl("select", {
+        attr: { "aria-label": `Source label for ${source.title}` },
+      });
+      for (const [value, label] of Object.entries(SOURCE_CLASSIFICATION_LABELS)) {
+        select.createEl("option", { value, text: label });
+      }
+      select.value = current;
+      select.addEventListener("change", () => {
+        this.classificationDrafts.set(key, select.value as SourceMaterialClassificationV1);
+        this.render();
+      });
+    }
+    const hasChanges = this.hasClassificationChanges(sources);
+    const actions = body.createDiv({ cls: "practice-learning-path-actions" });
+    new ButtonComponent(actions)
+      .setIcon("check")
+      .setButtonText(this.busy === "source"
+        ? "Saving labels…"
+        : unconfirmed > 0
+          ? "Confirm labels"
+          : "Apply label changes")
+      .setCta()
+      .setDisabled(this.busy !== null || !hasChanges)
+      .setTooltip("Confirm every displayed label in one update.")
+      .onClick(() => void this.confirmAllSourceClassifications());
+  }
+
+  private hasClassificationChanges(
+    sources: readonly SourcePresentation[],
+  ): boolean {
+    return sources.some((source) => {
+      const selected = this.classificationDrafts.get(this.sourceDraftKey(source))
+        ?? source.classification
+        ?? "unclassified";
+      return source.classificationState !== "confirmed"
+        || source.classification !== selected;
+    });
+  }
+
+  private async confirmAllSourceClassifications(): Promise<void> {
+    if (this.busy !== null) return;
+    const sources = this.approvedSources();
+    const updates = sources.flatMap((source) => {
+      const classification = this.classificationDrafts.get(this.sourceDraftKey(source))
+        ?? source.classification
+        ?? "unclassified";
+      return source.classificationState === "confirmed"
+        && source.classification === classification
+        ? []
+        : [{ source, classification }];
+    });
+    if (updates.length === 0) return;
+    this.busy = "source";
+    this.error = null;
+    this.render();
+    try {
+      const batch = this.options.callbacks.confirmSourceClassifications;
+      const updated = batch !== undefined
+        ? await batch(updates)
+        : await Promise.all(updates.map(async ({ source, classification }) => {
+            const single = this.options.callbacks.confirmSourceClassification;
+            return single === undefined ? source : await single(source, classification);
+          }));
+      if (updated.length !== updates.length) {
+        throw new Error("The source-label update did not return every changed source.");
+      }
+      const updatedByKey = new Map(updated.map((source) => [this.sourceDraftKey(source), source]));
+      const merged = sources.map((source) => (
+        updatedByKey.get(this.sourceDraftKey(source)) ?? source
+      ));
+      this.primary = merged[0] ?? null;
+      this.supporting = merged.slice(1);
+      this.classificationDrafts.clear();
+      this.invalidateSourceAlignment();
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.busy = null;
+      this.render();
+    }
+  }
+
+  private async continueFromLearningGoal(): Promise<void> {
+    if (this.busy !== null) return;
+    await this.previewSourceAlignment();
+    const preview = this.alignmentPreview;
+    if (preview === null) return;
+    if (preview.requiresProvider) {
+      this.page = "course-check";
+      this.stage = "source";
+      this.render();
+      return;
+    }
+    if (!this.aiContextCompletionDecisionMade) return;
+    await this.continueWithoutCourseAlignment(
+      effectiveAiContextCompletionPolicy(
+        this.blueprintConfiguration.aiContextCompletionPolicy,
+      ),
+    );
+    if (!this.alignmentAccepted) return;
+    await this.openPathPlan();
+  }
+
+  private async openPathPlan(): Promise<void> {
+    if (!this.alignmentAccepted || this.busy !== null) return;
+    this.page = "path-plan";
+    this.stage = this.blueprint === null ? "source" : "map";
+    this.render();
+    if (this.preview === null && this.blueprint === null) await this.previewPlanningPayload();
+  }
+
+  private async openGenerateSets(): Promise<void> {
+    if (this.blueprint === null || this.mapProblem() !== null || this.busy !== null) return;
+    this.page = "generate-sets";
+    this.stage = "map";
+    this.render();
+    if (this.setPayloadPreviews.length === 0) await this.previewSetPayloads();
+  }
+
+  private renderGenerationStatus(
+    container: HTMLElement,
+    blueprint: LearningBlueprintPresentationV1,
+  ): void {
+    const section = this.section(
+      container,
+      "Current batch",
+      "The active set stays in focus. Completed drafts remain available if a later set fails.",
+    );
+    const currentHost = section.createDiv({ cls: "practice-learning-path-current-set-host" });
+    this.batchCurrentHost = currentHost;
+    this.renderCurrentBatchSet(currentHost, blueprint);
+    const details = this.disclosure(
+      section,
+      "generate-set-details",
+      "All sets",
+      `${this.generatedSets.length} of ${this.setStates.length} completed`,
+      false,
+    );
+    const navigator = details.createDiv({
+      cls: "practice-learning-path-set-navigator",
+      attr: { "aria-label": "Set generation status", "aria-live": "polite" },
+    });
+    this.batchNavigatorHost = navigator;
+    this.renderBatchNavigator(navigator, blueprint);
+    const activity = section.createDiv({
+      cls: "practice-learning-path-batch-activity",
+      attr: { "aria-live": "polite" },
+    });
+    this.batchActivityHost = activity;
+    this.renderActivity(activity);
+    if (this.busy === "batch") {
+      new ButtonComponent(section)
+        .setIcon("square")
+        .setButtonText("Cancel current set and stop batch")
+        .setDestructive()
+        .onClick(() => void this.options.callbacks.cancelGeneration?.());
+    } else if (
+      this.recoveryAvailable
+      && this.generatedSets.length < this.setStates.length
+      && this.options.callbacks.resumeRecoverableBatch !== undefined
+    ) {
+      new ButtonComponent(section)
+        .setIcon("history")
+        .setButtonText("Retry remaining sets")
+        .setCta()
+        .onClick(() => void this.resumeRecovery());
+    }
+  }
+
   private renderSource(container: HTMLElement): void {
-    if (this.recoveryAvailable && this.options.callbacks.resumeRecoverableBatch !== undefined) {
+    if (
+      this.recoveryAvailable
+      && (
+        this.options.callbacks.resumeRecoverableBatch !== undefined
+        || this.options.callbacks.resumeRecoverableSourceAlignment !== undefined
+      )
+    ) {
       const recovery = container.createDiv({ cls: "practice-lab-callout is-warning practice-learning-path-recovery" });
       const text = recovery.createDiv();
-      text.createEl("strong", { text: "Unfinished guided path found" });
-      text.createEl("p", { text: "Continue the exact approved batch from its next unfinished set. Completed drafts are retained." });
+      text.createEl("strong", {
+        text: this.recoveryKind === "source-alignment"
+          ? "Unfinished course-alignment check found"
+          : this.recoveryKind === "generation-batch"
+            ? "Unfinished guided path found"
+            : "Unfinished guided work found",
+      });
+      text.createEl("p", {
+        text: this.recoveryKind === "source-alignment"
+          ? "Resume the exact approved source comparison. Your labels and payload remain unchanged."
+          : this.recoveryKind === "generation-batch"
+            ? "Continue the exact approved batch from its next unfinished set. Completed drafts are retained."
+            : "Inspect and resume the exact approved work without starting over.",
+      });
       const actions = recovery.createDiv({ cls: "practice-learning-path-actions" });
       new ButtonComponent(actions)
         .setIcon("history")
-        .setButtonText("Resume guided path")
+        .setButtonText(this.recoveryKind === "source-alignment"
+          ? "Resume alignment check"
+          : "Resume guided path")
         .setCta()
         .setDisabled(this.busy !== null)
         .onClick(() => void this.resumeRecovery());
@@ -801,10 +1955,22 @@ export class PracticeLearningPathView extends ItemView {
           .setDisabled(this.busy !== null)
           .onClick(() => void this.discardRecovery());
       }
+      if (this.busy === "alignment" && this.recoveryKind === "source-alignment") {
+        this.alignmentActivityHost = recovery.createDiv({
+          cls: "practice-learning-path-planning-activity",
+          attr: { "aria-live": "polite" },
+        });
+        this.refreshAlignmentActivity();
+      }
     }
-    const section = this.section(container, "Approved source bundle", "Nothing is crawled. The primary source and every supporting range must be selected explicitly.");
-    this.renderSourceChoiceButtons(section);
+    const section = this.section(
+      container,
+      "Source and intent",
+      "Approve only the material this path may use. Nothing is crawled or added automatically.",
+    );
     if (this.primary === null) {
+      section.createEl("h4", { text: "Choose a primary source" });
+      this.renderSourceChoiceButtons(section);
       const empty = section.createDiv({ cls: "practice-source-empty-inline" });
       const icon = empty.createSpan();
       setIcon(icon, "file-search");
@@ -813,10 +1979,41 @@ export class PracticeLearningPathView extends ItemView {
       });
       return;
     }
-    section.createEl("p", {
-      cls: "practice-source-replace-note",
-      text: "Choosing another option replaces the primary source and removes the current supporting bundle.",
+
+    const approvedSources = this.approvedSources();
+    const visualCount = approvedSources.reduce((total, source) => total + source.visuals.length, 0);
+    const selectedVisualCount = approvedSources.reduce(
+      (total, source) => total + source.visuals.filter((visual) => visual.selected).length,
+      0,
+    );
+    const bundleSummary = section.createDiv({ cls: "practice-learning-path-bundle-summary" });
+    const bundleCopy = bundleSummary.createDiv();
+    bundleCopy.createEl("strong", { text: this.primary.title });
+    bundleCopy.createSpan({
+      text: `${this.supporting.length} supporting ${this.supporting.length === 1 ? "source" : "sources"} · ${approvedSources.reduce((total, source) => total + source.characterCount, 0).toLocaleString()} submitted characters`,
     });
+    bundleSummary.createSpan({
+      cls: "practice-lab-badge",
+      text: visualCount === 0 ? "Text only" : `${selectedVisualCount}/${visualCount} images selected`,
+    });
+    const unconfirmedLabels = approvedSources.filter((source) => (
+      source.classificationState !== "confirmed"
+    )).length;
+    const sourceLabels = this.disclosure(
+      section,
+      "source-labels",
+      "Review labels",
+      this.sourceClassificationSummary(approvedSources),
+      unconfirmedLabels > 0,
+    );
+    const sourceLabelDetails = sourceLabels.parentElement as HTMLDetailsElement;
+    sourceLabels.createEl("p", {
+      cls: "practice-lab-muted practice-learning-path-source-label-help",
+      text: "Labels determine which approved sources represent school material and which are personal notes. Confirming a label never changes the source file.",
+    });
+    for (const source of approvedSources) {
+      this.renderSourceClassification(sourceLabels, source);
+    }
     this.renderSourceCard(section, this.primary, "Primary", () => {
       this.primary = null;
       this.supporting = [];
@@ -834,29 +2031,58 @@ export class PracticeLearningPathView extends ItemView {
         attr: { role: "status", "aria-live": "polite" },
       });
     }
-    this.renderVisualBundleControls(section);
-    if (this.primary.visuals.length > 0) {
-      const primaryVisuals = section.createDiv({ cls: "practice-source-primary-visuals" });
-      this.renderSourceVisuals(primaryVisuals, this.primary);
+
+    if (visualCount > 0 || this.primaryVisualPreparationToken !== null) {
+      const visualBody = this.disclosure(
+        section,
+        "source-visuals",
+        "Review images",
+        visualCount === 0
+          ? "Preparing detected visuals…"
+          : `${selectedVisualCount} of ${visualCount} selected`,
+        this.visualSelectionMessage !== null,
+      );
+      {
+        const section = visualBody;
+        this.renderVisualBundleControls(section);
+      }
+      for (const source of approvedSources) {
+        if (source.visuals.length === 0) continue;
+        const sourceVisuals = visualBody.createDiv({ cls: "practice-source-primary-visuals" });
+        this.renderSourceVisuals(sourceVisuals, source);
+      }
     }
-    const supportHeading = section.createDiv({ cls: "practice-learning-path-subheading" });
+
+    const pdfBudgetProblem = this.pdfBudgetProblem();
+    const pdfBudget = this.pdfBudgetUsage();
+    const sourceEditor = this.disclosure(
+      section,
+      "source-bundle",
+      "Change source bundle",
+      "Replace the primary source or add up to four supporting sources",
+      pdfBudgetProblem !== null,
+    );
+    sourceEditor.createEl("p", {
+      cls: "practice-source-replace-note",
+      text: "Choosing a different primary source replaces this bundle. Supporting material is changed separately below.",
+    });
+    this.renderSourceChoiceButtons(sourceEditor);
+    const supportHeading = sourceEditor.createDiv({ cls: "practice-learning-path-subheading" });
     supportHeading.createEl("strong", { text: "Supporting material" });
     supportHeading.createSpan({ text: `${this.supporting.length} of 4 selected` });
-    section.createEl("p", {
+    sourceEditor.createEl("p", {
       cls: "setting-item-description practice-learning-path-support-help",
       text: "Add only the material you approve. Every PDF opens a page picker; primary and supporting PDFs share one total generation budget.",
     });
-    const pdfBudgetProblem = this.pdfBudgetProblem();
-    const pdfBudget = this.pdfBudgetUsage();
-    this.renderPdfBudget(section, pdfBudget, pdfBudgetProblem);
+    this.renderPdfBudget(sourceEditor, pdfBudget, pdfBudgetProblem);
     for (const source of this.supporting) {
-      this.renderSourceCard(section, source, "Supporting", () => {
+      this.renderSourceCard(sourceEditor, source, "Supporting", () => {
         this.supporting = this.supporting.filter((candidate) => candidate !== source);
         this.resetAfterSourceChange();
         this.render();
-      });
+      }, false);
     }
-    const supportActions = section.createDiv({ cls: "practice-learning-path-support-actions" });
+    const supportActions = sourceEditor.createDiv({ cls: "practice-learning-path-support-actions" });
     new ButtonComponent(supportActions)
       .setIcon("file-text")
       .setButtonText(this.supportingSourceChoiceBusy === "note" ? "Choosing note…" : "Add supporting note")
@@ -879,7 +2105,7 @@ export class PracticeLearningPathView extends ItemView {
       )
       .onClick(() => void this.addSupportingSource("pdf"));
 
-    const level = this.section(container, "Starting level", "This changes the proposed teaching depth, never the approved source boundary.");
+    const level = this.section(container, "Where should the path begin?", "This changes the teaching depth, never the approved source boundary.");
     const levelGrid = level.createDiv({ cls: "practice-learning-path-level-grid" });
     for (const option of STARTING_LEVELS) {
       const label = levelGrid.createEl("label", {
@@ -897,7 +2123,7 @@ export class PracticeLearningPathView extends ItemView {
       });
     }
 
-    const planning = this.section(container, "Planning instructions", "Tell the planner what to emphasize. These instructions cannot authorize outside knowledge.");
+    const planning = this.section(container, "Shape the path", "Choose the path size and tell the planner what deserves attention.");
     new Setting(planning)
       .setName("Proposed set count")
       .setDesc(`The planner may reduce this when the source cannot support distinct sets. Maximum ${MAX_LEARNING_PATH_SETS}.`)
@@ -917,27 +2143,355 @@ export class PracticeLearningPathView extends ItemView {
       this.blueprintConfiguration = { ...this.blueprintConfiguration, globalFocusInstructions: textarea.value };
       this.invalidatePlanningPreview();
     });
-    this.renderProviderControls(planning);
+    const selectedProvider = this.providers.find((entry) => (
+      entry.id === this.blueprintConfiguration.provider
+    ));
+    const engine = this.disclosure(
+      planning,
+      "planning-engine",
+      "Generation engine",
+      this.providerSummary(),
+      selectedProvider?.available === false,
+      "Change…",
+    );
+    this.renderProviderControls(engine);
+
+    this.renderSourceAlignment(container, unconfirmedLabels);
 
     const actions = container.createDiv({ cls: "practice-learning-path-actions" });
-    new ButtonComponent(actions)
-      .setIcon("scan-eye")
-      .setButtonText(this.busy === "preview" ? "Preparing exact payload…" : "Preview planning payload")
-      .setCta()
-      .setDisabled(
-        this.busy !== null
-        || this.primaryVisualPreparationToken !== null
-        || pdfBudgetProblem !== null
-      )
-      .setTooltip(pdfBudgetProblem?.message ?? "Prepare the exact source-grounded planning payload for approval.")
-      .onClick(() => void this.previewPlanningPayload());
+    if (unconfirmedLabels > 0) {
+      new ButtonComponent(actions)
+        .setIcon("tags")
+        .setButtonText(`Review ${unconfirmedLabels} source ${unconfirmedLabels === 1 ? "label" : "labels"}`)
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .setTooltip("Confirm what each source represents before the course-alignment check.")
+        .onClick(() => {
+          sourceLabelDetails.open = true;
+          this.disclosureState.set("source-labels", true);
+          sourceLabelDetails.scrollIntoView({
+            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+            block: "start",
+          });
+        });
+    } else if (this.alignmentPreview === null && this.alignmentResult === null) {
+      new ButtonComponent(actions)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "alignment-preview" ? "Preparing alignment preview…" : "Preview course alignment")
+        .setCta()
+        .setDisabled(
+          this.busy !== null
+          || this.primaryVisualPreparationToken !== null
+          || pdfBudgetProblem !== null
+        )
+        .setTooltip(pdfBudgetProblem?.message ?? "Preview the exact classified source comparison before it runs.")
+        .onClick(() => void this.previewSourceAlignment());
+    } else if (this.alignmentAccepted && this.preview === null) {
+      new ButtonComponent(actions)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "preview" ? "Preparing planning preview…" : "Preview planning payload")
+        .setCta()
+        .setDisabled(
+          this.busy !== null
+          || this.primaryVisualPreparationToken !== null
+          || pdfBudgetProblem !== null
+        )
+        .setTooltip(pdfBudgetProblem?.message ?? "Preview exactly what the selected AI will receive before path planning.")
+        .onClick(() => void this.previewPlanningPayload());
+    }
     if (this.preview !== null) this.renderPlanningPreview(container);
+  }
+
+  private renderSourceAlignment(
+    container: HTMLElement,
+    unconfirmedLabels: number,
+  ): void {
+    if (unconfirmedLabels > 0) return;
+    const preview = this.alignmentPreview;
+    const result = this.alignmentResult;
+    if (preview === null && result === null) return;
+
+    const blockers = result?.blockerRecordIds.length ?? 0;
+    const section = this.section(
+      container,
+      "Course alignment",
+      result === null
+        ? "Check how your selected material and school sources relate before planning. Your material stays the topical backbone; optional AI-supported context is added only after your approval and remains not course-checked."
+        : alignmentResultDescription(
+            result,
+            this.blueprintConfiguration.aiContextCompletionPolicy,
+            this.aiContextCompletionDecisionMade,
+          ),
+    );
+    section.addClass("practice-learning-path-alignment");
+
+    if (result === null && preview !== null) {
+      section.tabIndex = -1;
+      section.setAttribute("aria-label", "Course-alignment request ready for review");
+      this.alignmentPreviewHost = section;
+      const metadata = section.createDiv({ cls: "practice-learning-path-payload-meta" });
+      metadata.createSpan({ text: preview.providerLabel });
+      metadata.createSpan({ text: preview.modelLabel });
+      metadata.createSpan({ text: `${preview.reasoningEffortLabel} reasoning` });
+      const payload = section.createEl("details", {
+        cls: "practice-learning-path-payload practice-learning-path-alignment-payload",
+      });
+      this.bindDisclosure(payload, "source-alignment-payload", false);
+      payload.createEl("summary", { text: "Details · exact alignment request" });
+      payload.createEl("pre", { text: preview.text });
+      section.createEl("p", { cls: "practice-lab-muted", text: preview.warning });
+
+      if (this.busy === "alignment") {
+        const progress = section.createDiv({
+          cls: "practice-learning-path-planning-progress",
+          attr: { role: "status", "aria-live": "polite" },
+        });
+        const heading = progress.createDiv({ cls: "practice-learning-path-planning-progress-heading" });
+        const spinner = heading.createSpan({ cls: "practice-lab-spinner" });
+        setIcon(spinner, "loader-circle");
+        heading.createEl("strong", { text: "Checking the approved sources" });
+        progress.createEl("p", {
+          text: "The comparison is recoverable. You can continue using Obsidian while it runs.",
+        });
+        this.alignmentActivityHost = progress.createDiv({
+          cls: "practice-learning-path-planning-activity",
+          attr: { "aria-live": "polite" },
+        });
+        this.refreshAlignmentActivity();
+        if (this.options.callbacks.cancelGeneration !== undefined) {
+          new ButtonComponent(progress)
+            .setButtonText("Cancel alignment check")
+            .setDestructive()
+            .onClick(() => void this.options.callbacks.cancelGeneration?.());
+        }
+      } else {
+        if (preview.requiresProvider) {
+          const actions = section.createDiv({ cls: "practice-learning-path-actions" });
+          new ButtonComponent(actions)
+            .setIcon("shield-check")
+            .setButtonText("Approve and check alignment")
+            .setCta()
+            .setDisabled(this.busy !== null || this.quickGenerationRecovery !== null)
+            .setTooltip("Run the selected AI on only this exact classified source payload.")
+            .onClick(() => void this.generateSourceAlignment());
+        } else {
+          const suggestion = section.createDiv({
+            cls: "practice-lab-callout practice-learning-path-context-suggestion",
+          });
+          const suggestionHeading = suggestion.createDiv({
+            cls: "practice-learning-path-context-suggestion-heading",
+          });
+          setIcon(suggestionHeading.createSpan(), "sparkles");
+          suggestionHeading.createEl("strong", {
+            text: "Additional context could strengthen this practice",
+          });
+          suggestion.createEl("p", {
+            text: "Your selected material remains the basis. Choose once whether generated lessons and problems may use a small amount of clearly labelled AI-supported context. Your notes will not be changed.",
+          });
+          const actions = section.createDiv({ cls: "practice-learning-path-actions" });
+          new ButtonComponent(actions)
+            .setIcon("sparkles")
+            .setButtonText("Add supporting context")
+            .setCta()
+            .setDisabled(this.busy !== null)
+            .setTooltip("Allow minimum AI-supported context in the practice path. It remains not course-checked and never edits your notes.")
+            .onClick(() => void this.continueWithoutCourseAlignment("approved-general-context"));
+          new ButtonComponent(actions)
+            .setIcon("file-check-2")
+            .setButtonText("Continue with selected material only")
+            .setDisabled(this.busy !== null)
+            .setTooltip("Keep generation limited to the material you selected.")
+            .onClick(() => void this.continueWithoutCourseAlignment("selected-sources-only"));
+        }
+      }
+      return;
+    }
+
+    if (result === null) return;
+    section.tabIndex = -1;
+    section.setAttribute("aria-label", "Course-alignment result");
+    this.alignmentResultHost = section;
+    const summary = section.createEl("details", {
+      cls: `practice-lab-study-alignment ${alignmentResultClass(result)}`,
+    });
+    this.bindDisclosure(summary, "source-alignment-result", blockers > 0);
+    const summaryHeading = summary.createEl("summary");
+    setIcon(summaryHeading.createSpan(), blockers > 0 ? "triangle-alert" : alignmentResultIcon(result));
+    summaryHeading.createSpan({ text: alignmentResultTitle(result) });
+    const body = summary.createDiv({ cls: "practice-lab-study-alignment-body" });
+    body.createEl("p", {
+      text: alignmentResultDescription(
+        result,
+        this.blueprintConfiguration.aiContextCompletionPolicy,
+        this.aiContextCompletionDecisionMade,
+      ),
+    });
+    if (result.ledger.records.length > 0) {
+      const counts = body.createDiv({ cls: "practice-learning-path-map-summary" });
+      for (const [status, count] of alignmentStatusCounts(result.ledger)) {
+        counts.createSpan({ text: `${count} ${alignmentStatusLabel(status).toLocaleLowerCase()}` });
+      }
+      const blockingRecords = result.ledger.records.filter((record) => (
+        result.blockerRecordIds.includes(record.id)
+      ));
+      const informationalRecords = result.ledger.records.filter((record) => (
+        !result.blockerRecordIds.includes(record.id)
+      ));
+      for (const record of blockingRecords) {
+        this.renderSourceAlignmentRecord(body, record, result);
+      }
+      if (informationalRecords.length > 0) {
+        const comparisons = body.createEl("details", {
+          cls: "practice-learning-path-alignment-comparisons",
+        });
+        this.bindDisclosure(comparisons, "source-alignment-comparisons", false);
+        comparisons.createEl("summary", {
+          text: `Details · Review ${informationalRecords.length} source ${informationalRecords.length === 1 ? "comparison" : "comparisons"}`,
+        });
+        const comparisonBody = comparisons.createDiv();
+        for (const record of informationalRecords) {
+          this.renderSourceAlignmentRecord(comparisonBody, record, result);
+        }
+      }
+    }
+
+    const contextOpportunity = alignmentHasAiContextOpportunity(result);
+    if (blockers === 0 && contextOpportunity) {
+      const suggestion = body.createDiv({
+        cls: "practice-lab-callout practice-learning-path-context-suggestion",
+      });
+      const suggestionHeading = suggestion.createDiv({
+        cls: "practice-learning-path-context-suggestion-heading",
+      });
+      setIcon(suggestionHeading.createSpan(), "sparkles");
+      suggestionHeading.createEl("strong", {
+        text: "Additional context could strengthen this practice",
+      });
+      if (!this.aiContextCompletionDecisionMade) {
+        suggestion.createEl("p", {
+          text: "Your selected material remains the basis. You can approve a small amount of AI-supported technical context for the generated lessons and problems, or continue using only the selected sources. Your notes will not be changed.",
+        });
+        const choiceActions = suggestion.createDiv({
+          cls: "practice-learning-path-actions",
+        });
+        new ButtonComponent(choiceActions)
+          .setIcon("sparkles")
+          .setButtonText("Add supporting context")
+          .setCta()
+          .setDisabled(this.busy !== null)
+          .setTooltip("Allow minimum AI-supported context in this practice path. It will remain visibly not course-checked and will not edit your notes.")
+          .onClick(() => this.chooseAiContextCompletion("approved-general-context"));
+        new ButtonComponent(choiceActions)
+          .setIcon("file-check-2")
+          .setButtonText("Continue with selected material only")
+          .setDisabled(this.busy !== null)
+          .setTooltip("Keep generation limited to the selected notes and approved school material.")
+          .onClick(() => this.chooseAiContextCompletion("selected-sources-only"));
+      } else {
+        const selected = suggestion.createDiv({
+          cls: "practice-learning-path-approved-state",
+        });
+        setIcon(selected.createSpan(), "check-circle-2");
+        selected.createSpan({
+          text: aiContextCompletionApproved(
+            this.blueprintConfiguration.aiContextCompletionPolicy,
+          )
+            ? "AI-supported context approved · not course-checked"
+            : "Using selected material only",
+        });
+        new ButtonComponent(suggestion)
+          .setButtonText("Change…")
+          .setTooltip("Review the context-completion choice before building the path.")
+          .onClick(() => {
+            this.aiContextCompletionDecisionMade = false;
+            this.alignmentAccepted = false;
+            this.invalidatePlanningPreview();
+            this.render();
+          });
+      }
+    }
+
+    const actions = section.createDiv({ cls: "practice-learning-path-actions" });
+    if (this.alignmentAccepted) {
+      const approved = actions.createDiv({ cls: "practice-learning-path-approved-state" });
+      setIcon(approved.createSpan(), "check-circle-2");
+      approved.createSpan({
+        text: result.checked
+          ? "Course alignment approved"
+          : "Continuing as not course-checked",
+      });
+    } else if (
+      blockers === 0
+      && (!contextOpportunity || this.aiContextCompletionDecisionMade)
+    ) {
+      new ButtonComponent(actions)
+        .setIcon("check-circle-2")
+        .setButtonText(result.ledger.records.some((record) => record.resolution === "excluded")
+          ? "Use source-led check with exclusions"
+          : "Use source-led course check")
+        .setCta()
+        .setDisabled(this.busy !== null)
+        .setTooltip(aiContextCompletionApproved(
+          this.blueprintConfiguration.aiContextCompletionPolicy,
+        )
+          ? "Continue with selected school context first and the explicitly approved AI-supported context labelled not course-checked."
+          : "Continue using only the selected material and approved school context.")
+        .onClick(() => void this.approveSourceAlignment());
+    } else {
+      const warning = actions.createDiv({ cls: "practice-learning-path-approved-state is-warning" });
+      setIcon(warning.createSpan(), "triangle-alert");
+      warning.createSpan({
+        text: `Resolve or exclude ${blockers} confirmed school-source ${blockers === 1 ? "conflict" : "conflicts"} to continue. Other areas do not block the path; you will choose whether to add supporting AI context.`,
+      });
+    }
+  }
+
+  private renderSourceAlignmentRecord(
+    container: HTMLElement,
+    record: SourceAlignmentRecordV1,
+    result: LearningSourceAlignmentResultV1,
+  ): void {
+    const blocking = result.blockerRecordIds.includes(record.id);
+    const card = container.createEl("details", {
+      cls: `practice-lab-alignment-record is-${record.status}${blocking ? " is-blocking" : ""}`,
+    });
+    this.bindDisclosure(card, `source-alignment-record:${record.id}`, blocking);
+    const heading = card.createEl("summary");
+    setIcon(heading.createSpan(), blocking ? "triangle-alert" : alignmentStatusIcon(record.status));
+    heading.createSpan({ text: alignmentStatusLabel(record.status) });
+    const details = card.createDiv({ cls: "practice-lab-alignment-record-body" });
+    if (record.courseSupportedClaim !== null) {
+      const supported = details.createEl("p", { cls: "practice-lab-alignment-resolution" });
+      supported.createEl("strong", { text: "School-supported interpretation" });
+      supported.createSpan({ text: record.courseSupportedClaim });
+    }
+    if (record.noteClaim !== null) {
+      const note = details.createEl("p", { cls: "practice-lab-alignment-claim" });
+      note.createEl("strong", { text: "Your notes" });
+      note.createSpan({ text: record.noteClaim });
+    }
+    if (record.schoolClaim !== null) {
+      const school = details.createEl("p", { cls: "practice-lab-alignment-claim" });
+      school.createEl("strong", { text: "School material" });
+      school.createSpan({ text: record.schoolClaim });
+    }
+    const evidence = details.createEl("p", { cls: "practice-lab-muted" });
+    evidence.setText(`${record.noteSegmentIds.length} note and ${record.schoolSegmentIds.length} school evidence ${record.noteSegmentIds.length + record.schoolSegmentIds.length === 1 ? "segment" : "segments"} · ${displayAlignmentResolution(record)}`);
+    if (blocking) {
+      new ButtonComponent(details)
+        .setIcon("circle-slash-2")
+        .setButtonText("Exclude this disputed claim from practice")
+        .setDestructive()
+        .setDisabled(this.busy !== null)
+        .setTooltip("Exclude only this disputed topic. The plugin will not choose between conflicting school sources or use the excluded claim to create practice.")
+        .onClick(() => this.excludeSourceAlignmentRecord(record.id));
+    }
   }
 
   private renderPlanningPreview(container: HTMLElement): void {
     const preview = this.preview;
     if (preview === null) return;
-    const section = this.section(container, "Exact planning payload", "Review this complete text before the first AI planning call.");
+    const section = this.section(container, "Ready to approve", "Confirm the selected engine and inspect the exact source-grounded payload if you want more detail.");
     section.addClass("practice-learning-path-planning-preview");
     section.tabIndex = -1;
     section.setAttribute("aria-label", "Exact planning payload ready for review");
@@ -946,26 +2500,22 @@ export class PracticeLearningPathView extends ItemView {
     metadata.createSpan({ text: preview.providerLabel });
     metadata.createSpan({ text: preview.modelLabel });
     metadata.createSpan({ text: preview.reasoningEffortLabel });
-    const details = section.createEl("details", { cls: "practice-learning-path-payload", attr: { open: "" } });
-    details.createEl("summary", { text: "Show exact provider text" });
+    const details = section.createEl("details", { cls: "practice-learning-path-payload" });
+    this.bindDisclosure(details, "planning-payload", false);
+    details.createEl("summary", { text: "Details · exact provider text" });
     details.createEl("pre", { text: preview.text });
     if (preview.warning !== undefined) section.createEl("p", { cls: "practice-lab-muted", text: preview.warning });
     const actions = section.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setIcon(this.previewAccepted ? "check" : "shield-check")
-      .setButtonText(this.previewAccepted ? "Payload approved" : "Approve this payload")
-      .setDisabled(this.previewAccepted || this.busy !== null)
-      .onClick(() => { this.previewAccepted = true; this.render(); });
-    new ButtonComponent(actions)
       .setIcon("route")
-      .setButtonText(this.busy === "blueprint" ? "Planning path…" : "Generate editable map")
+      .setButtonText(this.busy === "blueprint" ? "Building path…" : "Approve and build path")
       .setCta()
-      .setDisabled(
-        !this.previewAccepted
-        || this.busy !== null
-        || this.quickGenerationRecovery !== null,
-      )
-      .onClick(() => void this.generateBlueprint());
+      .setDisabled(this.busy !== null || this.quickGenerationRecovery !== null)
+      .setTooltip("Approve this exact request and build the editable path without another confirmation step.")
+      .onClick(() => {
+        this.previewAccepted = true;
+        void this.generateBlueprint();
+      });
     if (this.busy === "blueprint") {
       const progress = section.createDiv({
         cls: "practice-learning-path-planning-progress",
@@ -992,7 +2542,7 @@ export class PracticeLearningPathView extends ItemView {
     }
   }
 
-  private renderMap(container: HTMLElement): void {
+  private renderMap(container: HTMLElement, includeGenerationAction = true): void {
     const blueprint = this.blueprint;
     if (blueprint === null) {
       this.stage = "source";
@@ -1005,8 +2555,22 @@ export class PracticeLearningPathView extends ItemView {
     summary.createSpan({ text: `${this.setStates.length} practice sets` });
     summary.createSpan({ text: `${this.totalExercises()} exercises planned` });
 
-    const aspects = this.section(container, "Aspect and prerequisite map", "Source gaps must be removed or resolved by adding material before generation.");
-    const aspectGrid = aspects.createDiv({ cls: "practice-learning-path-aspect-grid" });
+    const gaps = blueprint.draft.aspects.filter((aspect) => aspect.status === "source-gap");
+    const aspects = this.section(
+      container,
+      "Learning map",
+      gaps.length === 0
+        ? "The proposed prerequisites are ready. Open Details when you want to inspect the complete concept map."
+        : `${gaps.length} source ${gaps.length === 1 ? "gap needs" : "gaps need"} attention before generation.`,
+    );
+    const aspectBody = this.disclosure(
+      aspects,
+      "aspect-map",
+      "Details",
+      `${blueprint.draft.aspects.length} aspects · ${gaps.length} source ${gaps.length === 1 ? "gap" : "gaps"}`,
+      gaps.length > 0,
+    );
+    const aspectGrid = aspectBody.createDiv({ cls: "practice-learning-path-aspect-grid" });
     for (const aspect of blueprint.draft.aspects) {
       const card = aspectGrid.createDiv({ cls: `practice-learning-path-aspect is-${aspect.status}` });
       const heading = card.createDiv({ cls: "practice-learning-path-card-heading" });
@@ -1027,8 +2591,14 @@ export class PracticeLearningPathView extends ItemView {
       }
     }
 
-    const sets = this.section(container, "Practice-set progression", "Drag cards or use the arrow controls. Every set can override provider, model, reasoning, difficulty, focus, and exercise mix under Advanced.");
+    const sets = this.section(container, "Practice-set progression", "Choose one set to adjust. The rest stay compact so the learning sequence remains easy to scan.");
     const problem = this.mapProblem();
+    const blockingSetId = this.blockingSetId();
+    if (
+      this.activeMapSetId !== null
+      && !this.setStates.some((state) => state.id === this.activeMapSetId)
+    ) this.activeMapSetId = null;
+    if (blockingSetId !== null) this.activeMapSetId = blockingSetId;
     if (problem !== null) {
       const callout = sets.createDiv({ cls: "practice-lab-callout is-warning", attr: { role: "status" } });
       setIcon(callout.createSpan(), "triangle-alert");
@@ -1045,13 +2615,16 @@ export class PracticeLearningPathView extends ItemView {
       .setDisabled(this.setStates.length >= MAX_LEARNING_PATH_SETS || this.busy !== null)
       .onClick(() => this.addSet());
 
-    const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
-    new ButtonComponent(actions)
-      .setIcon("scan-eye")
-      .setButtonText(this.busy === "payloads" ? "Computing exact payloads…" : "Preview all set payloads")
-      .setDisabled(problem !== null || this.busy !== null)
-      .onClick(() => void this.previewSetPayloads());
-    if (this.setPayloadPreviews.length > 0) this.renderSetPayloadPreviews(container);
+    if (includeGenerationAction) {
+      const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
+      new ButtonComponent(actions)
+        .setIcon("scan-eye")
+        .setButtonText(this.busy === "payloads" ? "Computing exact payloads…" : "Preview all set payloads")
+        .setCta()
+        .setDisabled(problem !== null || this.busy !== null)
+        .onClick(() => void this.previewSetPayloads());
+      if (this.setPayloadPreviews.length > 0) this.renderSetPayloadPreviews(container);
+    }
   }
 
   private renderSetCard(container: HTMLElement, state: EditableSetState, index: number): void {
@@ -1059,10 +2632,12 @@ export class PracticeLearningPathView extends ItemView {
     if (blueprint === null) return;
     const brief = blueprint.draft.sets.find((set) => set.id === state.id);
     if (brief === undefined) return;
+    const expanded = this.activeMapSetId === state.id;
     const card = container.createEl("article", {
       cls: "practice-learning-path-set-card",
       attr: { "data-set-id": state.id },
     });
+    card.addClass(expanded ? "is-expanded" : "is-compact");
     card.addEventListener("dragover", (event) => event.preventDefault());
     card.addEventListener("drop", (event) => {
       event.preventDefault();
@@ -1086,14 +2661,45 @@ export class PracticeLearningPathView extends ItemView {
       event.dataTransfer.setData("text/plain", state.id);
     });
     const identity = heading.createDiv();
-    const title = identity.createEl("input", { cls: "practice-learning-path-set-title", attr: { type: "text", "aria-label": `Set ${index + 1} title` } });
-    title.value = brief.title;
-    title.addEventListener("input", () => this.updateBrief(state.id, { title: title.value }));
+    if (expanded) {
+      const title = identity.createEl("input", { cls: "practice-learning-path-set-title", attr: { type: "text", "aria-label": `Set ${index + 1} title` } });
+      title.value = brief.title;
+      title.addEventListener("input", () => this.updateBrief(state.id, { title: title.value }));
+    } else {
+      const title = identity.createEl("strong", { cls: "practice-learning-path-set-title" });
+      renderLatexMarkup(title, brief.title);
+    }
     identity.createSpan({ cls: "practice-lab-badge", text: brief.instructionalRole.replaceAll("-", " ") });
     const controls = heading.createDiv({ cls: "practice-learning-path-card-actions" });
     this.iconButton(controls, "arrow-up", "Move set earlier", index === 0, () => this.moveSet(state.id, index - 1));
     this.iconButton(controls, "arrow-down", "Move set later", index === this.setStates.length - 1, () => this.moveSet(state.id, index + 1));
     this.iconButton(controls, "trash-2", "Remove set", this.setStates.length <= MIN_LEARNING_PATH_SETS, () => this.removeSet(state.id));
+    new ButtonComponent(controls)
+      .setIcon(expanded ? "chevron-up" : "sliders-horizontal")
+      .setButtonText(expanded ? "Done" : "Customize")
+      .setTooltip(expanded
+        ? `Collapse ${brief.title}`
+        : `Adjust the purpose, quantity, difficulty, engine, and exercise mix for ${brief.title}`)
+      .onClick(() => {
+        this.activeMapSetId = expanded ? null : state.id;
+        this.render();
+      });
+
+    if (!expanded) {
+      const summary = card.createDiv({ cls: "practice-learning-path-set-summary" });
+      const purpose = summary.createDiv();
+      renderLatexMarkup(purpose, brief.purpose);
+      const selectedProvider = this.providers.find((entry) => entry.id === state.configuration.provider);
+      summary.createSpan({
+        text: `${state.configuration.quantity} questions · ${displayDifficulty(state.configuration.difficulty)} · ${selectedProvider?.label ?? state.configuration.provider}`,
+      });
+      const chips = card.createDiv({ cls: "practice-learning-path-aspect-chips" });
+      for (const aspectId of brief.aspectIds) {
+        chips.createSpan({ text: blueprint.draft.aspects.find((aspect) => aspect.id === aspectId)?.title ?? aspectId });
+      }
+      return;
+    }
+
     const purpose = card.createEl("textarea", { attr: { rows: "2", "aria-label": `${brief.title} purpose` } });
     purpose.value = brief.purpose;
     purpose.addEventListener("input", () => this.updateBrief(state.id, { purpose: purpose.value }));
@@ -1131,7 +2737,7 @@ export class PracticeLearningPathView extends ItemView {
     const advanced = card.createEl("details", { cls: "practice-learning-path-advanced" });
     advanced.open = state.advancedOpen;
     advanced.addEventListener("toggle", () => { state.advancedOpen = advanced.open; });
-    advanced.createEl("summary", { text: "Advanced set controls" });
+    advanced.createEl("summary", { text: "Advanced" });
     this.renderSetAdvanced(advanced, state);
   }
 
@@ -1238,9 +2844,20 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private renderSetPayloadPreviews(container: HTMLElement): void {
-    const section = this.section(container, "Exact batch payloads", "Every set payload is computed before batch approval and contains the complete source bundle, aspect map, prerequisite chain, sibling briefs, global instructions, and local objective.");
+    const section = this.section(container, "Ready to approve", "Every set uses the complete approved source bundle and path context. Inspect exact payloads only when you need the technical detail.");
+    section.addClass("practice-learning-path-set-payload-preview");
+    section.tabIndex = -1;
+    this.setPayloadPreviewHost = section;
+    const payloads = this.disclosure(
+      section,
+      "set-payloads",
+      "Details",
+      `${this.setPayloadPreviews.length} exact set ${this.setPayloadPreviews.length === 1 ? "payload" : "payloads"}`,
+      false,
+    );
     for (const preview of this.setPayloadPreviews) {
-      const details = section.createEl("details", { cls: "practice-learning-path-payload" });
+      const details = payloads.createEl("details", { cls: "practice-learning-path-payload" });
+      this.bindDisclosure(details, `set-payload:${preview.setId}`, false);
       const summary = details.createEl("summary");
       summary.createEl("strong", { text: preview.setTitle });
       const configuration = this.setStates.find((state) => state.id === preview.setId)?.configuration;
@@ -1253,27 +2870,36 @@ export class PracticeLearningPathView extends ItemView {
     }
     const actions = section.createDiv({ cls: "practice-learning-path-actions" });
     new ButtonComponent(actions)
-      .setIcon(this.setPayloadsAccepted ? "check" : "shield-check")
-      .setButtonText(this.setPayloadsAccepted ? "Complete batch approved" : "Approve complete batch")
-      .setDisabled(this.setPayloadsAccepted || this.busy !== null)
-      .onClick(() => { this.setPayloadsAccepted = true; this.render(); });
-    new ButtonComponent(actions)
       .setIcon("play")
-      .setButtonText(this.busy === "batch" ? "Generating sets sequentially…" : "Generate all sets")
+      .setButtonText(this.busy === "batch" ? "Generating sets sequentially…" : "Approve and generate all sets")
       .setCta()
-      .setDisabled(
-        !this.setPayloadsAccepted
-        || this.busy !== null
-        || this.quickGenerationRecovery !== null,
-      )
-      .onClick(() => void this.generateAllSets());
+      .setDisabled(this.busy !== null || this.quickGenerationRecovery !== null)
+      .setTooltip("Approve every exact set request and start the recoverable sequential batch.")
+      .onClick(() => {
+        this.setPayloadsAccepted = true;
+        void this.generateAllSets();
+      });
   }
 
   private renderReview(container: HTMLElement): void {
     const blueprint = this.blueprint;
     if (blueprint === null) return;
-    const navigator = this.section(container, "Batch navigator", "Sets run sequentially through one provider job coordinator. Completed drafts remain available if a later set fails.");
-    const nav = navigator.createDiv({
+    const navigator = this.section(container, "Generate and review", "The current set stays in focus. Open Path details or Activity only when you need them.");
+    const currentHost = navigator.createDiv({ cls: "practice-learning-path-current-set-host" });
+    this.batchCurrentHost = currentHost;
+    this.renderCurrentBatchSet(currentHost, blueprint);
+    const finishedCount = this.setStates.filter((state) => {
+      const status = this.statuses.get(state.id)?.state;
+      return status === "review" || status === "saved";
+    }).length;
+    const pathDetails = this.disclosure(
+      navigator,
+      "review-path-details",
+      "Path details",
+      `${finishedCount} of ${this.setStates.length} sets generated`,
+      false,
+    );
+    const nav = pathDetails.createDiv({
       cls: "practice-learning-path-set-navigator",
       attr: {
         "aria-label": "Set generation status",
@@ -1306,7 +2932,11 @@ export class PracticeLearningPathView extends ItemView {
         .onClick(() => void this.resumeRecovery());
     }
 
-    const active = this.generatedSets.find((set) => set.setId === this.activeReviewSetId)
+    const active = this.generatedSets.find((set) => (
+      set.setId === this.activeReviewSetId
+      && this.statuses.get(set.setId)?.state !== "saved"
+    ))
+      ?? this.generatedSets.find((set) => this.statuses.get(set.setId)?.state !== "saved")
       ?? this.generatedSets[0];
     if (active === undefined) {
       const empty = container.createDiv({ cls: "practice-lab-empty" });
@@ -1317,6 +2947,14 @@ export class PracticeLearningPathView extends ItemView {
     this.activeReviewSetId = active.setId;
     const brief = blueprint.draft.sets.find((set) => set.id === active.setId);
     const review = this.section(container, brief?.title ?? active.setId, brief?.purpose ?? "Review this generated set before saving.");
+    if (this.statuses.get(active.setId)?.state === "saved") {
+      const saved = review.createDiv({ cls: "practice-lab-callout is-info" });
+      setIcon(saved.createSpan(), "check-circle-2");
+      saved.createSpan({
+        text: "Every completed set is already saved. Resume or retry the remaining batch from the navigator above.",
+      });
+      return;
+    }
     const approved = this.approvedBySet.get(active.setId) ?? new Set<string>();
     const activeOcclusions = active.exercises.filter((exercise) => (
       !exercise.rejected && exercise.type === "image-occlusion"
@@ -1327,22 +2965,23 @@ export class PracticeLearningPathView extends ItemView {
     const toolbar = review.createDiv({ cls: "practice-learning-path-review-toolbar" });
     new ButtonComponent(toolbar)
       .setIcon("list-checks")
-      .setButtonText("Approve all ready exercises")
-      .setTooltip("Approve every ready exercise in every generated set. Occlusions are included only after their masks were explicitly accepted.")
+      .setButtonText("Approve ready exercises in this set")
+      .setTooltip("Approve the ready text exercises in the set you are viewing. Occlusions are included only after their masks were explicitly accepted.")
       .onClick(() => {
-        const result = approveReadyLearningPathExercises(this.reviewSetInputs(blueprint));
-        this.approvedBySet = new Map([...result.approvedBySet].map(([setId, ids]) => [
-          setId,
-          new Set(ids),
-        ]));
+        const result = approveReadyLearningPathExercises([
+          this.reviewSetInput(active, blueprint),
+        ]);
+        for (const [setId, ids] of result.approvedBySet) {
+          this.approvedBySet.set(setId, new Set(ids));
+        }
         const blocker = result.blockers[0];
         if (blocker === undefined) {
-          this.reviewFeedback = `All ${result.totalApprovedCount} kept exercises across ${this.generatedSets.length} sets are approved. The learning path is ready to save.`;
+          this.reviewFeedback = `All ${result.totalApprovedCount} kept exercises in ${brief?.title ?? active.setId} are approved.`;
         } else {
-          this.activeReviewSetId = blocker.setId;
-          this.reviewFeedback = `Approved ${result.newlyApprovedCount} ready ${result.newlyApprovedCount === 1 ? "exercise" : "exercises"}. Next: ${blocker.setTitle} — ${blocker.reason}`;
+          this.reviewFeedback = `Approved ${result.newlyApprovedCount} ready ${result.newlyApprovedCount === 1 ? "exercise" : "exercises"} in this set. Next: ${blocker.reason}`;
         }
-        this.renderAndFocusReviewFeedback(result.blockers.length === 0);
+        this.reviewStateChanged(true);
+        this.renderAndFocusReviewFeedback(this.reviewProblem() === null);
       });
     new ButtonComponent(toolbar)
       .setIcon("scan")
@@ -1372,12 +3011,40 @@ export class PracticeLearningPathView extends ItemView {
         this.reviewFeedback = remaining === 0
           ? `All occlusion masks in ${brief?.title ?? active.setId} are accepted and their exercises are approved.`
           : `${remaining} ${remaining === 1 ? "occlusion still needs" : "occlusions still need"} a valid mask in ${brief?.title ?? active.setId}.`;
+        this.reviewStateChanged(true);
         this.renderAndFocusReviewFeedback(false);
+      });
+    const moreApproval = toolbar.createEl("details", {
+      cls: "practice-learning-path-disclosure practice-learning-path-review-bulk",
+    });
+    moreApproval.createEl("summary", { text: "More…" });
+    const moreApprovalBody = moreApproval.createDiv({
+      cls: "practice-learning-path-disclosure-body",
+    });
+    new ButtonComponent(moreApprovalBody)
+      .setIcon("list-checks")
+      .setButtonText("Approve ready exercises in all generated sets")
+      .setTooltip("Bulk-approve every currently ready text exercise. Occlusions still require explicit mask acceptance.")
+      .onClick(() => {
+        const result = approveReadyLearningPathExercises(this.reviewSetInputs(blueprint));
+        this.approvedBySet = new Map([...result.approvedBySet].map(([setId, ids]) => [
+          setId,
+          new Set(ids),
+        ]));
+        const blocker = result.blockers[0];
+        if (blocker === undefined) {
+          this.reviewFeedback = `All ${result.totalApprovedCount} kept exercises across ${this.generatedSets.length} sets are approved. Checking the complete workspace before saving…`;
+        } else {
+          this.activeReviewSetId = blocker.setId;
+          this.reviewFeedback = `Approved ${result.newlyApprovedCount} ready ${result.newlyApprovedCount === 1 ? "exercise" : "exercises"}. Next: ${blocker.setTitle} — ${blocker.reason}`;
+        }
+        this.reviewStateChanged(true);
+        this.renderAndFocusReviewFeedback(result.blockers.length === 0);
       });
     const activeState = learningPathSetReviewState(this.reviewSetInput(active, blueprint));
     review.createEl("p", {
       cls: "practice-lab-muted",
-      text: `${activeState.approvedCount} of ${activeState.keptCount} kept exercises approved in this set. Use the batch button above to approve every ready set at once.`,
+      text: `${activeState.approvedCount} of ${activeState.keptCount} kept exercises approved in this set. Review this set before moving to another one.`,
     });
     if (this.reviewFeedback !== null) {
       const feedback = review.createDiv({
@@ -1390,27 +3057,60 @@ export class PracticeLearningPathView extends ItemView {
     for (const [index, exercise] of active.exercises.entries()) {
       this.renderExerciseReview(review, active, exercise, index, approved);
     }
-    const gate = this.reviewProblem();
-    if (gate !== null) {
+    const reviewGate = this.reviewProblem();
+    const currentRequest = this.currentSaveRequest();
+    const currentRequestHash = currentRequest === null
+      ? null
+      : learningPathSaveRequestHash(currentRequest);
+    const currentPreflight = this.savePreflight !== null
+      && this.savePreflight.requestHash === currentRequestHash
+      ? this.savePreflight
+      : null;
+    const saveGate = reviewGate
+      ?? (this.saveValidationBlocked
+        ? "The generated path needs a compatibility repair before it can be saved. Nothing was written."
+        : currentPreflight?.state === "invalid"
+          ? "The complete workspace did not pass its save check. Open the error details above."
+          : currentPreflight?.state === "valid"
+            ? null
+            : "Checking the complete workspace before enabling save…");
+    if (saveGate !== null) {
       const callout = container.createDiv({ cls: "practice-lab-callout is-warning" });
       setIcon(callout.createSpan(), "triangle-alert");
-      callout.createSpan({ text: gate });
+      callout.createSpan({ text: saveGate });
     }
     const actions = container.createDiv({
       cls: "practice-learning-path-actions is-sticky practice-learning-path-save-actions",
       attr: { tabindex: "-1" },
     });
+    const partial = this.generatedSets.length < this.setStates.length;
     const saveGuidance = actions.createDiv({ cls: "practice-learning-path-save-guidance" });
-    saveGuidance.createEl("strong", { text: gate === null ? "Ready to save" : "Review still required" });
+    saveGuidance.createEl("strong", {
+      text: saveGate === null
+        ? partial ? "Completed sets are ready" : "Ready to save"
+        : this.saveValidationBlocked || currentPreflight?.state === "invalid"
+          ? "Save blocked"
+          : reviewGate === null
+            ? "Checking workspace"
+            : "Review still required",
+    });
     saveGuidance.createSpan({
-      text: gate ?? "All kept exercises and occlusion masks are approved across every set.",
+      text: saveGate ?? (partial
+        ? "Save the approved completed sets now. The unfinished batch remains recoverable."
+        : "All kept exercises and occlusion masks are approved across every set."),
     });
     new ButtonComponent(actions)
       .setIcon("save")
-      .setButtonText(this.busy === "save" ? "Saving workspace atomically…" : "Save guided learning path")
+      .setButtonText(this.busy === "save"
+        ? "Saving workspace atomically…"
+        : partial
+          ? "Save completed sets"
+          : "Save guided learning path")
       .setCta()
-      .setDisabled(gate !== null || this.busy !== null)
-      .setTooltip(gate ?? "Save the complete reviewed learning path to its Markdown workspace.")
+      .setDisabled(saveGate !== null || this.busy !== null)
+      .setTooltip(saveGate ?? (partial
+        ? "Save completed approved sets without discarding the unfinished recoverable batch."
+        : "Save the complete reviewed learning path to its Markdown workspace."))
       .onClick(() => void this.saveLearningPath());
   }
 
@@ -1428,10 +3128,19 @@ export class PracticeLearningPathView extends ItemView {
     const keep = heading.createEl("label", { cls: "practice-learning-path-keep" });
     const keepInput = keep.createEl("input", { attr: { type: "checkbox" } });
     keepInput.checked = !exercise.rejected;
-    keep.createSpan({ text: "Keep" });
+    const requiredByTutor = set.draft.tutorLessons.some((lesson) => (
+      lesson.guidedExerciseId === exercise.id
+    ));
+    keepInput.disabled = requiredByTutor;
+    keep.title = requiredByTutor
+      ? "This guided exercise is required by a tutor lesson. Change the path plan before removing it."
+      : "Keep or reject this exercise.";
+    keep.createSpan({ text: requiredByTutor ? "Required by tutor lesson" : "Keep" });
     keepInput.addEventListener("change", () => {
+      if (requiredByTutor) return;
       this.updateReviewExercise(set.setId, exercise.id, { rejected: !keepInput.checked });
       approved.delete(exercise.id);
+      this.reviewStateChanged(true);
       this.render();
     });
     if (exercise.rejected) return;
@@ -1442,6 +3151,7 @@ export class PracticeLearningPathView extends ItemView {
     promptInput.addEventListener("input", () => {
       this.updateReviewExercise(set.setId, exercise.id, { prompt: promptInput.value });
       approved.delete(exercise.id);
+      this.reviewStateChanged(false);
     });
     const answer = card.createEl("label");
     answer.createSpan({ text: "Grounded answer" });
@@ -1450,6 +3160,7 @@ export class PracticeLearningPathView extends ItemView {
     answerInput.addEventListener("input", () => {
       this.updateReviewExercise(set.setId, exercise.id, { groundedAnswer: answerInput.value });
       approved.delete(exercise.id);
+      this.reviewStateChanged(false);
     });
     if (exercise.type === "image-occlusion") {
       if (exercise.visualUrl === undefined) {
@@ -1464,11 +3175,13 @@ export class PracticeLearningPathView extends ItemView {
           onChange: (masks) => {
             approved.delete(exercise.id);
             this.updateReviewExercise(set.setId, exercise.id, { masks, occlusionReviewed: false });
+            this.reviewStateChanged(true);
           },
           onReviewed: (masks) => {
             approved.add(exercise.id);
             this.updateReviewExercise(set.setId, exercise.id, { masks, occlusionReviewed: true });
             this.approvedBySet.set(set.setId, approved);
+            this.reviewStateChanged(true);
             this.render();
           },
         });
@@ -1483,6 +3196,7 @@ export class PracticeLearningPathView extends ItemView {
       approve.onClick(() => {
         approved.add(exercise.id);
         this.approvedBySet.set(set.setId, approved);
+        this.reviewStateChanged(true);
         this.render();
       });
     }
@@ -1507,33 +3221,73 @@ export class PracticeLearningPathView extends ItemView {
       cls: "practice-lab-muted",
       text: `${path.steps.length} path ${path.steps.length === 1 ? "step" : "steps"} · ${workspace.bank.tutorLessons.length} tutor ${workspace.bank.tutorLessons.length === 1 ? "lesson" : "lessons"} · ${workspace.bank.practiceSets.length} named ${workspace.bank.practiceSets.length === 1 ? "set" : "sets"} · ${workspace.bank.exercises.length} total ${workspace.bank.exercises.length === 1 ? "question" : "questions"}.`,
     });
+    const studyState = this.options.callbacks.savedWorkspaceStudyState?.(workspace) ?? {
+      state: "ready" as const,
+      description: "The saved guided path is ready to continue.",
+    };
+    if (studyState.state !== "ready") {
+      const notice = container.createDiv({
+        cls: `practice-lab-callout ${studyState.state === "blocked" ? "is-warning" : "is-info"}`,
+        attr: { role: "status" },
+      });
+      notice.createEl("strong", {
+        text: studyState.state === "resume"
+          ? "A saved session is ready to resume"
+          : "Resolve the saved session first",
+      });
+      notice.createEl("p", { text: studyState.description });
+    }
     const actions = container.createDiv({ cls: "practice-learning-path-actions is-sticky" });
-    this.savedAction(
+    if (studyState.state === "blocked") {
+      this.savedAction(
+        actions,
+        "Open recovery choices",
+        "shield-alert",
+        "open-bank",
+        true,
+        "Open the Practice note to review the preserved session before deciding whether to keep or discard it.",
+      );
+    } else {
+      this.savedAction(
+        actions,
+        studyState.state === "resume" ? "Resume saved session" : "Continue guided path",
+        "play",
+        "continue",
+        true,
+        studyState.state === "resume"
+          ? "Resume the exact device-local session without losing answers, skips, or tutor progress."
+          : "Continue guided path from the locally recommended step. Tutor steps contain one guided problem and continue directly after saving.",
+      );
+    }
+    const moreActions = this.disclosure(
       actions,
-      "Continue guided path",
-      "play",
-      "continue",
-      true,
-      "Start the locally recommended path step. Tutor steps contain one guided problem and continue directly after saving.",
-    );
-    this.savedAction(
-      actions,
-      "Choose a set",
-      "list",
-      "choose-set",
+      "saved-actions",
+      "More actions",
+      studyState.state === "ready"
+        ? "Choose a set, mix the path, or open its Practice note"
+        : "Open the Practice note without changing the preserved session",
       false,
-      "Choose any named practice set without progression locks.",
     );
+    if (studyState.state === "ready") {
+      this.savedAction(
+        moreActions,
+        "Choose a set",
+        "list",
+        "choose-set",
+        false,
+        "Choose any named practice set without progression locks.",
+      );
+      this.savedAction(
+        moreActions,
+        "Mixed practice",
+        "shuffle",
+        "mixed",
+        false,
+        "Combine every named set without replaying tutor lessons.",
+      );
+    }
     this.savedAction(
-      actions,
-      "Mixed practice",
-      "shuffle",
-      "mixed",
-      false,
-      "Combine every named set without replaying tutor lessons.",
-    );
-    this.savedAction(
-      actions,
+      moreActions,
       "Open Practice note",
       "file-text",
       "open-bank",
@@ -1541,7 +3295,14 @@ export class PracticeLearningPathView extends ItemView {
       "Open the readable Practice Markdown workspace with study choices, history, and statistics.",
     );
 
-    const identity = this.section(container, "Path identity", "Rename the path without changing its grounded content, sessions, or source provenance.");
+    const management = this.disclosure(
+      container,
+      "saved-management",
+      "Manage path",
+      `${workspace.bank.practiceSets.length} named ${workspace.bank.practiceSets.length === 1 ? "set" : "sets"} · labels and regeneration controls`,
+      false,
+    );
+    const identity = this.section(management, "Path identity", "Rename the path without changing its grounded content, sessions, or source provenance.");
     const title = identity.createEl("input", {
       cls: "practice-learning-path-set-title",
       attr: { type: "text", "aria-label": "Learning-path title" },
@@ -1553,7 +3314,7 @@ export class PracticeLearningPathView extends ItemView {
       this.savedWorkspaceDirty = true;
     });
 
-    const sets = this.section(container, "Named practice sets", "Titles and purposes can be refined here. Exercise assignments, tutor links, and historical evidence keep their stable IDs.");
+    const sets = this.section(management, "Named practice sets", "Titles and purposes can be refined here. Exercise assignments, tutor links, and historical evidence keep their stable IDs.");
     for (const set of [...workspace.bank.practiceSets].sort((left, right) => left.order - right.order)) {
       const card = sets.createEl("article", { cls: "practice-learning-path-set-card" });
       const heading = card.createDiv({ cls: "practice-learning-path-set-heading" });
@@ -1675,7 +3436,7 @@ export class PracticeLearningPathView extends ItemView {
         model: selected?.defaultModel ?? "",
         reasoningEffort: selected?.reasoningEfforts[0] ?? "medium",
       };
-      this.invalidatePlanningPreview();
+      this.invalidateSourceAlignment();
       this.render();
     });
     const selected = this.providers.find((entry) => entry.id === this.blueprintConfiguration.provider);
@@ -1687,7 +3448,8 @@ export class PracticeLearningPathView extends ItemView {
     model.value = this.blueprintConfiguration.model;
     model.addEventListener("change", () => {
       this.blueprintConfiguration = { ...this.blueprintConfiguration, model: model.value };
-      this.invalidatePlanningPreview();
+      this.invalidateSourceAlignment();
+      this.render();
     });
     const reasoningLabel = grid.createEl("label");
     reasoningLabel.createSpan({ text: "Planning reasoning" });
@@ -1696,7 +3458,8 @@ export class PracticeLearningPathView extends ItemView {
     reasoning.value = this.blueprintConfiguration.reasoningEffort;
     reasoning.addEventListener("change", () => {
       this.blueprintConfiguration = { ...this.blueprintConfiguration, reasoningEffort: reasoning.value as ReasoningEffort };
-      this.invalidatePlanningPreview();
+      this.invalidateSourceAlignment();
+      this.render();
     });
   }
 
@@ -1732,6 +3495,84 @@ export class PracticeLearningPathView extends ItemView {
       }),
     });
     if (includeVisuals) this.renderSourceVisuals(card, source);
+  }
+
+  private sourceClassificationSummary(sources: readonly SourcePresentation[]): string {
+    const counts = new Map<SourceMaterialClassificationV1, number>();
+    for (const source of sources) {
+      const classification = source.classification ?? "unclassified";
+      counts.set(classification, (counts.get(classification) ?? 0) + 1);
+    }
+    return [...counts].map(([classification, count]) => {
+      const singular = SOURCE_CLASSIFICATION_LABELS[classification].toLocaleLowerCase();
+      const label = classification === "unclassified"
+        ? `${singular} source${count === 1 ? "" : "s"}`
+        : `${singular}${count === 1 ? "" : "s"}`;
+      return `${count} ${label}`;
+    }).join(" · ");
+  }
+
+  private renderSourceClassification(
+    container: HTMLElement,
+    source: SourcePresentation,
+  ): void {
+    const classification = source.classification ?? "unclassified";
+    const confirmed = source.classificationState === "confirmed";
+    const row = container.createDiv({
+      cls: `practice-learning-path-source-label${confirmed ? " is-confirmed" : " is-unconfirmed"}`,
+    });
+    const copy = row.createDiv({ cls: "practice-learning-path-source-label-copy" });
+    copy.createEl("strong", { text: source.title });
+    const state = copy.createSpan({
+      text: confirmed
+        ? `${SOURCE_CLASSIFICATION_LABELS[classification]} · Confirmed`
+        : `${SOURCE_CLASSIFICATION_LABELS[classification]} · Confirmation needed`,
+    });
+    const controls = row.createDiv({ cls: "practice-learning-path-source-label-controls" });
+    const select = controls.createEl("select", {
+      attr: { "aria-label": `Source label for ${source.title}` },
+    });
+    for (const [value, label] of Object.entries(SOURCE_CLASSIFICATION_LABELS)) {
+      select.createEl("option", { value, text: label });
+    }
+    select.value = classification;
+    const callback = this.options.callbacks.confirmSourceClassification;
+    const confirm = new ButtonComponent(controls)
+      .setIcon("check")
+      .setButtonText(confirmed ? "Confirmed" : "Confirm")
+      .setCta()
+      .setDisabled(callback === undefined || confirmed);
+    const status = row.createEl("p", {
+      cls: "practice-learning-path-source-label-status",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    select.addEventListener("change", () => {
+      confirm.setButtonText("Confirm");
+      confirm.setDisabled(callback === undefined);
+      state.setText(`${SOURCE_CLASSIFICATION_LABELS[select.value as SourceMaterialClassificationV1]} · Not yet confirmed`);
+      status.setText("");
+    });
+    confirm.onClick(() => {
+      if (callback === undefined) return;
+      const selected = select.value as SourceMaterialClassificationV1;
+      confirm.setDisabled(true).setButtonText("Saving…");
+      void Promise.resolve()
+        .then(() => callback(source, selected))
+        .then((updated) => {
+          if (this.primary !== null && sameSourceScope(this.primary, source)) {
+            this.primary = updated;
+          }
+          this.supporting = this.supporting.map((candidate) => (
+            sameSourceScope(candidate, source) ? updated : candidate
+          ));
+          this.invalidateSourceAlignment();
+          this.render();
+        })
+        .catch((error: unknown) => {
+          confirm.setDisabled(false).setButtonText("Confirm");
+          status.setText(`Could not confirm this label. ${errorMessage(error)}`);
+        });
+    });
   }
 
   private renderVisualBundleControls(container: HTMLElement): void {
@@ -2058,11 +3899,11 @@ export class PracticeLearningPathView extends ItemView {
     this.visualSelectionBusy = true;
     this.visualSelectionMessage = null;
     this.applySourcePresentation(current, updated);
-    this.invalidatePlanningPreview();
     this.render();
     try {
       const synced = await this.syncSourcePresentation(current, updated);
       this.applySourcePresentation(updated, synced);
+      this.invalidatePlanningPreview();
     } catch (error) {
       this.applySourcePresentation(updated, current);
       this.visualSelectionMessage = `The visual change was not saved: ${errorMessage(error)}`;
@@ -2239,12 +4080,102 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private renderActivity(container: HTMLElement): void {
-    const events = [...this.activity.values()].flat().slice(-12);
+    const groups = [...this.activity.values()].filter((events) => events.length > 0);
+    const allEvents = groups.flat();
+    const events = allEvents.slice(-12);
     if (events.length === 0) return;
-    const details = container.createEl("details", { cls: "practice-learning-path-activity", attr: { open: "" } });
-    details.createEl("summary", { text: "Live agent activity" });
+    const details = container.createEl("details", { cls: "practice-learning-path-activity" });
+    this.bindDisclosure(details, "activity", false);
+    const summary = details.createEl("summary");
+    summary.createSpan({ text: "Activity" });
+    const summaryMeta = summary.createSpan({ cls: "practice-learning-path-activity-summary" });
+    const startedAt = activityBoundary(allEvents, "first") ?? Date.now();
+    const finishedAt = this.aiActivityIsRunning()
+      ? undefined
+      : activityBoundary(allEvents, "last") ?? Date.now();
+    const telemetry = combineGenerationTelemetry(
+      groups.flatMap((group) => {
+        const item = generationTelemetryFromActivity(group);
+        return item === undefined ? [] : [item];
+      }),
+    );
+    const elapsed = (finishedAt ?? Date.now()) - startedAt;
+    let elapsedMetric: HTMLElement | undefined;
+    const refreshSummary = (): void => {
+      const liveElapsed = (finishedAt ?? Date.now()) - startedAt;
+      summaryMeta.setText(
+        `${formatGenerationDuration(liveElapsed)}`
+        + (telemetry === undefined
+          ? ""
+          : ` · ${telemetry.tokenUsage.source === "provider-reported" ? "" : "~"}${compactTelemetryTokens(tokenUsageTotal(telemetry.tokenUsage))} tokens`),
+      );
+      elapsedMetric?.setText(formatGenerationDuration(liveElapsed));
+    };
+    this.activitySummaryRefreshers.push({ element: summaryMeta, refresh: refreshSummary });
+    this.ensureActivityClock();
+    if (telemetry !== undefined) {
+      const metrics = details.createDiv({
+        cls: "practice-lab-generation-telemetry",
+        attr: { "aria-label": "Guided generation usage summary" },
+      });
+      elapsedMetric = telemetryMetric(metrics, "Elapsed", formatGenerationDuration(elapsed));
+      telemetryMetric(metrics, "Tokens", formatTokenUsage(telemetry.tokenUsage));
+      telemetryMetric(metrics, "Cost", formatGenerationCost(telemetry));
+      telemetryMetric(
+        metrics,
+        "Provider work",
+        `${telemetry.jobCount} ${telemetry.jobCount === 1 ? "job" : "jobs"} · ${telemetry.providerAttemptCount} ${telemetry.providerAttemptCount === 1 ? "attempt" : "attempts"}`,
+      );
+      if (telemetry.tokenUsage.source !== "provider-reported") {
+        metrics.createDiv({
+          cls: "practice-lab-generation-telemetry-note",
+          text: `~ covers submitted text and visible structured output only. Hidden reasoning and provider/tool overhead${telemetry.tokenUsage.inputEstimateExcludesMedia ? ", including visual tokenization," : ""} are not included.`,
+        });
+      }
+    }
+    refreshSummary();
     const list = details.createEl("ol");
-    for (const event of events) list.createEl("li", { text: `${event.phase}: ${event.message}` });
+    for (const event of events) {
+      const occurredAt = Date.parse(event.occurredAt);
+      list.createEl("li", {
+        text: `${Number.isFinite(occurredAt) ? `+${formatGenerationDuration(Math.max(0, occurredAt - startedAt))} · ` : ""}${event.phase}: ${event.message}`,
+      });
+    }
+  }
+
+  private aiActivityIsRunning(): boolean {
+    return this.busy === "alignment"
+      || this.busy === "blueprint"
+      || this.busy === "batch"
+      || this.busy === "recovery";
+  }
+
+  private ensureActivityClock(): void {
+    if (!this.aiActivityIsRunning() || this.activityClock !== undefined) return;
+    this.activityClock = window.setInterval(() => {
+      this.activitySummaryRefreshers = this.activitySummaryRefreshers.filter(
+        (item) => item.element.isConnected,
+      );
+      for (const item of this.activitySummaryRefreshers) item.refresh();
+      if (!this.aiActivityIsRunning()) this.clearActivityClock();
+    }, 1_000);
+  }
+
+  private clearActivityClock(): void {
+    if (this.activityClock === undefined) return;
+    window.clearInterval(this.activityClock);
+    this.activityClock = undefined;
+  }
+
+  private currentBatchSetState(): EditableSetState | null {
+    const activeStatus = ["generating", "validating", "failed"];
+    return this.setStates.find((state) => (
+      activeStatus.includes(this.statuses.get(state.id)?.state ?? "")
+    ))
+      ?? this.setStates.find((state) => state.id === this.activeReviewSetId)
+      ?? this.setStates.find((state) => this.statuses.get(state.id)?.state === "queued")
+      ?? this.setStates[0]
+      ?? null;
   }
 
   private renderBatchNavigator(
@@ -2295,11 +4226,36 @@ export class PracticeLearningPathView extends ItemView {
     }
   }
 
+  private renderCurrentBatchSet(
+    container: HTMLElement,
+    blueprint: LearningBlueprintPresentationV1,
+  ): void {
+    container.replaceChildren();
+    const currentState = this.currentBatchSetState();
+    if (currentState === null) return;
+    const brief = blueprint.draft.sets.find((set) => set.id === currentState.id);
+    const status = this.statuses.get(currentState.id) ?? { state: "queued" as const };
+    const current = container.createDiv({
+      cls: `practice-learning-path-current-set is-${status.state}`,
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    const icon = current.createSpan({
+      cls: status.state === "generating" ? "practice-lab-spinner" : "",
+      attr: { "aria-hidden": "true" },
+    });
+    setIcon(icon, statusIcon(status.state));
+    const copy = current.createDiv();
+    copy.createEl("strong", { text: brief?.title ?? currentState.id });
+    copy.createSpan({ text: statusLabel(status) });
+  }
+
   private refreshBatchProgress(): void {
     const host = this.batchNavigatorHost;
+    const currentHost = this.batchCurrentHost;
     const blueprint = this.blueprint;
-    if (host === null || blueprint === null) return;
-    this.renderBatchNavigator(host, blueprint);
+    if (blueprint === null) return;
+    if (host !== null) this.renderBatchNavigator(host, blueprint);
+    if (currentHost !== null) this.renderCurrentBatchSet(currentHost, blueprint);
   }
 
   private refreshBatchActivity(): void {
@@ -2311,6 +4267,13 @@ export class PracticeLearningPathView extends ItemView {
 
   private refreshBlueprintActivity(): void {
     const host = this.blueprintActivityHost;
+    if (host === null) return;
+    host.replaceChildren();
+    this.renderActivity(host);
+  }
+
+  private refreshAlignmentActivity(): void {
+    const host = this.alignmentActivityHost;
     if (host === null) return;
     host.replaceChildren();
     this.renderActivity(host);
@@ -2396,9 +4359,170 @@ export class PracticeLearningPathView extends ItemView {
     }
   }
 
-  private async previewPlanningPayload(): Promise<void> {
+  private async previewSourceAlignment(): Promise<void> {
     const primary = this.primary;
     if (primary === null || this.busy !== null) return;
+    const unconfirmedLabels = this.approvedSources().filter((source) => (
+      source.classificationState !== "confirmed"
+    )).length;
+    if (unconfirmedLabels > 0) {
+      this.error = `Confirm ${unconfirmedLabels} source ${unconfirmedLabels === 1 ? "label" : "labels"} before checking course alignment.`;
+      this.render();
+      return;
+    }
+    const budgetProblem = this.pdfBudgetProblem();
+    if (budgetProblem !== null) {
+      this.error = budgetProblem.message;
+      this.render();
+      return;
+    }
+    let completed = false;
+    this.busy = "alignment-preview";
+    this.error = null;
+    this.render();
+    try {
+      this.alignmentPreview = await this.options.callbacks.previewSourceAlignment(
+        primary,
+        this.supporting,
+        this.blueprintConfiguration,
+      );
+      this.alignmentResult = null;
+      this.alignmentAccepted = false;
+      completed = true;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.busy = null;
+      this.render();
+      if (completed) this.revealAlignmentPreview();
+    }
+  }
+
+  private async generateSourceAlignment(): Promise<void> {
+    if (this.alignmentPreview === null || this.busy !== null) return;
+    if (this.quickGenerationRecovery !== null) {
+      this.error = "Resolve the saved Quick set recovery above before checking course alignment.";
+      this.render();
+      return;
+    }
+    let completed = false;
+    this.busy = "alignment";
+    this.error = null;
+    this.activity.clear();
+    this.render();
+    try {
+      this.alignmentResult = await this.options.callbacks.generateSourceAlignment((event) => {
+        this.activity.set("source-alignment", [
+          ...(this.activity.get("source-alignment") ?? []),
+          event,
+        ].slice(-40));
+        this.refreshAlignmentActivity();
+      });
+      this.alignmentAccepted = false;
+      this.aiContextCompletionDecisionMade = false;
+      this.blueprintConfiguration = {
+        ...this.blueprintConfiguration,
+        aiContextCompletionPolicy: DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+      };
+      completed = true;
+    } catch (error) {
+      this.error = errorMessage(error);
+    } finally {
+      this.busy = null;
+      this.render();
+      if (completed) this.revealAlignmentResult();
+    }
+  }
+
+  private async approveSourceAlignment(): Promise<void> {
+    const result = this.alignmentResult;
+    if (
+      result === null
+      || result.blockerRecordIds.length > 0
+      || this.busy !== null
+      || (alignmentHasAiContextOpportunity(result) && !this.aiContextCompletionDecisionMade)
+    ) return;
+    this.busy = "alignment-approval";
+    this.error = null;
+    this.render();
+    try {
+      this.alignmentResult = await this.options.callbacks.approveSourceAlignment(
+        structuredClone(result.ledger),
+      );
+      if (this.alignmentResult.blockerRecordIds.length > 0) {
+        throw new Error("The approved course-alignment result still has unresolved blockers.");
+      }
+      this.alignmentAccepted = true;
+      this.invalidatePlanningPreview();
+    } catch (error) {
+      this.error = errorMessage(error);
+      this.alignmentAccepted = false;
+    } finally {
+      this.busy = null;
+      this.render();
+    }
+  }
+
+  private async continueWithoutCourseAlignment(
+    policy: AiContextCompletionPolicyV1,
+  ): Promise<void> {
+    if (this.alignmentPreview === null || this.alignmentPreview.requiresProvider || this.busy !== null) return;
+    this.busy = "alignment-approval";
+    this.error = null;
+    this.render();
+    try {
+      const result = await this.options.callbacks.continueWithoutCourseAlignment();
+      if (result.blockerRecordIds.length > 0) {
+        throw new Error("Conflicting school sources cannot be downgraded to an unverified path.");
+      }
+      this.alignmentResult = result;
+      this.alignmentAccepted = true;
+      this.aiContextCompletionDecisionMade = true;
+      this.blueprintConfiguration = {
+        ...this.blueprintConfiguration,
+        aiContextCompletionPolicy: policy,
+      };
+      this.invalidatePlanningPreview();
+    } catch (error) {
+      this.error = errorMessage(error);
+      this.alignmentAccepted = false;
+    } finally {
+      this.busy = null;
+      this.render();
+    }
+  }
+
+  private excludeSourceAlignmentRecord(recordId: string): void {
+    const result = this.alignmentResult;
+    if (result === null || !result.blockerRecordIds.includes(recordId) || this.busy !== null) return;
+    const ledger = structuredClone(result.ledger);
+    const record = ledger.records.find((candidate) => candidate.id === recordId);
+    if (record === undefined) return;
+    record.resolution = "excluded";
+    this.alignmentResult = {
+      ...result,
+      ledger,
+      blockerRecordIds: result.blockerRecordIds.filter((id) => id !== recordId),
+    };
+    this.alignmentAccepted = false;
+    this.render();
+  }
+
+  private chooseAiContextCompletion(policy: AiContextCompletionPolicyV1): void {
+    if (this.busy !== null) return;
+    this.blueprintConfiguration = {
+      ...this.blueprintConfiguration,
+      aiContextCompletionPolicy: policy,
+    };
+    this.aiContextCompletionDecisionMade = true;
+    this.alignmentAccepted = false;
+    this.invalidatePlanningPreview();
+    this.render();
+  }
+
+  private async previewPlanningPayload(): Promise<void> {
+    const primary = this.primary;
+    if (primary === null || this.busy !== null || !this.alignmentAccepted) return;
     const budgetProblem = this.pdfBudgetProblem();
     if (budgetProblem !== null) {
       this.error = budgetProblem.message;
@@ -2436,7 +4560,12 @@ export class PracticeLearningPathView extends ItemView {
 
   private async generateBlueprint(): Promise<void> {
     const primary = this.primary;
-    if (primary === null || this.busy !== null || !this.previewAccepted) return;
+    if (
+      primary === null
+      || this.busy !== null
+      || !this.alignmentAccepted
+      || !this.previewAccepted
+    ) return;
     if (this.quickGenerationRecovery !== null) {
       this.error = "Resolve the saved Quick set recovery above before starting Guided path generation.";
       this.render();
@@ -2457,6 +4586,7 @@ export class PracticeLearningPathView extends ItemView {
         },
       );
       this.blueprint = result;
+      this.staleBlueprint = null;
       this.setStates = result.draft.sets.map((set) => this.editableSetState(
         set.id,
         this.defaultSetConfiguration(
@@ -2466,7 +4596,10 @@ export class PracticeLearningPathView extends ItemView {
         ),
         false,
       ));
+      this.activeMapSetId = this.setStates[0]?.id ?? null;
+      this.staleStages.delete("map");
       this.stage = "map";
+      this.page = "path-plan";
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
@@ -2478,17 +4611,20 @@ export class PracticeLearningPathView extends ItemView {
   private async previewSetPayloads(): Promise<void> {
     const blueprint = this.blueprint;
     if (blueprint === null || this.busy !== null || this.mapProblem() !== null) return;
+    let completed = false;
     this.busy = "payloads";
     this.error = null;
     this.render();
     try {
       this.setPayloadPreviews = await this.options.callbacks.previewSetPayloads(blueprint, this.setConfigurations());
       this.setPayloadsAccepted = false;
+      completed = true;
     } catch (error) {
       this.error = errorMessage(error);
     } finally {
       this.busy = null;
       this.render();
+      if (completed) this.revealSetPayloadPreview();
     }
   }
 
@@ -2502,7 +4638,11 @@ export class PracticeLearningPathView extends ItemView {
     }
     this.busy = "batch";
     this.error = null;
-    this.stage = "review";
+    this.saveValidationBlocked = false;
+    this.savePreflight = null;
+    this.savePreflightSequence += 1;
+    this.stage = "map";
+    this.page = "generate-sets";
     this.statuses = new Map(this.setStates.map((state) => [state.id, { state: "queued" as const }]));
     this.activity.clear();
     this.generatedSets = [];
@@ -2524,11 +4664,26 @@ export class PracticeLearningPathView extends ItemView {
         ...set,
         exercises: set.exercises.map(editableDraft),
       }));
+      this.staleGeneratedSets = [];
+      this.staleStages.delete("review");
       this.approvedBySet = new Map(result.map((set) => [set.setId, new Set<string>()]));
       this.activeReviewSetId = result[0]?.setId ?? null;
       for (const set of result) this.statuses.set(set.setId, { state: "review" });
     } catch (error) {
-      this.error = errorMessage(error);
+      const failure = errorMessage(error);
+      const inspect = this.options.callbacks.inspectRecoverableBatch;
+      if (inspect !== undefined) {
+        try {
+          this.applyRecoveredBatch(await inspect());
+          this.error = this.generatedSets.length === 0
+            ? failure
+            : `${failure} ${this.generatedSets.length} completed ${this.generatedSets.length === 1 ? "set remains" : "sets remain"} available in this batch.`;
+        } catch {
+          this.error = failure;
+        }
+      } else {
+        this.error = failure;
+      }
     } finally {
       this.busy = null;
       this.render();
@@ -2536,37 +4691,66 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private async saveLearningPath(): Promise<void> {
-    const primary = this.primary;
-    const blueprint = this.blueprint;
-    if (primary === null || blueprint === null || this.busy !== null || this.reviewProblem() !== null) return;
+    const request = this.currentSaveRequest();
+    if (request === null || this.busy !== null || this.reviewProblem() !== null) return;
+    const requestHash = learningPathSaveRequestHash(request);
+    if (
+      this.savePreflight?.state !== "valid"
+      || this.savePreflight.requestHash !== requestHash
+    ) {
+      await this.runSavePreflight();
+      return;
+    }
     this.busy = "save";
     this.error = null;
     this.render();
     try {
-      this.savedWorkspace = await this.options.callbacks.saveLearningPath({
-        primary,
-        supporting: this.supporting,
-        blueprint: blueprint.draft,
-        planningInput: blueprint.planningInput,
-        configurations: this.setConfigurations(),
-        sets: this.generatedSets.map((set) => ({
-          ...set,
-          approvedExerciseIds: [...(this.approvedBySet.get(set.setId) ?? [])],
-        })),
-      });
+      await this.flushReviewSnapshot();
+      this.savedWorkspace = await this.options.callbacks.saveLearningPath(request);
       this.savedWorkspaceDirty = false;
-      this.stage = "saved";
-      this.recoveryAvailable = false;
-      for (const state of this.setStates) this.statuses.set(state.id, { state: "saved" });
+      this.saveValidationBlocked = false;
+      const batchComplete = this.savedWorkspace.batchComplete !== false;
+      for (const set of this.generatedSets) {
+        this.statuses.set(set.setId, { state: "saved" });
+      }
+      if (batchComplete) {
+        this.stage = "saved";
+        this.page = "ready";
+        this.staleStages.delete("saved");
+        this.recoveryAvailable = false;
+      } else {
+        this.stage = "review";
+        this.page = "review-exercises";
+        this.recoveryAvailable = true;
+        this.recoveryKind = "generation-batch";
+      }
       const reconciled = this.savedWorkspace.reconciledLinkCount ?? 0;
+      const reordered = this.savedWorkspace.reconciledTutorBlockOrderCount ?? 0;
       new Notice(
-        reconciled === 0
-          ? "Guided learning path saved in the source practice workspace."
-          : `Guided learning path saved. ${reconciled} generated source-to-aspect ${reconciled === 1 ? "link was" : "links were"} normalized against the approved map.`,
+        !batchComplete
+          ? "Completed sets saved. The unfinished guided batch remains available to resume."
+          : reconciled === 0 && reordered === 0
+            ? "Guided learning path saved in the source practice workspace."
+            : `Guided learning path saved. ${[
+              reconciled > 0
+                ? `${reconciled} generated source-to-aspect ${reconciled === 1 ? "link was" : "links were"} normalized`
+                : null,
+              reordered > 0
+                ? `${reordered} tutor ${reordered === 1 ? "lesson was" : "lessons were"} put into teaching order`
+                : null,
+            ].filter((message): message is string => message !== null).join("; ")}.`,
         8_000,
       );
     } catch (error) {
       this.error = errorMessage(error);
+      this.saveValidationBlocked = this.error.startsWith(
+        "Cannot save an invalid learning workspace:",
+      );
+      this.savePreflight = {
+        requestHash,
+        state: "invalid",
+        message: this.error,
+      };
     } finally {
       this.busy = null;
       this.render();
@@ -2588,6 +4772,9 @@ export class PracticeLearningPathView extends ItemView {
       exerciseTypes: enabledExerciseTypes(RECOMMENDED_EXERCISE_TYPE_PERCENTAGES),
       exerciseTypePercentages: copyExerciseTypePercentages(RECOMMENDED_EXERCISE_TYPE_PERCENTAGES),
       selectedVisualIds: planning.sources.flatMap((source) => source.visuals.map((visual) => visual.id)),
+      ...(planning.aiContextCompletionPolicy === undefined
+        ? {}
+        : { aiContextCompletionPolicy: planning.aiContextCompletionPolicy }),
     };
   }
 
@@ -2666,8 +4853,9 @@ export class PracticeLearningPathView extends ItemView {
         set.recommendedDifficulty,
         blueprint.planningInput,
       ),
-      true,
+      false,
     ));
+    this.activeMapSetId = id;
     this.invalidateSetPayloads();
     this.render();
   }
@@ -2678,6 +4866,7 @@ export class PracticeLearningPathView extends ItemView {
     const removed = blueprint.draft.sets.find((set) => set.id === setId);
     const lessonIds = new Set(removed?.tutorLessonBriefIds ?? []);
     this.setStates = this.setStates.filter((state) => state.id !== setId);
+    if (this.activeMapSetId === setId) this.activeMapSetId = this.setStates[0]?.id ?? null;
     this.blueprint = {
       ...blueprint,
       draft: {
@@ -2728,6 +4917,105 @@ export class PracticeLearningPathView extends ItemView {
     });
   }
 
+  private currentSaveRequest(): LearningPathSaveRequestV1 | null {
+    const primary = this.primary;
+    const blueprint = this.blueprint;
+    if (primary === null || blueprint === null) return null;
+    return {
+      primary,
+      supporting: this.supporting,
+      blueprint: blueprint.draft,
+      planningInput: blueprint.planningInput,
+      configurations: this.setConfigurations(),
+      sets: this.generatedSets.map((set) => ({
+        ...set,
+        approvedExerciseIds: [...(this.approvedBySet.get(set.setId) ?? [])],
+      })),
+    };
+  }
+
+  private reviewStateChanged(immediate: boolean): void {
+    this.saveValidationBlocked = false;
+    this.savePreflight = null;
+    this.savePreflightSequence += 1;
+    this.reviewPersistencePending = true;
+    if (this.reviewPersistenceTimer !== undefined) {
+      window.clearTimeout(this.reviewPersistenceTimer);
+      this.reviewPersistenceTimer = undefined;
+    }
+    const persistAndCheck = (): void => {
+      void this.flushReviewSnapshot().catch((error) => {
+        this.error = `Guided review progress could not be checkpointed. ${errorMessage(error)}`;
+        this.render();
+      });
+      void this.runSavePreflight();
+    };
+    if (immediate) {
+      persistAndCheck();
+      return;
+    }
+    this.reviewPersistenceTimer = window.setTimeout(() => {
+      this.reviewPersistenceTimer = undefined;
+      persistAndCheck();
+    }, 400);
+  }
+
+  private async flushReviewSnapshot(): Promise<void> {
+    const persist = this.options.callbacks.persistReviewSnapshots;
+    if (persist === undefined) {
+      this.reviewPersistencePending = false;
+      return;
+    }
+    while (this.reviewPersistencePending) {
+      this.reviewPersistencePending = false;
+      const request = this.currentSaveRequest();
+      if (request === null || request.sets.length === 0) return;
+      const snapshot = structuredClone(request.sets);
+      this.reviewPersistenceChain = this.reviewPersistenceChain
+        .catch(() => undefined)
+        .then(async () => await persist(snapshot));
+      await this.reviewPersistenceChain;
+    }
+  }
+
+  private async runSavePreflight(): Promise<void> {
+    if (this.reviewProblem() !== null) return;
+    const request = this.currentSaveRequest();
+    if (request === null) return;
+    const requestHash = learningPathSaveRequestHash(request);
+    const sequence = ++this.savePreflightSequence;
+    const preflight = this.options.callbacks.preflightLearningPath;
+    if (preflight === undefined) {
+      this.savePreflight = { requestHash, state: "valid" };
+      this.render();
+      return;
+    }
+    this.savePreflight = { requestHash, state: "checking" };
+    this.render();
+    try {
+      const result = await preflight(request);
+      const current = this.currentSaveRequest();
+      if (
+        sequence !== this.savePreflightSequence
+        || current === null
+        || learningPathSaveRequestHash(current) !== result.requestHash
+      ) return;
+      this.savePreflight = { requestHash: result.requestHash, state: "valid" };
+      this.saveValidationBlocked = false;
+    } catch (error) {
+      if (sequence !== this.savePreflightSequence) return;
+      const message = errorMessage(error);
+      this.savePreflight = {
+        requestHash,
+        state: "invalid",
+        message,
+      };
+      this.saveValidationBlocked = true;
+      this.error = message;
+    }
+    this.render();
+  }
+
   private totalExercises(): number {
     return this.setStates.reduce((total, state) => total + state.configuration.quantity, 0);
   }
@@ -2746,16 +5034,35 @@ export class PracticeLearningPathView extends ItemView {
 
   private reviewProblem(): string | null {
     if (this.busy === "batch") return "Wait for the current set generation to finish or cancel it.";
-    if (this.generatedSets.length !== this.setStates.length) return "Every approved set must finish generation before the complete path can be saved.";
+    if (this.generatedSets.length === 0) return "Generate at least one complete set before saving.";
     const blueprint = this.blueprint;
     if (blueprint === null) return "Restore the approved aspect map before saving.";
-    for (const input of this.reviewSetInputs(blueprint)) {
+    const unsavedInputs = this.reviewSetInputs(blueprint).filter((input) => (
+      this.statuses.get(input.setId)?.state !== "saved"
+    ));
+    if (unsavedInputs.length === 0) {
+      return "Every completed set is already saved. Resume or retry the unfinished batch when you are ready.";
+    }
+    for (const input of unsavedInputs) {
       const state = learningPathSetReviewState(input);
       const blocker = state.blockers[0];
       if (blocker !== undefined) return `${state.setTitle}: ${blocker.reason}`;
       if (state.pendingApprovalCount > 0) {
-        return `${state.setTitle}: approve ${state.pendingApprovalCount} ready ${state.pendingApprovalCount === 1 ? "exercise" : "exercises"}, or use Approve all ready exercises.`;
+        return `${state.setTitle}: approve ${state.pendingApprovalCount} ready ${state.pendingApprovalCount === 1 ? "exercise" : "exercises"}.`;
       }
+    }
+    return null;
+  }
+
+  private blockingSetId(): string | null {
+    const blueprint = this.blueprint;
+    if (blueprint === null) return null;
+    const blank = blueprint.draft.sets.find((set) => (
+      set.title.trim().length === 0 || set.purpose.trim().length === 0
+    ));
+    if (blank !== undefined) return blank.id;
+    if (this.totalExercises() > MAX_LEARNING_PATH_EXERCISES) {
+      return this.setStates.at(-1)?.id ?? null;
     }
     return null;
   }
@@ -2769,6 +5076,9 @@ export class PracticeLearningPathView extends ItemView {
       setTitle: blueprint.draft.sets.find((brief) => brief.id === set.setId)?.title ?? set.setId,
       exercises: set.exercises,
       approvedExerciseIds: this.approvedBySet.get(set.setId) ?? new Set<string>(),
+      requiredExerciseIds: new Set(
+        set.draft.tutorLessons.map((lesson) => lesson.guidedExerciseId),
+      ),
     };
   }
 
@@ -2791,6 +5101,18 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private invalidatePlanningPreview(): void {
+    const hadDownstream = this.blueprint !== null
+      || this.setPayloadPreviews.length > 0
+      || this.generatedSets.length > 0
+      || this.savedWorkspace !== null;
+    if (hadDownstream) {
+      this.staleStages.add("map");
+      this.staleStages.add("review");
+      this.staleStages.add("saved");
+    }
+    if (this.blueprint !== null) {
+      this.staleBlueprint = structuredClone(this.blueprint);
+    }
     this.preview = null;
     this.previewAccepted = false;
     this.blueprint = null;
@@ -2799,6 +5121,17 @@ export class PracticeLearningPathView extends ItemView {
   }
 
   private invalidateSetPayloads(): void {
+    if (
+      this.setPayloadPreviews.length > 0
+      || this.statuses.size > 0
+      || this.generatedSets.length > 0
+    ) {
+      this.staleStages.add("review");
+      this.staleStages.add("saved");
+    }
+    if (this.generatedSets.length > 0) {
+      this.staleGeneratedSets = structuredClone(this.generatedSets);
+    }
     this.setPayloadPreviews = [];
     this.setPayloadsAccepted = false;
     this.statuses.clear();
@@ -2807,12 +5140,29 @@ export class PracticeLearningPathView extends ItemView {
     this.approvedBySet.clear();
     this.reviewFeedback = null;
     this.activeReviewSetId = null;
+    this.saveValidationBlocked = false;
+    this.savePreflight = null;
+    this.savePreflightSequence += 1;
+  }
+
+  private invalidateSourceAlignment(): void {
+    this.alignmentPreview = null;
+    this.alignmentResult = null;
+    this.alignmentAccepted = false;
+    this.aiContextCompletionDecisionMade = false;
+    this.blueprintConfiguration = {
+      ...this.blueprintConfiguration,
+      aiContextCompletionPolicy: DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+    };
+    this.activity.delete("source-alignment");
+    this.invalidatePlanningPreview();
   }
 
   private resetAfterSourceChange(): void {
     this.stage = "source";
+    this.page = "material";
     this.error = null;
-    this.invalidatePlanningPreview();
+    this.invalidateSourceAlignment();
   }
 
   private editableSetState(
@@ -2864,6 +5214,117 @@ export class PracticeLearningPathView extends ItemView {
     return section;
   }
 
+  private disclosure(
+    container: HTMLElement,
+    key: string,
+    label: string,
+    description: string,
+    defaultOpen = false,
+    actionLabel?: string,
+  ): HTMLElement {
+    const details = container.createEl("details", { cls: "practice-learning-path-disclosure" });
+    this.bindDisclosure(details, key, defaultOpen);
+    const summary = details.createEl("summary");
+    const copy = summary.createSpan({ cls: "practice-learning-path-disclosure-copy" });
+    copy.createEl("strong", { text: label });
+    copy.createSpan({ text: description });
+    if (actionLabel !== undefined) {
+      summary.createSpan({ cls: "practice-learning-path-disclosure-action", text: actionLabel });
+    }
+    return details.createDiv({ cls: "practice-learning-path-disclosure-body" });
+  }
+
+  private bindDisclosure(
+    details: HTMLDetailsElement,
+    key: string,
+    defaultOpen: boolean,
+  ): void {
+    details.open = this.disclosureState.get(key) ?? defaultOpen;
+    details.addEventListener("toggle", () => {
+      this.disclosureState.set(key, details.open);
+    });
+  }
+
+  private providerSummary(): string {
+    const selected = this.providers.find((entry) => (
+      entry.id === this.blueprintConfiguration.provider
+    ));
+    const model = selected?.models.find((entry) => (
+      entry.id === this.blueprintConfiguration.model
+    ));
+    const modelLabel = model?.label
+      ?? (this.blueprintConfiguration.model.length === 0
+        ? "Automatic model"
+        : this.blueprintConfiguration.model);
+    return `${selected?.label ?? this.blueprintConfiguration.provider} · ${modelLabel} · ${displayReasoningEffort(this.blueprintConfiguration.reasoningEffort)} reasoning`;
+  }
+
+  private async refreshRecoveryKind(): Promise<void> {
+    if (!this.recoveryAvailable || this.options.callbacks.inspectRecoverableKind === undefined) return;
+    try {
+      const kind = await this.options.callbacks.inspectRecoverableKind();
+      if (kind === this.recoveryKind) return;
+      this.recoveryKind = kind;
+      this.recoveryAvailable = kind !== null;
+      this.render();
+    } catch (error) {
+      this.error = `The saved guided work could not be identified. ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async resolveRecoveryKind(): Promise<LearningPathRecoveryKindV1 | null> {
+    if (this.recoveryKind !== "unknown") return this.recoveryKind;
+    const inspect = this.options.callbacks.inspectRecoverableKind;
+    if (inspect === undefined) return "generation-batch";
+    try {
+      const kind = await inspect();
+      this.recoveryKind = kind;
+      this.recoveryAvailable = kind !== null;
+      return kind;
+    } catch (error) {
+      this.error = `The saved guided work could not be identified. ${errorMessage(error)}`;
+      this.render();
+      return null;
+    }
+  }
+
+  private revealAlignmentPreview(): void {
+    window.requestAnimationFrame(() => {
+      const preview = this.alignmentPreviewHost;
+      if (preview === null || !preview.isConnected) return;
+      preview.focus({ preventScroll: true });
+      preview.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+  }
+
+  private revealAlignmentResult(): void {
+    window.requestAnimationFrame(() => {
+      const result = this.alignmentResultHost;
+      if (result === null || !result.isConnected) return;
+      result.focus({ preventScroll: true });
+      result.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+  }
+
+  private revealSetPayloadPreview(): void {
+    window.requestAnimationFrame(() => {
+      const preview = this.setPayloadPreviewHost;
+      if (preview === null || !preview.isConnected) return;
+      preview.focus({ preventScroll: true });
+      preview.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+  }
+
   private iconButton(
     container: HTMLElement,
     icon: string,
@@ -2882,6 +5343,180 @@ export class PracticeLearningPathView extends ItemView {
   }
 }
 
+const ALIGNMENT_STATUS_LABELS: Readonly<Record<SourceAlignmentStatusV1, string>> = {
+  aligned: "Aligned with school material",
+  "notes-incomplete": "School material adds context",
+  conflict: "Your notes differ",
+  "school-only": "Covered only by school material",
+  "notes-only-unverified": "Selected material only · not course-checked",
+  "school-sources-disagree": "School sources disagree",
+  "insufficient-evidence": "Additional context could strengthen this practice",
+};
+
+function alignmentStatusLabel(status: SourceAlignmentStatusV1): string {
+  return ALIGNMENT_STATUS_LABELS[status];
+}
+
+function alignmentStatusIcon(status: SourceAlignmentStatusV1): string {
+  if (status === "aligned") return "badge-check";
+  if (status === "notes-incomplete" || status === "school-only") return "notebook-tabs";
+  if (status === "notes-only-unverified") return "shield-question";
+  return "triangle-alert";
+}
+
+function alignmentStatusCounts(
+  ledger: SourceAlignmentLedgerV1,
+): ReadonlyArray<readonly [SourceAlignmentStatusV1, number]> {
+  const order: readonly SourceAlignmentStatusV1[] = [
+    "conflict",
+    "notes-incomplete",
+    "school-sources-disagree",
+    "insufficient-evidence",
+    "aligned",
+    "school-only",
+    "notes-only-unverified",
+  ];
+  return order.flatMap((status) => {
+    const count = ledger.records.filter((record) => record.status === status).length;
+    return count === 0 ? [] : [[status, count] as const];
+  });
+}
+
+function alignmentResultTitle(result: LearningSourceAlignmentResultV1): string {
+  if (!result.checked || result.ledger.records.length === 0) {
+    return "Notes-grounded · not course-checked";
+  }
+  const active = result.ledger.records.filter((record) => record.resolution !== "excluded");
+  if (active.some((record) => record.status === "school-sources-disagree")) {
+    return "School sources disagree";
+  }
+  if (active.some((record) => record.status === "conflict")) return "Your notes differ";
+  if (active.some((record) => record.status === "notes-incomplete")) {
+    return "School material adds context";
+  }
+  if (active.some((record) => (
+    record.status === "notes-only-unverified"
+    || record.status === "insufficient-evidence"
+  ))) {
+    return "Additional context could strengthen this practice";
+  }
+  if (active.some((record) => record.status === "school-only")) {
+    return "Checked against selected school material";
+  }
+  return "Aligned with school material";
+}
+
+function alignmentResultDescription(
+  result: LearningSourceAlignmentResultV1,
+  policy: AiContextCompletionPolicyV1 | undefined,
+  decisionMade: boolean,
+): string {
+  if (!result.checked || result.ledger.records.length === 0) {
+    return "Your selected material defines the topic. No course comparison is available, so the path remains not course-checked.";
+  }
+  if (result.blockerRecordIds.length > 0) {
+    return `${result.blockerRecordIds.length} confirmed school-source ${result.blockerRecordIds.length === 1 ? "conflict needs" : "conflicts need"} your decision. Other areas remain available and do not judge or modify your notes.`;
+  }
+  const conflicts = result.ledger.records.filter((record) => (
+    record.status === "conflict" && record.resolution !== "excluded"
+  )).length;
+  const incomplete = result.ledger.records.filter((record) => (
+    record.status === "notes-incomplete" && record.resolution !== "excluded"
+  )).length;
+  const supplemental = result.ledger.records.filter((record) => (
+    (
+      record.status === "notes-only-unverified"
+      || record.status === "insufficient-evidence"
+    )
+    && record.resolution !== "excluded"
+  )).length;
+  if (supplemental > 0) {
+    const schoolChanges = conflicts + incomplete;
+    const schoolContext = schoolChanges === 0
+      ? "supply verified context where available"
+      : `supply ${schoolChanges} verified ${schoolChanges === 1 ? "correction or addition" : "corrections or additions"}`;
+    if (!decisionMade) {
+      return `Your material remains the backbone. School sources ${schoolContext}. ${supplemental} ${supplemental === 1 ? "area could" : "areas could"} use optional supporting context; choose how to continue below.`;
+    }
+    return aiContextCompletionApproved(policy)
+      ? `Your material remains the backbone. School sources ${schoolContext}. AI-supported context was approved for ${supplemental} ${supplemental === 1 ? "area" : "areas"} and will remain not course-checked.`
+      : `Your material remains the backbone. School sources ${schoolContext}. Generation will stay within the selected material for the remaining ${supplemental} ${supplemental === 1 ? "area" : "areas"}.`;
+  }
+  if (conflicts > 0) {
+    return `${conflicts} note-school ${conflicts === 1 ? "difference uses" : "differences use"} the selected school-supported interpretation. Your notes are not changed.`;
+  }
+  if (incomplete > 0) {
+    return `${incomplete} course-backed ${incomplete === 1 ? "addition comes" : "additions come"} from the selected school material. It will inform practice without changing your notes.`;
+  }
+  return "The selected source claims have no unresolved course-authority blocker. Exact comparisons remain available under Details.";
+}
+
+function alignmentResultClass(result: LearningSourceAlignmentResultV1): string {
+  const title = alignmentResultTitle(result);
+  if (title === "Aligned with school material") return "is-course-aligned";
+  if (title === "Your notes differ") return "is-notes-differ";
+  if (title === "School material adds context") return "is-notes-incomplete";
+  if (title === "School sources disagree") return "is-school-sources-disagree";
+  if (title === "Additional context could strengthen this practice") return "is-not-course-checked";
+  return "is-not-course-checked";
+}
+
+function alignmentResultIcon(result: LearningSourceAlignmentResultV1): string {
+  if (!result.checked || result.ledger.records.length === 0) return "shield-question";
+  if (alignmentResultClass(result) === "is-course-aligned") return "badge-check";
+  if (alignmentResultClass(result) === "is-not-course-checked") return "shield-question";
+  return "triangle-alert";
+}
+
+function displayAlignmentResolution(record: SourceAlignmentRecordV1): string {
+  if (record.resolution === "course-authority") return "School-supported interpretation selected";
+  if (record.resolution === "manual-override") return "Manual override · not course-aligned";
+  if (record.resolution === "excluded") return "Explicitly excluded from practice";
+  if (
+    record.status === "notes-only-unverified"
+    || record.status === "insufficient-evidence"
+  ) return "Optional supporting context available · not course-checked";
+  if (record.resolution === "unresolved") return "Needs a source decision";
+  return "No resolution needed";
+}
+
+function alignmentHasAiContextOpportunity(result: LearningSourceAlignmentResultV1): boolean {
+  return result.ledger.records.some((record) => (
+    record.resolution !== "excluded"
+    && (
+      record.status === "notes-only-unverified"
+      || record.status === "insufficient-evidence"
+    )
+  ));
+}
+
+function activityBoundary(
+  events: readonly CliActivityEvent[],
+  boundary: "first" | "last",
+): number | undefined {
+  const timestamps = events
+    .map((event) => Date.parse(event.occurredAt))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) return undefined;
+  return boundary === "first" ? Math.min(...timestamps) : Math.max(...timestamps);
+}
+
+function compactTelemetryTokens(value: number): string {
+  if (value < 1_000) return Math.round(value).toLocaleString();
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+function telemetryMetric(
+  container: HTMLElement,
+  label: string,
+  value: string,
+): HTMLElement {
+  const metric = container.createDiv({ cls: "practice-lab-generation-telemetry-metric" });
+  metric.createSpan({ text: label });
+  return metric.createEl("strong", { text: value });
+}
+
 function statusIcon(status: LearningSetGenerationStatusV1["state"]): string {
   if (status === "queued") return "clock-3";
   if (status === "generating") return "loader-circle";
@@ -2897,7 +5532,7 @@ function statusLabel(status: LearningSetGenerationStatusV1): string {
   if (status.state === "validating") return status.message ?? "Validating";
   if (status.state === "review") return "Ready for review";
   if (status.state === "saved") return "Saved";
-  return status.message;
+  return "Generation stopped";
 }
 
 function errorMessage(error: unknown): string {
@@ -2906,16 +5541,42 @@ function errorMessage(error: unknown): string {
 
 function learningPathErrorPresentation(message: string): {
   readonly summary: string;
+  readonly recovery: string;
   readonly details: readonly string[];
 } {
   const prefix = "Cannot save an invalid learning workspace:";
-  if (!message.startsWith(prefix)) return { summary: message, details: [] };
-  const details = message.slice(prefix.length)
+  if (!message.startsWith(prefix)) {
+    const detailMarker = message.indexOf(" Details:");
+    const rawSummary = detailMarker < 0 ? message : message.slice(0, detailMarker);
+    const rawDetails = detailMarker < 0 ? "" : message.slice(detailMarker + " Details:".length);
+    const details = [...new Set(rawDetails.length === 0
+      ? (message.length > 320 ? [message] : [])
+      : rawDetails.split(";").map((detail) => detail.trim()).filter((detail) => detail.length > 0))];
+    const providerStopped = /\b(?:codex|claude|agy|provider|cli|generation|agent)\b/iu.test(message);
+    return {
+      summary: rawSummary.length <= 280
+        ? rawSummary
+        : providerStopped
+          ? "The selected AI stopped before it produced a valid result. Your approved source and configuration are unchanged."
+          : "This action stopped before it could finish. Nothing was silently saved or replaced.",
+      recovery: providerStopped
+        ? "Retry once. If it stops again, open Activity for the last safe progress update and Details for the technical reason."
+        : "Review the current step, correct the highlighted blocker, then retry the same action.",
+      details,
+    };
+  }
+  const details = [...new Set(message.slice(prefix.length)
     .split(";")
     .map((detail) => detail.trim())
-    .filter((detail) => detail.length > 0);
+    .filter((detail) => detail.length > 0))];
+  const teachingOrderOnly = details.length > 0 && details.every((detail) => (
+    /^\/tutorLessons\/\d+\/teachingBlocks: teaching blocks must follow why, prerequisite, explanation, then optional walkthrough order\.$/u.test(detail)
+  ));
   return {
-    summary: `The generated workspace still contains ${details.length} inconsistent source or learning-path ${details.length === 1 ? "link" : "links"}. Nothing was written. Reload the updated plugin and retry the same recoverable batch; the approved source and reviewed exercises remain unchanged.`,
+    summary: teachingOrderOnly
+      ? `${details.length} tutor ${details.length === 1 ? "lesson has" : "lessons have"} sections out of teaching order. Nothing was written, and the generated batch remains recoverable.`
+      : `The generated workspace still contains ${details.length} inconsistent learning-path ${details.length === 1 ? "item" : "items"}. Nothing was written, and the generated batch remains recoverable.`,
+    recovery: "Reloading alone does not repair generated content. Retry Save after the plugin update; if the same check still fails, regenerate the affected set and open Details for the exact paths.",
     details,
   };
 }

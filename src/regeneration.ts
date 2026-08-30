@@ -1,4 +1,12 @@
-import type { ExerciseV1, PracticeBankV2 } from "./model";
+import type {
+  AiContextCompletionPolicyV1,
+  ExerciseV1,
+  PracticeBankV2,
+} from "./model";
+import {
+  effectiveAiContextCompletionPolicy,
+  isAiContextCompletionPolicy,
+} from "./ai-context-completion";
 import {
   exerciseTypeDistributionProblem,
   planExerciseDistribution,
@@ -32,6 +40,7 @@ const RECIPE_FIELDS = {
   difficulty: "practice-lab-generation-difficulty",
   focus: "practice-lab-generation-focus",
   mix: "practice-lab-generation-mix",
+  contextPolicy: "practice-lab-generation-context-policy",
 } as const;
 
 export interface GenerationRecipeV1 {
@@ -55,6 +64,8 @@ export interface GenerationRecipeV2 {
   readonly difficulty: Difficulty;
   readonly focusInstructions: string;
   readonly exerciseTypePercentages: ExerciseTypePercentages;
+  /** Missing on pre-policy recipes and interpreted as legacy approved context. */
+  readonly aiContextCompletionPolicy?: AiContextCompletionPolicyV1;
 }
 
 export interface GenerationRecipeCatalogV1 {
@@ -105,6 +116,9 @@ export function createGenerationRecipe(
     focusInstructions: configuration.focusInstructions,
     exerciseTypePercentages: copyPercentages(
       configuration.exerciseTypePercentages,
+    ),
+    aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+      configuration.aiContextCompletionPolicy,
     ),
   };
   const problem = generationRecipeProblem(recipe);
@@ -245,6 +259,7 @@ export function serializeGenerationRecipeFrontmatter(
     `${RECIPE_FIELDS.difficulty}: ${yamlString(recipe.difficulty)}`,
     `${RECIPE_FIELDS.focus}: ${yamlString(recipe.focusInstructions)}`,
     `${RECIPE_FIELDS.mix}: ${yamlString(JSON.stringify(recipe.exerciseTypePercentages))}`,
+    `${RECIPE_FIELDS.contextPolicy}: ${yamlString(effectiveAiContextCompletionPolicy(recipe.aiContextCompletionPolicy))}`,
   ];
 }
 
@@ -311,6 +326,10 @@ export function parseGenerationRecipeMarkdown(
       requiredFrontmatterValue(markdown, RECIPE_FIELDS.mix),
     );
     const mix = JSON.parse(mixJson) as unknown;
+    const rawContextPolicy = frontmatterValue(markdown, RECIPE_FIELDS.contextPolicy);
+    const aiContextCompletionPolicy = rawContextPolicy === undefined
+      ? undefined
+      : parseYamlString(rawContextPolicy);
     const recipe = {
       schemaVersion: GENERATION_RECIPE_VERSION,
       sourceHash,
@@ -321,6 +340,9 @@ export function parseGenerationRecipeMarkdown(
       difficulty,
       focusInstructions,
       exerciseTypePercentages: mix,
+      ...(aiContextCompletionPolicy === undefined
+        ? {}
+        : { aiContextCompletionPolicy }),
     } as unknown as GenerationRecipeV2;
     const problem = generationRecipeProblem(recipe);
     return problem === null
@@ -418,6 +440,9 @@ export function regenerationPreset(
         exerciseTypePercentages: copyPercentages(
           recipe.exerciseTypePercentages,
         ),
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          recipe.aiContextCompletionPolicy,
+        ),
       },
       explanation: recipeResult.storedSchemaVersion === LEGACY_GENERATION_RECIPE_VERSION
         ? "Loaded the saved provider, reasoning, quantity, difficulty, focus instructions, and exercise mix. This older recipe did not record a pinned model, so provider default is selected."
@@ -438,6 +463,11 @@ export function regenerationPreset(
       difficulty: inferGenerationDifficulty(bank.exercises),
       focusInstructions: fallbacks.focusInstructions,
       exerciseTypePercentages: inferExerciseTypePercentages(bank.exercises),
+      aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+        "aiContextCompletionPolicy" in bank
+          ? bank.aiContextCompletionPolicy as AiContextCompletionPolicyV1 | undefined
+          : undefined,
+      ),
     },
     explanation: invalidRecipe
       ? "The saved recipe could not be trusted, so provider and reasoning were restored where available, the current bank's quantity, difficulty, and exercise mix were reconstructed, and your default focus instructions were used."
@@ -480,6 +510,12 @@ function generationRecipeProblem(value: unknown): string | null {
   }
   const percentages = percentagesFromUnknown(recipe.exerciseTypePercentages);
   if (percentages === null) return "The generation recipe exercise mix is invalid.";
+  if (
+    recipe.aiContextCompletionPolicy !== undefined
+    && !isAiContextCompletionPolicy(recipe.aiContextCompletionPolicy)
+  ) {
+    return "The generation recipe context-completion policy is invalid.";
+  }
   return exerciseTypeDistributionProblem(percentages);
 }
 

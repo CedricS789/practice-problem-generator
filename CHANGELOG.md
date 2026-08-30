@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0
+
+- Redesigned creation, review, saved workspaces, and Guided study around progressive disclosure so the current task and next action stay visually dominant while engine settings, percentages, source galleries, payloads, activity, analytics, provenance, and data controls remain available on demand.
+- Added explicit source classifications for personal notes, official corrections, instructor material, assigned references, and unclassified material, including configurable folder and tag suggestions that never become authoritative without confirmation.
+- Added a recoverable, source-bounded course-alignment pass with an explicit school-source authority order, locally validated note-versus-school records, human-readable blockers, selective source-hash invalidation, and no silent use of model knowledge.
+- Added immutable per-exercise alignment snapshots so answer feedback can reveal aligned, differing, incomplete, unchecked, or disagreeing source evidence identically on desktop, mobile, offline, and recovered sessions without a live study-time AI request.
+- Migrated saved banks losslessly to schema v4, preserved older sources as unclassified, retained all learning-path, session, review, recipe, history, and visual data, and kept unknown future schemas read-only.
+- Added a compact course-alignment health summary to saved workspaces and the dashboard; alignment remains informational and never changes scores.
+- Made Quick generation explicitly not course-checked unless a Guided source bundle completes the alignment workflow, and preserved approved alignment records through set regeneration and repair-set creation.
+- Replaced large generation failures with a concise explanation and recovery action while retaining exact technical details behind a disclosure.
+- Added live generation telemetry across Quick sets, Guided batches, and set regeneration: elapsed time, provider-reported or clearly marked local token usage, cache/reasoning-token detail when available, schema-repair attempts, and provider-reported monetary cost. Final telemetry is retained with generation provenance and survives recoverable jobs without exposing prompts or model output.
+- Fixed saved Practice actions on iPhone and iPad by resolving the exact vault `TFile` and opening it directly, instead of passing an empty source path through Obsidian's link resolver. The mobile bundle now opens schema-v4 banks while retaining desktop-only generation boundaries.
+
 ## 1.3.25
 
 - Replaced the two visually competing Guided-session indicators with one **You are here** navigator that presents the path, current step, and current question as a single breadcrumb.

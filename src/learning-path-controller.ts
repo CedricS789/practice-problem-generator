@@ -7,18 +7,23 @@ import type {
   MediaInput,
 } from "./cli/contracts";
 import { formatCliErrorForUi } from "./cli/errors";
-import type { PracticeBankRepository } from "./bank-repository";
+import type { LoadedPracticeBank, PracticeBankRepository } from "./bank-repository";
 import {
   GENERATION_BATCH_RECOVERY_FILENAME,
   completeGenerationBatchSet,
+  completedUnsavedBatchDrafts,
   createGenerationBatchRecovery,
   failGenerationBatchSet,
+  generationBatchIsFinished,
+  markGenerationBatchSetSaved,
   nextGenerationBatchSet,
   parseGenerationBatchRecovery,
   retryGenerationBatchSet,
+  saveGenerationBatchReviewSnapshot,
   serializeGenerationBatchRecovery,
   startGenerationBatchSet,
   type GenerationBatchRecoveryV1,
+  type PracticeSetReviewSnapshotV1,
 } from "./generation-batch-recovery";
 import {
   appendGenerationHistoryBatch,
@@ -36,9 +41,10 @@ import {
   learningBlueprintDraftV1JsonSchema,
   practiceSetDraftV1JsonSchema,
   practiceSetPayloadHash,
+  PRACTICE_SET_DRAFT_VERSION,
   validateLearningBlueprintDraft,
   validatePracticeSetBatch,
-  validatePracticeSetDraftForWorkspace,
+  validatePracticeSetDraftWithCompletedSiblings,
   type LearningBlueprintDraftV1,
   type LearningBlueprintPlanningInputV1,
   type LearningPathSourceV1,
@@ -47,12 +53,16 @@ import {
   type PracticeSetPayloadV1,
 } from "./learning-path-generation";
 import { reconcileLearningWorkspaceDrafts } from "./learning-path-reconciliation";
+import { learningPathSaveRequestHash } from "./learning-path-save";
 import {
   CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
   type LearningPathStepV1,
-  type PracticeBankV3,
+  type PracticeBankV4,
   type PracticeSetV1,
-  type SourceMaterialV1,
+  type SourceAlignmentDraftV1,
+  type SourceAlignmentLedgerV1,
+  type SourceMaterialClassificationV1,
+  type SourceMaterialV2,
   type VisualSourceV1,
 } from "./model";
 import type { PdfSourceBudgetLimitsV1 } from "./pdf-source-budget";
@@ -71,7 +81,38 @@ import {
   type ApprovedSourceBundleV1,
 } from "./source-bundle";
 import type { CollectedSource } from "./source";
+import {
+  confirmSourceClassification as confirmCollectedSourceClassification,
+} from "./source";
 import { snapshotSourcePresentation } from "./source-presentation";
+import {
+  SOURCE_ALIGNMENT_PROMPT_VERSION,
+  asSourceAlignmentDraft,
+  buildSourceAlignmentPrompt,
+  createUnverifiedSourceAlignmentLedger,
+  finalizeSourceAlignmentLedger,
+  isStructuralSourceSegment,
+  linkSourceAlignmentTargets,
+  sourceAlignmentBlockers,
+  sourceAlignmentDraftV1JsonSchema,
+  sourceAlignmentInputHash,
+  validateSourceAlignmentDraft,
+  type SourceAlignmentGenerationInputV1,
+} from "./source-alignment-generation";
+import {
+  invalidateStaleSourceAlignment,
+  isConfirmedSchoolMaterial,
+} from "./source-alignment";
+import {
+  SOURCE_ALIGNMENT_RECOVERY_CONTEXT_FILENAME,
+  SOURCE_ALIGNMENT_RECOVERY_RESULT_FILENAME,
+  createSourceAlignmentRecoveryContext,
+  createSourceAlignmentRecoveryResult,
+  parseSourceAlignmentRecoveryContext,
+  parseSourceAlignmentRecoveryResult,
+} from "./source-alignment-recovery";
+import { effectiveAiContextCompletionPolicy } from "./ai-context-completion";
+import type { GenerationTelemetryV1 } from "./generation-telemetry";
 import { applyDraftEdits, presentExercises } from "./ui/presenters";
 import type {
   GeneratedLearningSetPresentationV1,
@@ -80,8 +121,10 @@ import type {
   LearningPathSaveRequestV1,
   LearningPayloadPreviewV1,
   LearningPathRecoveredBatchV1,
+  LearningPathPreflightResultV1,
   LearningSetGenerationStatusV1,
   LearningSetPayloadPreviewV1,
+  LearningSetReviewV1,
 } from "./ui/learning-path-view";
 import type { ProviderPresentation, SourcePresentation } from "./ui/contracts";
 import {
@@ -91,6 +134,26 @@ import {
 
 const LEARNING_BATCH_CONTEXT_FILENAME = "learning-path-context.json";
 const LEARNING_BATCH_CONTEXT_VERSION = 1 as const;
+const SOURCE_ALIGNMENT_WORKSPACE_FILENAME = "source-alignment-workspace.json";
+const SOURCE_ALIGNMENT_WORKSPACE_VERSION = 1 as const;
+
+export type LearningPathRecoveryKindV1 = "source-alignment" | "generation-batch";
+
+export interface SourceAlignmentPreviewV1 {
+  readonly providerLabel: string;
+  readonly modelLabel: string;
+  readonly reasoningEffortLabel: string;
+  readonly inputHash: string;
+  readonly text: string;
+  readonly requiresProvider: boolean;
+  readonly warning: string;
+}
+
+export interface SourceAlignmentResultPresentationV1 {
+  readonly ledger: SourceAlignmentLedgerV1;
+  readonly blockerRecordIds: readonly string[];
+  readonly checked: boolean;
+}
 
 interface PendingBlueprintV1 {
   readonly primaryPresentation: SourcePresentation;
@@ -100,6 +163,18 @@ interface PendingBlueprintV1 {
   readonly planningInput: LearningBlueprintPlanningInputV1;
   readonly configuration: LearningBlueprintConfigurationV1;
   readonly prompt: string;
+  readonly sourceAlignment: SourceAlignmentLedgerV1;
+}
+
+interface PendingSourceAlignmentV1 {
+  readonly primaryPresentation: SourcePresentation;
+  readonly supportingPresentations: readonly SourcePresentation[];
+  readonly bundle: ApprovedSourceBundleV1;
+  readonly input: SourceAlignmentGenerationInputV1;
+  readonly inputHash: string;
+  readonly configuration: LearningBlueprintConfigurationV1;
+  readonly prompt: string;
+  ledger?: SourceAlignmentLedgerV1;
 }
 
 interface GeneratedSetAuditV1 {
@@ -108,6 +183,7 @@ interface GeneratedSetAuditV1 {
   readonly generatedAt: string;
   readonly attempts: 1 | 2;
   readonly draftCount: number;
+  readonly telemetry?: GenerationTelemetryV1;
 }
 
 interface PendingBatchV1 {
@@ -120,17 +196,41 @@ interface PendingBatchV1 {
   generated: PracticeSetDraftV1[];
 }
 
+interface LearningPathSaveCandidateV1 {
+  readonly bank: PracticeBankV4;
+  readonly existing?: PracticeBankV4;
+  readonly loaded: LoadedPracticeBank;
+  readonly pendingBatch: PendingBatchV1;
+  readonly pendingBlueprint: PendingBlueprintV1;
+  readonly previouslySaved: ReadonlySet<string>;
+  readonly reconciliation: ReturnType<typeof reconcileLearningWorkspaceDrafts>;
+  readonly reviewedSetIds: readonly string[];
+  readonly savedConfigurations: readonly PracticeSetConfigurationV1[];
+  readonly workspaceDrafts: readonly PracticeSetDraftV1[];
+}
+
 interface PersistedLearningBatchContextV1 {
   readonly schemaVersion: typeof LEARNING_BATCH_CONTEXT_VERSION;
   readonly primaryPresentation: SourcePresentation;
   readonly supportingPresentations: readonly SourcePresentation[];
   readonly primary: PersistedCollectedSourceV1;
   readonly supporting: readonly PersistedCollectedSourceV1[];
-  readonly materials: readonly SourceMaterialV1[];
+  readonly materials: readonly SourceMaterialV2[];
   readonly combined: PersistedCollectedSourceV1;
   readonly preparedVisuals: readonly VisualSourceV1[];
   readonly blueprint: LearningBlueprintPresentationV1;
   readonly configurations: readonly PracticeSetConfigurationV1[];
+}
+
+interface PersistedSourceAlignmentWorkspaceV1 {
+  readonly schemaVersion: typeof SOURCE_ALIGNMENT_WORKSPACE_VERSION;
+  readonly primaryPresentation: SourcePresentation;
+  readonly supportingPresentations: readonly SourcePresentation[];
+  readonly primary: PersistedCollectedSourceV1;
+  readonly supporting: readonly PersistedCollectedSourceV1[];
+  readonly materials: readonly SourceMaterialV2[];
+  readonly combined: PersistedCollectedSourceV1;
+  readonly configuration: LearningBlueprintConfigurationV1;
 }
 
 type PersistedCollectedSourceV1 = Omit<CollectedSource, "file" | "visuals"> & {
@@ -152,8 +252,10 @@ export interface LearningPathControllerOptions {
 export class LearningPathController {
   private readonly sources = new Map<string, CollectedSource>();
   private pendingBlueprint: PendingBlueprintV1 | undefined;
+  private pendingAlignment: PendingSourceAlignmentV1 | undefined;
   private pendingBatch: PendingBatchV1 | undefined;
   private recoveryHandle: DurableProcessHandle | undefined;
+  private recoveryKind: LearningPathRecoveryKindV1 | undefined;
   private cliLayer: CliProviderLayer | undefined;
 
   constructor(private readonly options: LearningPathControllerOptions) {}
@@ -163,12 +265,77 @@ export class LearningPathController {
     return source;
   }
 
+  public confirmSourceClassification(
+    source: SourcePresentation,
+    classification: SourceMaterialClassificationV1,
+  ): SourcePresentation {
+    const collected = this.resolveSource(source);
+    this.sources.delete(sourceKey(collected));
+    const confirmed = confirmCollectedSourceClassification(collected, classification);
+    this.sources.set(sourceKey(confirmed), confirmed);
+    this.pendingAlignment = undefined;
+    this.pendingBlueprint = undefined;
+    this.pendingBatch = undefined;
+    return snapshotSourcePresentation(confirmed);
+  }
+
+  public confirmSourceClassifications(
+    updates: readonly {
+      readonly source: SourcePresentation;
+      readonly classification: SourceMaterialClassificationV1;
+    }[],
+  ): readonly SourcePresentation[] {
+    const resolved = updates.map(({ source, classification }) => ({
+      original: this.resolveSource(source),
+      classification,
+    }));
+    const originalKeys = resolved.map(({ original }) => sourceKey(original));
+    if (new Set(originalKeys).size !== originalKeys.length) {
+      throw new Error("Each approved source can be classified only once per update.");
+    }
+    const confirmed = resolved.map(({ original, classification }) => (
+      confirmCollectedSourceClassification(original, classification)
+    ));
+    for (const key of originalKeys) this.sources.delete(key);
+    for (const source of confirmed) this.sources.set(sourceKey(source), source);
+    this.pendingAlignment = undefined;
+    this.pendingBlueprint = undefined;
+    this.pendingBatch = undefined;
+    return confirmed.map(snapshotSourcePresentation);
+  }
+
   public setRecoveryHandle(handle: DurableProcessHandle | undefined): void {
     this.recoveryHandle = handle;
+    this.recoveryKind = undefined;
   }
 
   public get hasRecoverableBatch(): boolean {
     return this.recoveryHandle !== undefined;
+  }
+
+  public async inspectRecoveryKind(): Promise<LearningPathRecoveryKindV1 | null> {
+    if (this.recoveryHandle === undefined) return null;
+    if (this.recoveryKind !== undefined) return this.recoveryKind;
+    const cli = await import("./cli");
+    try {
+      parseGenerationBatchRecovery(await cli.readDurableRecoveryText(
+        this.recoveryHandle,
+        GENERATION_BATCH_RECOVERY_FILENAME,
+      ));
+      this.recoveryKind = "generation-batch";
+      return this.recoveryKind;
+    } catch {
+      try {
+        parseSourceAlignmentRecoveryContext(await cli.readDurableRecoveryText(
+          this.recoveryHandle,
+          SOURCE_ALIGNMENT_RECOVERY_CONTEXT_FILENAME,
+        ));
+        this.recoveryKind = "source-alignment";
+        return this.recoveryKind;
+      } catch {
+        throw new Error("The recoverable Practice Problem Generator job has no recognized alignment or generation context.");
+      }
+    }
   }
 
   public cancel(): void {
@@ -183,6 +350,12 @@ export class LearningPathController {
    * work is deliberately left alone.
    */
   public detachActive(): boolean {
+    if (
+      this.recoveryKind === "source-alignment"
+      && this.recoveryHandle !== undefined
+    ) {
+      return this.cliLayer?.coordinator.detach(this.recoveryHandle.jobId) ?? false;
+    }
     const active = this.pendingBatch?.recovery.active;
     const recoveryHandle = this.recoveryHandle;
     if (
@@ -194,6 +367,278 @@ export class LearningPathController {
     return this.cliLayer?.coordinator.detach(active.handle.jobId) ?? false;
   }
 
+  public async previewSourceAlignment(
+    primaryPresentation: SourcePresentation,
+    supportingPresentations: readonly SourcePresentation[],
+    configuration: LearningBlueprintConfigurationV1,
+  ): Promise<SourceAlignmentPreviewV1> {
+    this.assertDesktop();
+    if (this.recoveryHandle !== undefined) {
+      const kind = await this.inspectRecoveryKind();
+      throw new Error(kind === "source-alignment"
+        ? "A recoverable course-alignment check already exists. Resume or discard it before checking another source bundle."
+        : "A recoverable guided-path batch already exists. Resume or discard it before checking another source bundle.");
+    }
+    const previousLedger = this.pendingAlignment?.ledger;
+    const pending = this.prepareSourceAlignment(
+      primaryPresentation,
+      supportingPresentations,
+      configuration,
+    );
+    if (previousLedger !== undefined) {
+      pending.ledger = invalidateStaleSourceAlignment(
+        previousLedger,
+        pending.bundle.materials,
+      );
+    }
+    this.pendingAlignment = pending;
+    const provider = this.provider(configuration.provider);
+    const requiresProvider = alignmentHasConfirmedEvidence(pending.input);
+    return {
+      providerLabel: provider.label,
+      modelLabel: configuration.model.length === 0 ? "Automatic" : configuration.model,
+      reasoningEffortLabel: configuration.reasoningEffort,
+      inputHash: pending.inputHash,
+      text: pending.prompt,
+      requiresProvider,
+      warning: requiresProvider
+        ? "This check compares only the explicitly selected evidence and never treats model knowledge as school authority. School-backed context is used automatically; optional AI-supported context is added only after your aggregated approval."
+        : "No confirmed comparable school evidence is available. Your selected material still defines the path; optional AI-supported context is added only after your aggregated approval.",
+    };
+  }
+
+  public async generateSourceAlignment(
+    onActivity: (event: CliActivityEvent) => void,
+  ): Promise<SourceAlignmentResultPresentationV1> {
+    this.assertDesktop();
+    const pending = this.pendingAlignment;
+    if (pending === undefined) {
+      throw new Error("Preview and approve the course-alignment payload first.");
+    }
+    if (!alignmentHasConfirmedEvidence(pending.input)) {
+      pending.ledger = createUnverifiedSourceAlignmentLedger();
+      return alignmentPresentation(pending.ledger, false);
+    }
+    const layer = await this.options.ensureCliLayer();
+    this.cliLayer = layer;
+    const provider = this.provider(pending.configuration.provider);
+    if (!provider.available) {
+      throw new Error(`${provider.label} is unavailable. ${provider.detail ?? "Check its executable setting."}`);
+    }
+    const adapter = layer.adapters[pending.configuration.provider];
+    const jobId = `source-alignment-${crypto.randomUUID()}`;
+    const startedAt = new Date().toISOString();
+    const result = await layer.coordinator.generate(adapter, {
+      prompt: pending.prompt,
+      schema: sourceAlignmentDraftV1JsonSchema,
+      validate: (value) => validateSourceAlignmentDraft(value, pending.input),
+      ...(pending.configuration.model.length === 0
+        ? {}
+        : { model: pending.configuration.model }),
+      reasoningEffort: pending.configuration.reasoningEffort,
+      timeoutMs: this.options.timeoutMs(),
+      onActivity,
+      recovery: {
+        mode: "start",
+        jobId,
+        context: JSON.stringify({
+          kind: "source-alignment",
+          inputHash: pending.inputHash,
+        }),
+        onReady: async (handle) => {
+          await this.persistSourceAlignmentRecoveryContext(
+            handle,
+            pending,
+            jobId,
+            startedAt,
+          );
+          await this.persistSourceAlignmentWorkspace(handle, pending);
+          this.recoveryHandle = handle;
+          this.recoveryKind = "source-alignment";
+          await this.options.setRecoveryHandle(handle);
+        },
+      },
+    }, {
+      id: jobId,
+      kind: "generation",
+      provider: pending.configuration.provider,
+    });
+    const draft = asSourceAlignmentDraft(result.value, pending.input);
+    const completedAt = new Date().toISOString();
+    const ledger = finalizeSourceAlignmentLedger({
+      sourceMaterials: pending.input.sourceMaterials,
+      segments: pending.input.segments,
+      draft,
+      provenance: {
+        provider: pending.configuration.provider,
+        providerVersion: provider.version ?? "unknown",
+        model: pending.configuration.model.length === 0
+          ? "automatic"
+          : pending.configuration.model,
+        reasoningEffort: pending.configuration.reasoningEffort,
+        promptVersion: SOURCE_ALIGNMENT_PROMPT_VERSION,
+        generatedAt: completedAt,
+      },
+    });
+    pending.ledger = ledger;
+    if (this.recoveryHandle !== undefined) {
+      const cli = await import("./cli");
+      await cli.writeDurableRecoveryText(
+        this.recoveryHandle,
+        SOURCE_ALIGNMENT_RECOVERY_RESULT_FILENAME,
+        JSON.stringify(createSourceAlignmentRecoveryResult({
+          jobId,
+          completedAt,
+          attempts: result.attempts,
+          draft,
+          alignmentInput: pending.input,
+        })),
+      );
+    }
+    return alignmentPresentation(ledger, true);
+  }
+
+  public async resumeRecoverableSourceAlignment(
+    onActivity: (event: CliActivityEvent) => void,
+  ): Promise<SourceAlignmentResultPresentationV1> {
+    this.assertDesktop();
+    const handle = this.recoveryHandle;
+    if (handle === undefined || await this.inspectRecoveryKind() !== "source-alignment") {
+      throw new Error("There is no recoverable course-alignment job.");
+    }
+    const pending = await this.restorePendingSourceAlignment(handle);
+    this.pendingAlignment = pending;
+    const cli = await import("./cli");
+    let recoveredDraft: SourceAlignmentDraftV1 | undefined;
+    let completedAt = new Date().toISOString();
+    let attempts: 1 | 2 = 1;
+    try {
+      const recovered = parseSourceAlignmentRecoveryResult(
+        await cli.readDurableRecoveryText(handle, SOURCE_ALIGNMENT_RECOVERY_RESULT_FILENAME),
+        pending.input,
+      );
+      recoveredDraft = recovered.draft;
+      completedAt = recovered.completedAt;
+      attempts = recovered.attempts;
+    } catch (error) {
+      if (!isMissingRecoveryFile(error)) throw error;
+      // The durable provider may still be running or may have completed before
+      // the local result checkpoint was written. Reattach to that exact job.
+    }
+    if (recoveredDraft === undefined) {
+      const layer = await this.options.ensureCliLayer();
+      this.cliLayer = layer;
+      const adapter = layer.adapters[pending.configuration.provider];
+      const result = await layer.coordinator.generate(adapter, {
+        prompt: pending.prompt,
+        schema: sourceAlignmentDraftV1JsonSchema,
+        validate: (value) => validateSourceAlignmentDraft(value, pending.input),
+        recovery: { mode: "resume", handle },
+        timeoutMs: this.options.timeoutMs(),
+        onActivity,
+      }, {
+        id: handle.jobId,
+        kind: "generation",
+        provider: pending.configuration.provider,
+      });
+      recoveredDraft = asSourceAlignmentDraft(result.value, pending.input);
+      attempts = result.attempts;
+      completedAt = new Date().toISOString();
+    }
+    const provider = this.provider(pending.configuration.provider);
+    const ledger = finalizeSourceAlignmentLedger({
+      sourceMaterials: pending.input.sourceMaterials,
+      segments: pending.input.segments,
+      draft: recoveredDraft,
+      provenance: {
+        provider: pending.configuration.provider,
+        providerVersion: provider.version ?? "unknown",
+        model: pending.configuration.model.length === 0
+          ? "automatic"
+          : pending.configuration.model,
+        reasoningEffort: pending.configuration.reasoningEffort,
+        promptVersion: SOURCE_ALIGNMENT_PROMPT_VERSION,
+        generatedAt: completedAt,
+      },
+    });
+    pending.ledger = ledger;
+    await cli.writeDurableRecoveryText(
+      handle,
+      SOURCE_ALIGNMENT_RECOVERY_RESULT_FILENAME,
+      JSON.stringify(createSourceAlignmentRecoveryResult({
+        jobId: handle.jobId,
+        completedAt,
+        attempts,
+        draft: recoveredDraft,
+        alignmentInput: pending.input,
+      })),
+    );
+    return alignmentPresentation(ledger, true);
+  }
+
+  public async resumeRecoverableSourceAlignmentWorkspace(
+    onActivity: (event: CliActivityEvent) => void,
+  ): Promise<{
+    readonly primary: SourcePresentation;
+    readonly supporting: readonly SourcePresentation[];
+    readonly result: SourceAlignmentResultPresentationV1;
+  }> {
+    const result = await this.resumeRecoverableSourceAlignment(onActivity);
+    const pending = this.pendingAlignment;
+    if (pending === undefined) {
+      throw new Error("The recovered course-alignment source bundle is unavailable.");
+    }
+    return {
+      primary: snapshotSourcePresentation(pending.primaryPresentation),
+      supporting: pending.supportingPresentations.map(snapshotSourcePresentation),
+      result,
+    };
+  }
+
+  public approveSourceAlignment(ledger: SourceAlignmentLedgerV1): SourceAlignmentResultPresentationV1 {
+    const pending = this.pendingAlignment;
+    if (pending === undefined || ledger.provenance === null) {
+      throw new Error("There is no generated course-alignment result to approve.");
+    }
+    const draft: SourceAlignmentDraftV1 = {
+      schemaVersion: 1,
+      records: ledger.records.map(({ sourceHashes: _sourceHashes, ...record }) => {
+        void _sourceHashes;
+        return structuredClone(record);
+      }),
+    };
+    const checked = finalizeSourceAlignmentLedger({
+      sourceMaterials: pending.input.sourceMaterials,
+      segments: pending.input.segments,
+      draft,
+      provenance: {
+        provider: ledger.provenance.provider,
+        providerVersion: ledger.provenance.providerVersion,
+        model: ledger.provenance.model,
+        reasoningEffort: ledger.provenance.reasoningEffort,
+        promptVersion: ledger.provenance.promptVersion,
+        generatedAt: ledger.provenance.generatedAt,
+      },
+    });
+    pending.ledger = checked;
+    return alignmentPresentation(checked, true);
+  }
+
+  public continueWithoutCourseAlignment(): SourceAlignmentResultPresentationV1 {
+    const pending = this.pendingAlignment;
+    if (pending === undefined) {
+      throw new Error("Preview the source bundle before choosing an unverified fallback.");
+    }
+    if (pending.ledger?.records.some((record) => (
+      record.status === "school-sources-disagree"
+      && record.resolution !== "excluded"
+    ))) {
+      throw new Error("Conflicting school sources must be resolved or excluded; they cannot be silently downgraded to unverified notes.");
+    }
+    pending.ledger = createUnverifiedSourceAlignmentLedger();
+    return alignmentPresentation(pending.ledger, false);
+  }
+
   public async previewBlueprint(
     primaryPresentation: SourcePresentation,
     supportingPresentations: readonly SourcePresentation[],
@@ -201,7 +646,13 @@ export class LearningPathController {
   ): Promise<LearningPayloadPreviewV1> {
     this.assertDesktop();
     if (this.recoveryHandle !== undefined) {
-      throw new Error("A recoverable guided-path batch already exists. Resume or discard it before approving another path.");
+      const kind = await this.inspectRecoveryKind();
+      if (kind !== "source-alignment") {
+        throw new Error("A recoverable guided-path batch already exists. Resume or discard it before approving another path.");
+      }
+      if (this.pendingAlignment?.ledger === undefined) {
+        throw new Error("The course-alignment check has not finished. Resume it or explicitly discard it before previewing the path.");
+      }
     }
     const pending = await this.prepareBlueprint(
       primaryPresentation,
@@ -302,6 +753,14 @@ export class LearningPathController {
       audits: [],
       generated: [],
     };
+    if (this.recoveryHandle !== undefined) {
+      await this.persistBatchRecovery(
+        this.pendingBatch.recovery,
+        this.recoveryHandle,
+      );
+      await this.persistBatchContext(this.recoveryHandle);
+      this.recoveryKind = "generation-batch";
+    }
     return payloads.map((payload) => {
       const provider = this.provider(payload.configuration.provider);
       return {
@@ -349,6 +808,9 @@ export class LearningPathController {
 
   public async inspectRecoverableBatch(): Promise<LearningPathRecoveredBatchV1> {
     this.assertDesktop();
+    if (await this.inspectRecoveryKind() !== "generation-batch") {
+      throw new Error("The recoverable job is a source-alignment check. Resume that check before opening the generated-set review.");
+    }
     await this.restorePendingBatchFromRecovery();
     return this.presentRecoveredBatch();
   }
@@ -358,6 +820,9 @@ export class LearningPathController {
     onActivity: (setId: string, event: CliActivityEvent) => void,
   ): Promise<LearningPathRecoveredBatchV1> {
     this.assertDesktop();
+    if (await this.inspectRecoveryKind() !== "generation-batch") {
+      throw new Error("The recoverable job is a source-alignment check, not a generated-set batch.");
+    }
     await this.restorePendingBatchFromRecovery();
     const pending = this.pendingBatch;
     if (pending === undefined) throw new Error("There is no recoverable guided-path batch.");
@@ -390,10 +855,18 @@ export class LearningPathController {
         startingLevel: context.blueprint.planningInput.startingLevel,
         desiredSetCount: context.blueprint.draft.sets.length,
         globalFocusInstructions: context.blueprint.planningInput.globalFocusInstructions,
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          context.blueprint.planningInput.aiContextCompletionPolicy,
+        ),
       },
       prompt: buildLearningBlueprintPrompt(context.blueprint.planningInput),
+      sourceAlignment: structuredClone(
+        context.blueprint.planningInput.sourceAlignment
+          ?? createUnverifiedSourceAlignmentLedger(),
+      ),
     };
     this.pendingBlueprint = pendingBlueprint;
+    this.recoveryKind = "generation-batch";
     this.pendingBatch = {
       batchId: recovery.batchId,
       blueprint: context.blueprint,
@@ -406,6 +879,7 @@ export class LearningPathController {
         generatedAt: entry.completedAt,
         attempts: entry.attempts,
         draftCount: entry.draft.exercises.length,
+        ...(entry.telemetry === undefined ? {} : { telemetry: entry.telemetry }),
       })),
       generated: recovery.completedDrafts.map((entry) => entry.draft),
     };
@@ -427,6 +901,44 @@ export class LearningPathController {
     };
   }
 
+  public async persistReviewSnapshots(
+    sets: readonly LearningSetReviewV1[],
+  ): Promise<void> {
+    const pending = this.pendingBatch;
+    const handle = this.recoveryHandle;
+    if (pending === undefined || handle === undefined) {
+      throw new Error("The durable guided-path review workspace is no longer available.");
+    }
+    let recovery = pending.recovery;
+    const updatedAt = new Date().toISOString();
+    for (const set of sets) {
+      const completed = recovery.completedDrafts.find((entry) => entry.setId === set.setId);
+      if (completed === undefined) {
+        throw new Error(`Set ${set.setId} has not completed generation.`);
+      }
+      const snapshot: PracticeSetReviewSnapshotV1 = {
+        setId: set.setId,
+        payloadHash: completed.payloadHash,
+        updatedAt,
+        exercises: set.exercises.map((exercise) => ({
+          id: exercise.id,
+          type: exercise.type,
+          prompt: exercise.prompt,
+          groundedAnswer: exercise.groundedAnswer,
+          rejected: exercise.rejected,
+          occlusionReviewed: exercise.occlusionReviewed,
+          ...(exercise.type === "image-occlusion"
+            ? { masks: structuredClone(exercise.masks ?? []) }
+            : {}),
+        })),
+        approvedExerciseIds: [...set.approvedExerciseIds],
+      };
+      recovery = saveGenerationBatchReviewSnapshot(recovery, snapshot);
+    }
+    pending.recovery = recovery;
+    await this.persistBatchRecovery(recovery, handle);
+  }
+
   public async discardRecoverableBatch(): Promise<void> {
     const handle = this.recoveryHandle;
     if (handle === undefined) return;
@@ -434,6 +946,8 @@ export class LearningPathController {
     await cli.cancelDurableRecovery(handle).catch(() => undefined);
     await cli.removeDurableRecovery(handle);
     this.recoveryHandle = undefined;
+    this.recoveryKind = undefined;
+    this.pendingAlignment = undefined;
     this.pendingBatch = undefined;
     await this.options.setRecoveryHandle(undefined);
   }
@@ -442,32 +956,144 @@ export class LearningPathController {
     request: LearningPathSaveRequestV1,
   ): Promise<{
     readonly path: string;
-    readonly bank: PracticeBankV3;
+    readonly bank: PracticeBankV4;
     readonly reconciledLinkCount: number;
+    readonly reconciledTutorBlockOrderCount: number;
+    readonly batchComplete: boolean;
   }> {
+    const candidate = await this.buildLearningPathSaveCandidate(request);
+    const {
+      bank,
+      existing,
+      loaded,
+      pendingBatch,
+      pendingBlueprint,
+      previouslySaved,
+      reconciliation,
+      reviewedSetIds,
+      savedConfigurations,
+      workspaceDrafts,
+    } = candidate;
+
+    const sidecars = await this.buildSidecars(
+      loaded.file,
+      bank,
+      savedConfigurations,
+      workspaceDrafts,
+    );
+    const batchWasFinished = generationBatchIsFinished(pendingBatch.recovery);
+    if (!batchWasFinished && this.recoveryHandle === undefined) {
+      throw new Error("The unfinished batch no longer has a durable recovery workspace. Resume or regenerate it before saving completed sets.");
+    }
+    const saved = await this.options.repository.saveLearningWorkspace({
+      bank,
+      ...(existing === undefined ? {} : { expectedRevision: existing.revision }),
+      generationRecipe: sidecars.legacyRecipe,
+      generationRecipeCatalog: sidecars.catalog,
+      generationHistory: sidecars.history,
+      ...(pendingBlueprint.bundle.primary.sourceImport === undefined
+        ? {}
+        : { sourceImport: pendingBlueprint.bundle.primary.sourceImport }),
+    });
+    for (const setId of reviewedSetIds) {
+      if (previouslySaved.has(setId)) continue;
+      pendingBatch.recovery = markGenerationBatchSetSaved(
+        pendingBatch.recovery,
+        setId,
+        new Date().toISOString(),
+      );
+    }
+    const batchComplete = generationBatchIsFinished(pendingBatch.recovery)
+      && completedUnsavedBatchDrafts(pendingBatch.recovery).length === 0;
+    if (batchComplete) {
+      await this.clearRecoveryAfterSave();
+    } else {
+      await this.persistBatchRecovery(pendingBatch.recovery, this.recoveryHandle);
+      if (this.recoveryHandle !== undefined) {
+        this.recoveryKind = "generation-batch";
+        await this.options.setRecoveryHandle(this.recoveryHandle);
+      }
+    }
+    return {
+      ...saved,
+      reconciledLinkCount: reconciliation.reconciledLinkCount,
+      reconciledTutorBlockOrderCount: reconciliation.reconciledTutorBlockOrderCount,
+      batchComplete,
+    };
+  }
+
+  public async preflightLearningPath(
+    request: LearningPathSaveRequestV1,
+  ): Promise<LearningPathPreflightResultV1> {
+    await this.buildLearningPathSaveCandidate(request);
+    return {
+      requestHash: learningPathSaveRequestHash(request),
+      valid: true,
+    };
+  }
+
+  private async buildLearningPathSaveCandidate(
+    request: LearningPathSaveRequestV1,
+  ): Promise<LearningPathSaveCandidateV1> {
     const pendingBlueprint = this.pendingBlueprint;
     const pendingBatch = this.pendingBatch;
     if (pendingBlueprint === undefined || pendingBatch === undefined) {
       throw new Error("The approved learning-path generation context is no longer available.");
     }
-    if (
-      request.blueprint.blueprintId !== pendingBatch.blueprint.draft.blueprintId
-      || request.sets.length !== pendingBatch.generated.length
-    ) throw new Error("The reviewed sets no longer match the approved batch.");
+    if (request.blueprint.blueprintId !== pendingBatch.blueprint.draft.blueprintId) {
+      throw new Error("The reviewed sets no longer match the approved batch.");
+    }
+    const reviewedSetIds = request.sets.map((set) => set.setId);
+    if (reviewedSetIds.length === 0 || new Set(reviewedSetIds).size !== reviewedSetIds.length) {
+      throw new Error("Choose at least one distinct completed set before saving.");
+    }
+    const generatedSetIds = new Set(pendingBatch.generated.map((draft) => draft.setId));
+    if (reviewedSetIds.some((setId) => !generatedSetIds.has(setId))) {
+      throw new Error("The reviewed sets include a set that has not completed generation.");
+    }
+
+    const loaded = await this.options.repository.loadForSource(
+      pendingBlueprint.bundle.combined.path,
+    );
+    const existing = loaded.parsed.status === "ok" ? loaded.parsed.bank : undefined;
+    if (loaded.parsed.status !== "ok" && loaded.parsed.status !== "missing") {
+      throw new Error(loaded.parsed.recoveryMessage);
+    }
 
     const draftsBySet = new Map(pendingBatch.generated.map((draft) => [draft.setId, draft]));
     const reviewedBySet = new Map(request.sets.map((set) => [set.setId, set]));
+    const previouslySaved = new Set(pendingBatch.recovery.savedSetIds);
     const finalDrafts: PracticeSetDraftV1[] = [];
     for (const payload of pendingBatch.payloads) {
       const original = draftsBySet.get(payload.targetSet.id);
       const reviewed = reviewedBySet.get(payload.targetSet.id);
-      if (original === undefined || reviewed === undefined) {
-        throw new Error(`Reviewed batch is missing set ${payload.targetSet.id}.`);
+      if (previouslySaved.has(payload.targetSet.id)) {
+        if (existing === undefined) {
+          throw new Error(`Previously saved set ${payload.targetSet.title} is missing from its Practice workspace.`);
+        }
+        const savedDraft = practiceSetDraftFromBank(existing, payload.targetSet.id);
+        if (savedDraft === null) {
+          throw new Error(`Previously saved set ${payload.targetSet.title} is incomplete in its Practice workspace.`);
+        }
+        finalDrafts.push(savedDraft);
+        continue;
       }
+      if (original === undefined || reviewed === undefined) continue;
       const approved = new Set(reviewed.approvedExerciseIds);
       const kept = reviewed.exercises.filter((exercise) => !exercise.rejected);
       if (kept.some((exercise) => !approved.has(exercise.id))) {
         throw new Error(`Set ${payload.targetSet.title} contains an unapproved exercise.`);
+      }
+      const requiredExerciseIds = new Set(
+        original.tutorLessons.map((lesson) => lesson.guidedExerciseId),
+      );
+      const rejectedRequired = reviewed.exercises.find((exercise) => (
+        exercise.rejected && requiredExerciseIds.has(exercise.id)
+      ));
+      if (rejectedRequired !== undefined) {
+        throw new Error(
+          `Set ${payload.targetSet.title} rejects guided exercise ${rejectedRequired.id}. Keep it or change the approved path plan first.`,
+        );
       }
       const exercises = applyDraftEdits(original.exercises, reviewed.exercises);
       const keptIds = new Set(exercises.map((exercise) => exercise.id));
@@ -483,27 +1109,62 @@ export class LearningPathController {
         tutorLessons,
       });
     }
+    if (finalDrafts.length === 0) {
+      throw new Error("No completed reviewed set is ready to save.");
+    }
 
     const now = new Date().toISOString();
-    const loaded = await this.options.repository.loadForSource(pendingBlueprint.bundle.combined.path);
-    const existing = loaded.parsed.status === "ok" ? loaded.parsed.bank : undefined;
-    if (loaded.parsed.status !== "ok" && loaded.parsed.status !== "missing") {
-      throw new Error(loaded.parsed.recoveryMessage);
-    }
-    const reconciliation = reconcileLearningWorkspaceDrafts(request.blueprint, finalDrafts);
+    const includedSetIds = new Set(finalDrafts.map((draft) => draft.setId));
+    const includedSets = request.blueprint.sets.filter((set) => includedSetIds.has(set.id));
+    const includedLessonIds = new Set(
+      includedSets.flatMap((set) => set.tutorLessonBriefIds),
+    );
+    const includedLessonBriefs = request.blueprint.tutorLessonBriefs.filter((lesson) => (
+      includedLessonIds.has(lesson.id)
+    ));
+    const includedAspectIds = learningPathAspectClosure({
+      blueprint: request.blueprint,
+      sets: includedSets,
+      lessonBriefs: includedLessonBriefs,
+      drafts: finalDrafts,
+    });
+    const savedBlueprint: LearningBlueprintDraftV1 = {
+      ...request.blueprint,
+      aspects: request.blueprint.aspects.filter((aspect) => includedAspectIds.has(aspect.id)),
+      tutorLessonBriefs: includedLessonBriefs,
+      sets: includedSets,
+    };
+    const reconciliation = reconcileLearningWorkspaceDrafts(savedBlueprint, finalDrafts);
     const workspaceDrafts = reconciliation.drafts;
-    const practiceSets = buildPracticeSets(request.blueprint, workspaceDrafts);
-    const tutorLessons = workspaceDrafts.flatMap((draft) => draft.tutorLessons.map((lesson) => structuredClone(lesson)));
-    const steps = buildLearningPathSteps(request.blueprint, practiceSets);
-    const preparedIds = new Set(pendingBlueprint.preparedVisuals.map((visual) => visual.source.id));
+    const practiceSets = buildPracticeSets(savedBlueprint, workspaceDrafts);
+    const tutorLessons = workspaceDrafts.flatMap((draft) => (
+      draft.tutorLessons.map((lesson) => structuredClone(lesson))
+    ));
+    const exercises = workspaceDrafts.flatMap((draft) => (
+      draft.exercises.map((exercise) => structuredClone(exercise))
+    ));
+    const steps = buildLearningPathSteps(savedBlueprint, practiceSets);
+    const preparedIds = new Set(
+      pendingBlueprint.preparedVisuals.map((visual) => visual.source.id),
+    );
     const sourceMaterials = pendingBlueprint.bundle.materials.map((material) => ({
       ...structuredClone(material),
       visualIds: material.visualIds.filter((id) => preparedIds.has(id)),
     }));
     const primaryMaterial = sourceMaterials.find((material) => material.role === "primary");
-    if (primaryMaterial === undefined) throw new Error("The approved bundle has no primary source material.");
-    const finalConfiguration = request.configurations.at(-1)?.configuration;
-    const bank: PracticeBankV3 = {
+    if (primaryMaterial === undefined) {
+      throw new Error("The approved bundle has no primary source material.");
+    }
+    const savedConfigurations = request.configurations.filter((entry) => (
+      includedSetIds.has(entry.setId)
+    ));
+    const finalConfiguration = savedConfigurations.at(-1)?.configuration;
+    const sourceAlignment = linkSourceAlignmentTargets({
+      ledger: pendingBlueprint.sourceAlignment,
+      exercises,
+      tutorLessons,
+    });
+    const bank: PracticeBankV4 = {
       schemaVersion: CURRENT_PRACTICE_BANK_SCHEMA_VERSION,
       bankId: existing?.bankId ?? `bank-${crypto.randomUUID()}`,
       revision: existing === undefined ? 0 : existing.revision + 1,
@@ -524,7 +1185,7 @@ export class LearningPathController {
       },
       segments: pendingBlueprint.bundle.combined.segments.map((segment) => structuredClone(segment)),
       visuals: pendingBlueprint.preparedVisuals.map((visual) => structuredClone(visual.source)),
-      exercises: workspaceDrafts.flatMap((draft) => draft.exercises.map((exercise) => structuredClone(exercise))),
+      exercises,
       sessions: existing?.sessions.map((session) => structuredClone(session)) ?? [],
       generation: {
         provider: finalConfiguration?.provider ?? "codex",
@@ -535,14 +1196,18 @@ export class LearningPathController {
           : { reasoningEffort: finalConfiguration.reasoningEffort }),
       },
       sourceMaterials,
+      sourceAlignment,
+      aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+        request.planningInput.aiContextCompletionPolicy,
+      ),
       aspects: reconciliation.aspects.map((aspect) => structuredClone(aspect)),
       practiceSets,
       tutorLessons,
       learningPath: {
-        id: request.blueprint.blueprintId,
-        title: request.blueprint.title,
+        id: savedBlueprint.blueprintId,
+        title: savedBlueprint.title,
         startingLevel: request.planningInput.startingLevel,
-        aspectIds: request.blueprint.aspects
+        aspectIds: reconciliation.aspects
           .filter((aspect) => aspect.status === "supported")
           .map((aspect) => aspect.id),
         steps,
@@ -552,27 +1217,17 @@ export class LearningPathController {
     if (!validation.ok) {
       throw new Error(`Cannot save an invalid learning workspace: ${validation.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`);
     }
-
-    const sidecars = await this.buildSidecars(
-      loaded.file,
-      bank,
-      request.configurations,
-      workspaceDrafts,
-    );
-    const saved = await this.options.repository.saveLearningWorkspace({
-      bank,
-      ...(existing === undefined ? {} : { expectedRevision: existing.revision }),
-      generationRecipe: sidecars.legacyRecipe,
-      generationRecipeCatalog: sidecars.catalog,
-      generationHistory: sidecars.history,
-      ...(pendingBlueprint.bundle.primary.sourceImport === undefined
-        ? {}
-        : { sourceImport: pendingBlueprint.bundle.primary.sourceImport }),
-    });
-    await this.clearRecoveryAfterSave();
     return {
-      ...saved,
-      reconciledLinkCount: reconciliation.reconciledLinkCount,
+      bank,
+      ...(existing === undefined ? {} : { existing }),
+      loaded,
+      pendingBatch,
+      pendingBlueprint,
+      previouslySaved,
+      reconciliation,
+      reviewedSetIds,
+      savedConfigurations,
+      workspaceDrafts,
     };
   }
 
@@ -595,11 +1250,32 @@ export class LearningPathController {
     const adapter = (await this.options.ensureCliLayer()).adapters[configuration.provider];
     const includeVisuals = adapter.capabilities().vision === "supported";
     const sources = learningSources(bundle, includeVisuals ? preparedVisuals : []);
+    const alignmentInput: SourceAlignmentGenerationInputV1 = {
+      sourceMaterials: bundle.materials.map((material) => structuredClone(material)),
+      segments: bundle.combined.segments.map((segment) => structuredClone(segment)),
+    };
+    const pendingAlignment = this.pendingAlignment;
+    const alignmentMatches = pendingAlignment !== undefined
+      && pendingAlignment.inputHash === sourceAlignmentInputHash(alignmentInput);
+    if (alignmentMatches && pendingAlignment.ledger === undefined) {
+      throw new Error("Run the previewed course-alignment check or explicitly continue without course alignment before building the path.");
+    }
+    const sourceAlignment = alignmentMatches && pendingAlignment.ledger !== undefined
+      ? structuredClone(pendingAlignment.ledger)
+      : createUnverifiedSourceAlignmentLedger();
+    const blockers = sourceAlignmentBlockers(sourceAlignment);
+    if (blockers.length > 0) {
+      throw new Error(`Resolve or exclude ${blockers.length} confirmed school-source ${blockers.length === 1 ? "conflict" : "conflicts"} before building the learning path. Other evidence areas do not block the path.`);
+    }
     const planningInput: LearningBlueprintPlanningInputV1 = {
       startingLevel: configuration.startingLevel,
       desiredSetCount: configuration.desiredSetCount,
       globalFocusInstructions: configuration.globalFocusInstructions,
       sources,
+      sourceAlignment,
+      ...(configuration.aiContextCompletionPolicy === undefined
+        ? {}
+        : { aiContextCompletionPolicy: configuration.aiContextCompletionPolicy }),
     };
     return {
       primaryPresentation: snapshotSourcePresentation(primaryPresentation),
@@ -609,6 +1285,34 @@ export class LearningPathController {
       planningInput,
       configuration: structuredClone(configuration),
       prompt: buildLearningBlueprintPrompt(planningInput),
+      sourceAlignment,
+    };
+  }
+
+  private prepareSourceAlignment(
+    primaryPresentation: SourcePresentation,
+    supportingPresentations: readonly SourcePresentation[],
+    configuration: LearningBlueprintConfigurationV1,
+  ): PendingSourceAlignmentV1 {
+    const primary = this.resolveSource(primaryPresentation);
+    const supporting = supportingPresentations.map((source) => this.resolveSource(source));
+    const bundle = createApprovedSourceBundle(
+      primary,
+      supporting,
+      this.options.pdfSourceBudgetLimits(),
+    );
+    const input: SourceAlignmentGenerationInputV1 = {
+      sourceMaterials: bundle.materials.map((material) => structuredClone(material)),
+      segments: bundle.combined.segments.map((segment) => structuredClone(segment)),
+    };
+    return {
+      primaryPresentation: snapshotSourcePresentation(primaryPresentation),
+      supportingPresentations: supportingPresentations.map(snapshotSourcePresentation),
+      bundle,
+      input,
+      inputHash: sourceAlignmentInputHash(input),
+      configuration: structuredClone(configuration),
+      prompt: buildSourceAlignmentPrompt(input),
     };
   }
 
@@ -633,7 +1337,11 @@ export class LearningPathController {
           const result = await layer.coordinator.generate(adapter, {
             prompt: buildPracticeSetPrompt(approved.payload),
             schema: practiceSetDraftV1JsonSchema,
-            validate: (value) => validatePracticeSetDraftForWorkspace(value, approved.payload),
+            validate: (value) => validatePracticeSetDraftWithCompletedSiblings({
+              payload: approved.payload,
+              draft: value,
+              completedDrafts: pending.generated,
+            }),
             recovery: { mode: "resume", handle: resumedHandle },
             timeoutMs: this.options.timeoutMs(),
             onActivity: (event) => onActivity(setId, event),
@@ -647,6 +1355,7 @@ export class LearningPathController {
             setId,
             draft,
             attempts: result.attempts,
+            ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
             completedAt: new Date().toISOString(),
           });
           pending.generated = replaceDraft(pending.generated, draft);
@@ -656,6 +1365,7 @@ export class LearningPathController {
             generatedAt: new Date().toISOString(),
             attempts: result.attempts,
             draftCount: draft.exercises.length,
+            ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
           });
           await this.persistBatchRecovery(pending.recovery, this.recoveryHandle);
           onStatus(setId, { state: "review" });
@@ -706,7 +1416,11 @@ export class LearningPathController {
         const result = await layer.coordinator.generate(adapter, {
           prompt: buildPracticeSetPrompt(payload),
           schema: practiceSetDraftV1JsonSchema,
-          validate: (value) => validatePracticeSetDraftForWorkspace(value, payload),
+          validate: (value) => validatePracticeSetDraftWithCompletedSiblings({
+            payload,
+            draft: value,
+            completedDrafts: pending.generated,
+          }),
           ...(payload.configuration.model.length === 0 ? {} : { model: payload.configuration.model }),
           reasoningEffort: payload.configuration.reasoningEffort,
           media,
@@ -732,6 +1446,7 @@ export class LearningPathController {
               await this.persistBatchRecovery(pending.recovery, handle);
               await this.persistBatchContext(handle);
               this.recoveryHandle = handle;
+              this.recoveryKind = "generation-batch";
               await this.options.setRecoveryHandle(handle);
             },
           },
@@ -747,6 +1462,7 @@ export class LearningPathController {
           setId,
           draft,
           attempts: result.attempts,
+          ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
           completedAt: generatedAt,
         });
         pending.generated = replaceDraft(pending.generated, draft);
@@ -756,6 +1472,7 @@ export class LearningPathController {
           generatedAt,
           attempts: result.attempts,
           draftCount: draft.exercises.length,
+          ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
         });
         await this.persistBatchRecovery(pending.recovery, this.recoveryHandle);
         if (previousHandle !== undefined && previousHandle.workspacePath !== this.recoveryHandle?.workspacePath) {
@@ -797,10 +1514,12 @@ export class LearningPathController {
       try {
         await this.persistBatchRecovery(pending.recovery, target);
         this.recoveryHandle = target;
+        this.recoveryKind = "generation-batch";
         await this.options.setRecoveryHandle(target);
       } catch {
         if (previousHandle !== undefined) {
           this.recoveryHandle = previousHandle;
+          this.recoveryKind = "generation-batch";
           await this.options.setRecoveryHandle(previousHandle);
         }
       }
@@ -816,19 +1535,36 @@ export class LearningPathController {
       visual.source.id,
       this.options.app.vault.adapter.getResourcePath(visual.source.vaultPath),
     ]));
-    return drafts.map((draft) => ({
-      setId: draft.setId,
-      draft: structuredClone(draft),
-      exercises: presentExercises(
+    const snapshots = new Map(
+      (this.pendingBatch?.recovery.reviewSnapshots ?? []).map((snapshot) => [
+        snapshot.setId,
+        snapshot,
+      ]),
+    );
+    return drafts.map((draft) => {
+      const snapshot = snapshots.get(draft.setId);
+      const reviewById = new Map(
+        (snapshot?.exercises ?? []).map((exercise) => [exercise.id, exercise]),
+      );
+      return {
+        setId: draft.setId,
+        draft: structuredClone(draft),
+        exercises: presentExercises(
         draft.exercises,
         (id) => visualUrls.get(id),
         pending.bundle.combined.segments,
       ).map((exercise) => ({
         ...structuredClone(exercise),
-        rejected: false,
-        occlusionReviewed: exercise.type !== "image-occlusion",
+        ...(reviewById.get(exercise.id) ?? {}),
+        rejected: reviewById.get(exercise.id)?.rejected ?? false,
+        occlusionReviewed: reviewById.get(exercise.id)?.occlusionReviewed
+          ?? exercise.type !== "image-occlusion",
       })),
-    }));
+        ...(snapshot === undefined
+          ? {}
+          : { approvedExerciseIds: [...snapshot.approvedExerciseIds] }),
+      };
+    });
   }
 
   private mediaForConfiguration(selectedVisualIds: readonly string[]): MediaInput[] {
@@ -848,6 +1584,97 @@ export class LearningPathController {
       GENERATION_BATCH_RECOVERY_FILENAME,
       serializeGenerationBatchRecovery(recovery),
     );
+  }
+
+  private async persistSourceAlignmentRecoveryContext(
+    handle: DurableProcessHandle,
+    pending: PendingSourceAlignmentV1,
+    jobId: string,
+    startedAt: string,
+  ): Promise<void> {
+    const cli = await import("./cli");
+    await cli.writeDurableRecoveryText(
+      handle,
+      SOURCE_ALIGNMENT_RECOVERY_CONTEXT_FILENAME,
+      JSON.stringify(createSourceAlignmentRecoveryContext({
+        jobId,
+        startedAt,
+        alignmentInput: pending.input,
+        configuration: {
+          provider: pending.configuration.provider,
+          model: pending.configuration.model,
+          reasoningEffort: pending.configuration.reasoningEffort,
+        },
+        prompt: pending.prompt,
+      })),
+    );
+  }
+
+  private async persistSourceAlignmentWorkspace(
+    handle: DurableProcessHandle,
+    pending: PendingSourceAlignmentV1,
+  ): Promise<void> {
+    const workspace: PersistedSourceAlignmentWorkspaceV1 = {
+      schemaVersion: SOURCE_ALIGNMENT_WORKSPACE_VERSION,
+      primaryPresentation: snapshotSourcePresentation(pending.primaryPresentation),
+      supportingPresentations: pending.supportingPresentations.map(snapshotSourcePresentation),
+      primary: persistCollectedSource(pending.bundle.primary),
+      supporting: pending.bundle.supporting.map(persistCollectedSource),
+      materials: pending.bundle.materials.map((material) => structuredClone(material)),
+      combined: persistCollectedSource(pending.bundle.combined),
+      configuration: structuredClone(pending.configuration),
+    };
+    const cli = await import("./cli");
+    await cli.writeDurableRecoveryText(
+      handle,
+      SOURCE_ALIGNMENT_WORKSPACE_FILENAME,
+      JSON.stringify(workspace),
+    );
+  }
+
+  private async restorePendingSourceAlignment(
+    handle: DurableProcessHandle,
+  ): Promise<PendingSourceAlignmentV1> {
+    const cli = await import("./cli");
+    const recovery = parseSourceAlignmentRecoveryContext(
+      await cli.readDurableRecoveryText(
+        handle,
+        SOURCE_ALIGNMENT_RECOVERY_CONTEXT_FILENAME,
+      ),
+    );
+    if (recovery.jobId !== handle.jobId) {
+      throw new Error("The recoverable course-alignment context belongs to another provider job.");
+    }
+    const workspace = parsePersistedSourceAlignmentWorkspace(
+      await cli.readDurableRecoveryText(handle, SOURCE_ALIGNMENT_WORKSPACE_FILENAME),
+      this.options.app,
+    );
+    const input: SourceAlignmentGenerationInputV1 = {
+      sourceMaterials: workspace.bundle.materials.map((material) => structuredClone(material)),
+      segments: workspace.bundle.combined.segments.map((segment) => structuredClone(segment)),
+    };
+    if (
+      sourceAlignmentInputHash(input) !== recovery.inputHash
+      || sourceAlignmentInputHash(recovery.input) !== recovery.inputHash
+    ) {
+      throw new Error("The recoverable course-alignment workspace no longer matches its approved source payload.");
+    }
+    if (
+      workspace.configuration.provider !== recovery.configuration.provider
+      || workspace.configuration.model !== recovery.configuration.model
+      || workspace.configuration.reasoningEffort !== recovery.configuration.reasoningEffort
+    ) {
+      throw new Error("The recoverable course-alignment provider configuration changed.");
+    }
+    return {
+      primaryPresentation: workspace.primaryPresentation,
+      supportingPresentations: workspace.supportingPresentations,
+      bundle: workspace.bundle,
+      input,
+      inputHash: recovery.inputHash,
+      configuration: workspace.configuration,
+      prompt: recovery.prompt,
+    };
   }
 
   private async persistBatchContext(handle: DurableProcessHandle): Promise<void> {
@@ -876,7 +1703,7 @@ export class LearningPathController {
 
   private async buildSidecars(
     file: TFile | null,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     configurations: readonly PracticeSetConfigurationV1[],
     drafts: readonly PracticeSetDraftV1[],
   ): Promise<{
@@ -927,7 +1754,10 @@ export class LearningPathController {
     const targetRevision = bank.revision;
     const configurationById = new Map(configurations.map((entry) => [entry.setId, entry.configuration]));
     const auditById = new Map(pendingBatch.audits.map((entry) => [entry.setId, entry]));
-    const entries: GenerationHistoryEntryDraftV2[] = drafts.map((draft) => {
+    const previouslySaved = new Set(pendingBatch.recovery.savedSetIds);
+    const entries: GenerationHistoryEntryDraftV2[] = drafts
+      .filter((draft) => !previouslySaved.has(draft.setId))
+      .map((draft) => {
       const configuration = configurationById.get(draft.setId);
       const audit = auditById.get(draft.setId);
       if (configuration === undefined || audit === undefined) throw new Error(`Generation provenance is missing for ${draft.setId}.`);
@@ -950,6 +1780,10 @@ export class LearningPathController {
         exerciseTypePercentages: { ...configuration.exerciseTypePercentages },
         selectedVisualCount: configuration.selectedVisualIds.length,
         attempts: audit.attempts,
+        ...(audit.telemetry === undefined ? {} : { telemetry: audit.telemetry }),
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          configuration.aiContextCompletionPolicy,
+        ),
         batchId: pendingBatch.batchId,
         blueprintId: pendingBatch.blueprint.draft.blueprintId,
         setId: draft.setId,
@@ -958,7 +1792,9 @@ export class LearningPathController {
     return {
       catalog,
       legacyRecipe,
-      history: appendGenerationHistoryBatch(history, entries, targetRevision),
+      history: entries.length === 0
+        ? history
+        : appendGenerationHistoryBatch(history, entries, targetRevision),
     };
   }
 
@@ -966,7 +1802,11 @@ export class LearningPathController {
     const exact = this.sources.get(sourceKey(source));
     if (exact !== undefined) return exact;
     const candidate = [...this.sources.values()].find((entry) => (
-      entry.path === source.path && entry.mode === source.mode && entry.title === source.title
+      entry.path === source.path
+      && entry.mode === source.mode
+      && entry.title === source.title
+      && (source.classification === undefined || entry.classification === source.classification)
+      && (source.classificationState === undefined || entry.classificationState === source.classificationState)
     ));
     if (candidate === undefined) throw new Error("The selected source is no longer available. Choose it again.");
     return candidate;
@@ -998,9 +1838,49 @@ export class LearningPathController {
       await cli.removeDurableRecovery(handle);
     }
     this.recoveryHandle = undefined;
+    this.recoveryKind = undefined;
+    this.pendingAlignment = undefined;
     this.pendingBatch = undefined;
     await this.options.setRecoveryHandle(undefined);
   }
+}
+
+function learningPathAspectClosure(input: {
+  readonly blueprint: LearningBlueprintDraftV1;
+  readonly sets: readonly LearningBlueprintDraftV1["sets"][number][];
+  readonly lessonBriefs: readonly LearningBlueprintDraftV1["tutorLessonBriefs"][number][];
+  readonly drafts: readonly PracticeSetDraftV1[];
+}): ReadonlySet<string> {
+  const aspectById = new Map(input.blueprint.aspects.map((aspect) => [aspect.id, aspect]));
+  const included = new Set<string>([
+    ...input.sets.flatMap((set) => set.aspectIds),
+    ...input.lessonBriefs.flatMap((lesson) => [
+      ...lesson.aspectIds,
+      ...lesson.prerequisiteAspectIds,
+    ]),
+    ...input.drafts.flatMap((draft) => [
+      ...draft.assignments.flatMap((assignment) => assignment.aspectIds),
+      ...draft.tutorLessons.flatMap((lesson) => [
+        ...lesson.aspectIds,
+        ...lesson.prerequisiteAspectIds,
+      ]),
+    ]),
+  ]);
+  const pending = [...included];
+  while (pending.length > 0) {
+    const aspectId = pending.pop();
+    if (aspectId === undefined) continue;
+    const aspect = aspectById.get(aspectId);
+    if (aspect === undefined) {
+      throw new Error(`The partial learning path references unknown aspect ${aspectId}.`);
+    }
+    for (const prerequisiteId of aspect.prerequisiteAspectIds) {
+      if (included.has(prerequisiteId)) continue;
+      included.add(prerequisiteId);
+      pending.push(prerequisiteId);
+    }
+  }
+  return included;
 }
 
 function learningSources(
@@ -1018,6 +1898,8 @@ function learningSources(
       mode: source.mode,
       scope: scopeLabel(material),
       hash: source.hash,
+      classification: material.classification,
+      classificationState: material.classificationState,
       segments: source.segments.map((segment) => structuredClone(segment)),
       visuals: material.visualIds.flatMap((id) => {
         const visual = visualById.get(id);
@@ -1033,12 +1915,36 @@ function learningSources(
   });
 }
 
-function scopeLabel(material: SourceMaterialV1): string {
+function scopeLabel(material: SourceMaterialV2): string {
   if (material.scope.kind === "note") return "complete explicitly selected note";
   if (material.scope.kind === "selection") return "explicit note selection only";
   return material.scope.firstPage === material.scope.lastPage
     ? `PDF page ${material.scope.firstPage} of ${material.scope.pageCount}`
     : `PDF pages ${material.scope.firstPage}-${material.scope.lastPage} of ${material.scope.pageCount}`;
+}
+
+function practiceSetDraftFromBank(
+  bank: PracticeBankV4,
+  setId: string,
+): PracticeSetDraftV1 | null {
+  const set = bank.practiceSets.find((candidate) => candidate.id === setId);
+  if (set === undefined) return null;
+  const exerciseById = new Map(bank.exercises.map((exercise) => [exercise.id, exercise]));
+  const exerciseIds = new Set(set.assignments.map((assignment) => assignment.exerciseId));
+  const exercises = set.assignments.flatMap((assignment) => {
+    const exercise = exerciseById.get(assignment.exerciseId);
+    return exercise === undefined ? [] : [structuredClone(exercise)];
+  });
+  if (exercises.length !== set.assignments.length) return null;
+  return {
+    schemaVersion: PRACTICE_SET_DRAFT_VERSION,
+    setId,
+    exercises,
+    assignments: set.assignments.map((assignment) => structuredClone(assignment)),
+    tutorLessons: bank.tutorLessons
+      .filter((lesson) => exerciseIds.has(lesson.guidedExerciseId))
+      .map((lesson) => structuredClone(lesson)),
+  };
 }
 
 function buildPracticeSets(
@@ -1086,6 +1992,8 @@ function sourceKey(source: SourcePresentation): string {
     source.characterCount,
     source.detail ?? "",
     source.excerpt,
+    source.classification ?? "",
+    source.classificationState ?? "",
   ]);
 }
 
@@ -1117,6 +2025,74 @@ function persistCollectedSource(source: CollectedSource): PersistedCollectedSour
   const { file: _file, ...persisted } = source;
   void _file;
   return structuredClone(persisted);
+}
+
+function alignmentHasConfirmedEvidence(
+  input: SourceAlignmentGenerationInputV1,
+): boolean {
+  const segmentById = new Map(input.segments.map((segment) => [segment.id, segment]));
+  return input.sourceMaterials.some((material) => (
+    isConfirmedSchoolMaterial(material)
+    && material.segmentIds.some((id) => {
+      const segment = segmentById.get(id);
+      return segment?.kind === "paragraph" && !isStructuralSourceSegment(segment);
+    })
+  ));
+}
+
+function alignmentPresentation(
+  ledger: SourceAlignmentLedgerV1,
+  checked: boolean,
+): SourceAlignmentResultPresentationV1 {
+  return {
+    ledger: structuredClone(ledger),
+    blockerRecordIds: sourceAlignmentBlockers(ledger).map((record) => record.id),
+    checked,
+  };
+}
+
+function parsePersistedSourceAlignmentWorkspace(
+  serialized: string,
+  app: App,
+): {
+  readonly primaryPresentation: SourcePresentation;
+  readonly supportingPresentations: readonly SourcePresentation[];
+  readonly bundle: ApprovedSourceBundleV1;
+  readonly configuration: LearningBlueprintConfigurationV1;
+} {
+  const value = JSON.parse(serialized) as PersistedSourceAlignmentWorkspaceV1;
+  if (value.schemaVersion !== SOURCE_ALIGNMENT_WORKSPACE_VERSION) {
+    throw new Error("The recovered course-alignment workspace version is unsupported.");
+  }
+  const restore = (
+    source: PersistedCollectedSourceV1,
+    label: string,
+  ): CollectedSource => {
+    const file = app.vault.getAbstractFileByPath(source.path);
+    if (!(file instanceof TFile)) {
+      throw new Error(`The recovered ${label} source no longer exists as a file in the vault.`);
+    }
+    return { ...structuredClone(source), file };
+  };
+  const primary = restore(value.primary, "primary alignment");
+  const supporting = value.supporting.map((source, index) => (
+    restore(source, `supporting alignment source ${index + 1}`)
+  ));
+  const combined = restore(value.combined, "combined alignment");
+  return {
+    primaryPresentation: recoveredSourcePresentation(value.primaryPresentation, primary),
+    supportingPresentations: value.supportingPresentations.map((presentation, index) => (
+      recoveredSourcePresentation(presentation, supporting[index])
+    )),
+    bundle: {
+      primary,
+      supporting,
+      combined,
+      materials: value.materials.map((material) => structuredClone(material)),
+      bundleHash: combined.hash,
+    },
+    configuration: structuredClone(value.configuration),
+  };
 }
 
 function parsePersistedContext(
@@ -1215,10 +2191,11 @@ async function preparedVisualsFromSources(
 function recoveryStatuses(
   recovery: GenerationBatchRecoveryV1,
 ): LearningPathRecoveredBatchV1["statuses"] {
+  const saved = new Set(recovery.savedSetIds);
   return recovery.queue.map((entry) => {
     let status: LearningSetGenerationStatusV1;
     if (entry.status === "completed") {
-      status = { state: "review" };
+      status = { state: saved.has(entry.setId) ? "saved" : "review" };
     } else if (entry.status === "running") {
       status = { state: "generating", message: "The local agent can be reattached when you resume." };
     } else if (entry.status === "failed") {
@@ -1237,6 +2214,13 @@ function recoveryStatuses(
 
 function errorMessage(error: unknown): string {
   return formatCliErrorForUi(error, "The guided generation step failed.");
+}
+
+function isMissingRecoveryFile(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT";
 }
 
 function cliErrorCode(error: unknown): string | undefined {

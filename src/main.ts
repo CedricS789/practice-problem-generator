@@ -31,6 +31,7 @@ import { generationDifficultyFromSetting } from "./difficulty";
 import { enabledExerciseTypes } from "./exercise-distribution";
 import { auditOfflineReadiness } from "./offline-readiness";
 import { hiddenPracticeMetadataEditorExtension } from "./hidden-practice-metadata-editor";
+import { practiceBankEditorExtension } from "./practice-bank-editor";
 import { PracticeBankRepository, createSessionSummary } from "./bank-repository";
 import { renderBankStatistics } from "./bank-statistics-view";
 import { LearningPathController } from "./learning-path-controller";
@@ -86,17 +87,29 @@ import {
 import {
   rebaseLatestStudySessionCheckpointBankPath,
   resolveStudyCheckpointBankCandidate,
+  studyCheckpointWorkspaceActionState,
   summarizeStudyCheckpointProgress,
 } from "./study-checkpoint-recovery";
 import type {
   AiReviewSessionItemResultV2,
   PracticeBankV2,
-  PracticeBankV3,
+  PracticeBankV4,
   PracticeSetV1,
   GenerationDraftV1,
   SessionSummaryV2,
+  SourceAlignmentLedgerV1,
   VisualSourceV1,
 } from "./model";
+import { CURRENT_PRACTICE_BANK_SCHEMA_VERSION } from "./model";
+import { createExerciseAlignmentSnapshots } from "./source-alignment";
+import {
+  DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
+  effectiveAiContextCompletionPolicy,
+} from "./ai-context-completion";
+import {
+  createUnverifiedSourceAlignmentLedger,
+  sourceAlignmentBlockers,
+} from "./source-alignment-generation";
 import {
   derivePracticePath,
   getStaleSourceState,
@@ -146,6 +159,7 @@ import {
   collectSource,
   collectSourceFromFile,
   collectPdfSource,
+  confirmSourceClassification,
   type CollectedSource,
   type RegenerationSourceResult,
 } from "./source";
@@ -159,6 +173,7 @@ import {
   PracticeLearningPathView,
   choosePracticeSet,
   OfflineReadinessModal,
+  applyMarkdownHeadingTheme,
   applyDraftEdits,
   presentExercises,
   type DraftExercisePresentation,
@@ -170,6 +185,7 @@ import {
   type GenerationConfiguration,
   type PayloadPreview,
   type PersistedAnswerReviewRetryTarget,
+  type DashboardRecoveryPresentation,
   type PracticeDashboardViewOptions,
   type PracticeLabViewOptions,
   type LearningPathViewOptions,
@@ -187,6 +203,7 @@ import { confirmDestructiveAction } from "./ui/destructive-confirmation-modal";
 import { choosePdfPageRange } from "./ui/pdf-page-range-modal";
 import { showPdfExtractionProgress } from "./ui/pdf-extraction-progress-modal";
 import { SavedSetGenerationModal } from "./ui/saved-set-generation-modal";
+import { renderHorizontalTabs } from "./ui/horizontal-tabs";
 import {
   chooseVisualFrame,
   importRemoteVisual,
@@ -194,20 +211,33 @@ import {
   type PreparedVisual
 } from "./visual-preparation";
 import type { DetectedVisual } from "./visuals";
+import type { GenerationTelemetryV1 } from "./generation-telemetry";
 
 interface PendingGeneration {
   readonly source: CollectedSource;
   readonly configuration: GenerationConfiguration;
   readonly prompt: string;
   readonly preparedVisuals: readonly PreparedVisual[];
+  readonly sourceAlignment: SourceAlignmentLedgerV1;
   draft?: GenerationDraftV1;
   jobId?: string;
   attempts?: 1 | 2;
+  telemetry?: GenerationTelemetryV1;
 }
 
 interface ActiveBank {
   readonly path: string;
-  bank: PracticeBankV3;
+  bank: PracticeBankV4;
+}
+
+type SavedBankPage = "practice" | "progress" | "manage";
+
+interface SavedBankRenderMetadata {
+  readonly generationHistory?: GenerationHistoryV1;
+  readonly generationHistoryWarning?: string;
+  readonly pdfSourceDetail?: string;
+  readonly pdfSourceWarning?: string;
+  readonly pdfSourceHistory: readonly string[];
 }
 
 type StudyCheckpointRestoreOutcome =
@@ -345,9 +375,14 @@ export default class PracticeLabPlugin extends Plugin {
   private discardingGenerationRecovery = false;
   private studyCheckpoint: StudySessionCheckpointV1 | undefined;
   private invalidStudyCheckpointRaw: unknown;
+  private studyCheckpointRecoveryIssue: string | undefined;
   private studyCheckpointRestoreTask: Promise<StudyCheckpointRestoreOutcome> | undefined;
   private bankStudyStartTask: Promise<void> | undefined;
   private storedDataSaveChain: Promise<void> = Promise.resolve();
+  private readonly savedBankPagesByLeaf = new WeakMap<
+    Element,
+    Map<string, SavedBankPage>
+  >();
 
   override async onload(): Promise<void> {
     const storedData: unknown = await this.loadData();
@@ -368,6 +403,7 @@ export default class PracticeLabPlugin extends Plugin {
       await this.saveData(this.storedDataSnapshot());
     }
     this.registerEditorExtension(hiddenPracticeMetadataEditorExtension);
+    this.registerEditorExtension(practiceBankEditorExtension);
     this.dashboardRepository = new PracticeDashboardRepository(this.app, {
       hasPracticeBankMarker: (file) =>
         this.app.metadataCache.getFileCache(file)?.frontmatter?.["practice-lab"] === true,
@@ -437,6 +473,13 @@ export default class PracticeLabPlugin extends Plugin {
     }));
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       this.addFileMenuItems(menu, file);
+    }));
+    this.registerEvent(this.app.workspace.on("css-change", () => {
+      this.app.workspace.containerEl
+        .querySelectorAll<HTMLElement>(
+          ".practice-lab-view, .practice-learning-path, .practice-lab-bank-card",
+        )
+        .forEach((element) => applyMarkdownHeadingTheme(element));
     }));
     this.registerMarkdownCodeBlockProcessor("practice-lab", async (source, element, context) => {
       try {
@@ -568,6 +611,7 @@ export default class PracticeLabPlugin extends Plugin {
         progress,
       );
     }
+    this.studyCheckpointRecoveryIssue = undefined;
     await this.persistStoredData();
   }
 
@@ -581,6 +625,7 @@ export default class PracticeLabPlugin extends Plugin {
     }
     this.studyCheckpoint = undefined;
     this.invalidStudyCheckpointRaw = undefined;
+    this.studyCheckpointRecoveryIssue = undefined;
     await this.persistStoredData();
   }
 
@@ -594,6 +639,14 @@ export default class PracticeLabPlugin extends Plugin {
     this.studyCheckpointRestoreTask = task;
     try {
       const outcome = await task;
+      this.studyCheckpointRecoveryIssue = outcome.status === "invalid"
+        || outcome.status === "unavailable"
+        || outcome.status === "ambiguous"
+        || outcome.status === "blocked"
+        || outcome.status === "conflict"
+        || outcome.status === "failed"
+        ? outcome.message
+        : undefined;
       if (
         notifyFailure
         && outcome.status !== "none"
@@ -665,13 +718,14 @@ export default class PracticeLabPlugin extends Plugin {
         resolvedCheckpoint.exercises,
         (visualId) => visualUrls.get(visualId),
         resolvedCheckpoint.segments,
+        resolvedCheckpoint.alignmentSnapshots ?? [],
       );
       const learningEvidence = resolvedCheckpoint.learningProgress === undefined
         ? []
         : this.learningEvidenceTemplates(
-            lockedBank as PracticeBankV3,
+            lockedBank as PracticeBankV4,
             resolvedCheckpoint.learningProgress.scope.sets.map((reference) => {
-              const set = (lockedBank as PracticeBankV3).practiceSets.find((candidate) => candidate.id === reference.id);
+              const set = (lockedBank as PracticeBankV4).practiceSets.find((candidate) => candidate.id === reference.id);
               if (set === undefined) throw new Error(`The saved learning scope references missing set ${reference.id}.`);
               return set;
             }),
@@ -792,7 +846,7 @@ export default class PracticeLabPlugin extends Plugin {
   private async resumeMergingStudyCheckpoint(
     checkpoint: StudySessionCheckpointV1,
     bankPath: string,
-    current: PracticeBankV3,
+    current: PracticeBankV4,
   ): Promise<void> {
     if (current.bankId !== checkpoint.bankId) {
       throw new Error("The practice bank changed identity while a finished session was awaiting merge. The checkpoint was retained.");
@@ -830,7 +884,7 @@ export default class PracticeLabPlugin extends Plugin {
   }
 
   private async requestDiscardStudyCheckpointAndStart(
-    targetBank: PracticeBankV3,
+    targetBank: PracticeBankV4,
     recoveryMessage: string,
   ): Promise<boolean> {
     const checkpoint = this.studyCheckpoint;
@@ -1240,7 +1294,12 @@ export default class PracticeLabPlugin extends Plugin {
         return;
       }
       if (await this.redirectToInterruptedGeneration()) return;
-      const source = await collectSource(this.app, mode, selection);
+      const source = await collectSource(
+        this.app,
+        mode,
+        selection,
+        this.settings.sourceClassificationRules,
+      );
       this.lastSource = source;
       await this.openView(source, true);
     } catch (error) {
@@ -1326,7 +1385,11 @@ export default class PracticeLabPlugin extends Plugin {
     } finally {
       progress.finish();
     }
-    const source = collectPdfSource(file, extraction);
+    const source = collectPdfSource(
+      file,
+      extraction,
+      this.settings.sourceClassificationRules,
+    );
     new Notice(
       `Loaded ${extraction.extractedPageCount} PDF ${extraction.extractedPageCount === 1 ? "page" : "pages"} locally. Review the exact payload before generation.`,
       6000,
@@ -1366,7 +1429,12 @@ export default class PracticeLabPlugin extends Plugin {
             const selection = mode === "selection"
               ? this.app.workspace.getActiveViewOfType(MarkdownView)?.editor.getSelection()
               : undefined;
-            const source = await collectSource(this.app, mode, selection);
+            const source = await collectSource(
+              this.app,
+              mode,
+              selection,
+              this.settings.sourceClassificationRules,
+            );
             this.lastSource = source;
             return source;
           } catch (error) {
@@ -1379,7 +1447,13 @@ export default class PracticeLabPlugin extends Plugin {
             try {
               const file = await chooseSourceNoteFile(this.app);
               if (file === null) return null;
-              const source = await collectSourceFromFile(this.app, file, "note");
+              const source = await collectSourceFromFile(
+                this.app,
+                file,
+                "note",
+                undefined,
+                this.settings.sourceClassificationRules,
+              );
               this.lastSource = source;
               return source;
             } catch (error) {
@@ -1400,6 +1474,12 @@ export default class PracticeLabPlugin extends Plugin {
             }
           },
         }),
+        confirmSourceClassification: async (presentation, classification) => {
+          const source = this.resolveCollectedSource(presentation);
+          const confirmed = confirmSourceClassification(source, classification);
+          this.lastSource = confirmed;
+          return confirmed;
+        },
         previewPayload: async (source, configuration) => this.previewPayload(source, configuration),
         generate: async (request) => this.runGeneration(
           request.source,
@@ -1612,7 +1692,13 @@ export default class PracticeLabPlugin extends Plugin {
               const file = await chooseSourceNoteFile(this.app);
               source = file === null
                 ? null
-                : await collectSourceFromFile(this.app, file, "note");
+                : await collectSourceFromFile(
+                    this.app,
+                    file,
+                    "note",
+                    undefined,
+                    this.settings.sourceClassificationRules,
+                  );
             } else {
               source = await collectSource(
                 this.app,
@@ -1620,6 +1706,7 @@ export default class PracticeLabPlugin extends Plugin {
                 mode === "selection"
                   ? this.app.workspace.getActiveViewOfType(MarkdownView)?.editor.getSelection()
                   : undefined,
+                this.settings.sourceClassificationRules,
               );
             }
             if (source === null) return null;
@@ -1659,7 +1746,13 @@ export default class PracticeLabPlugin extends Plugin {
             } else {
               const file = await chooseSourceNoteFile(this.app);
               if (file === null) return null;
-              source = await collectSourceFromFile(this.app, file, "note");
+              source = await collectSourceFromFile(
+                this.app,
+                file,
+                "note",
+                undefined,
+                this.settings.sourceClassificationRules,
+              );
             }
             if (source === null) return null;
             return this.learningPathController.registerSource(
@@ -1676,6 +1769,13 @@ export default class PracticeLabPlugin extends Plugin {
           }
           return this.learningPathController.registerSource(source);
         },
+        confirmSourceClassification: (source, classification) =>
+          this.learningPathController.confirmSourceClassification(
+            source,
+            classification,
+          ),
+        confirmSourceClassifications: (updates) =>
+          this.learningPathController.confirmSourceClassifications(updates),
         ...(Platform.isMobileApp ? {} : {
           importRemoteVisual: async (visual: DetectedVisual) => {
             try {
@@ -1713,6 +1813,24 @@ export default class PracticeLabPlugin extends Plugin {
         discardInterruptedQuickGeneration: async () => {
           await this.requestDiscardInterruptedGeneration();
         },
+        inspectRecoverableKind: async () =>
+          this.learningPathController.inspectRecoveryKind(),
+        previewSourceAlignment: async (primary, supporting, configuration) =>
+          this.learningPathController.previewSourceAlignment(
+            primary,
+            supporting,
+            configuration,
+          ),
+        generateSourceAlignment: async (onActivity) =>
+          this.learningPathController.generateSourceAlignment(onActivity),
+        approveSourceAlignment: (ledger) =>
+          this.learningPathController.approveSourceAlignment(ledger),
+        continueWithoutCourseAlignment: () =>
+          this.learningPathController.continueWithoutCourseAlignment(),
+        resumeRecoverableSourceAlignment: async (onActivity) =>
+          this.learningPathController.resumeRecoverableSourceAlignmentWorkspace(
+            onActivity,
+          ),
         previewBlueprint: async (primary, supporting, configuration) =>
           this.learningPathController.previewBlueprint(primary, supporting, configuration),
         generateBlueprint: async (primary, supporting, configuration, onActivity) =>
@@ -1741,6 +1859,10 @@ export default class PracticeLabPlugin extends Plugin {
           this.scheduleDashboardRefresh();
           return saved;
         },
+        preflightLearningPath: async (request) =>
+          await this.learningPathController.preflightLearningPath(request),
+        persistReviewSnapshots: async (sets) =>
+          await this.learningPathController.persistReviewSnapshots(sets),
         saveManagedWorkspace: async (workspace) => {
           const saved = await this.repository.saveLearningWorkspace({
             bank: {
@@ -1767,9 +1889,15 @@ export default class PracticeLabPlugin extends Plugin {
             await this.openSavedSetGenerator(workspace.path, current, set);
           },
         }),
+        savedWorkspaceStudyState: (workspace) =>
+          studyCheckpointWorkspaceActionState(
+            this.studyCheckpoint,
+            this.invalidStudyCheckpointRaw !== undefined,
+            workspace.bank,
+          ),
         useSavedWorkspace: async (workspace, action) => {
           if (action === "open-bank") {
-            await this.app.workspace.openLinkText(workspace.path, "", true);
+            await this.openPracticeBank(workspace.path);
           } else if (action === "choose-set") {
             await this.chooseAndStartPracticeSet(workspace.path, workspace.bank);
           } else if (action === "mixed") {
@@ -1826,6 +1954,15 @@ export default class PracticeLabPlugin extends Plugin {
         weekStart: this.settings.dashboardWeekStart,
       },
       load: async () => this.dashboardRepository.load(),
+      recoveryPresentation: () => this.dashboardRecoveryPresentation(),
+      handleRecovery: async (action) => {
+        if (action === "resolve") {
+          await this.requestDiscardStudyCheckpoint();
+        } else {
+          await this.restoreStudyCheckpoint();
+        }
+        this.scheduleDashboardRefresh();
+      },
       startPractice: async (record) => this.startBankStudy(record.bankPath, record.bank),
       continueLearning: async (record) => this.startBankStudy(
         record.bankPath,
@@ -1847,7 +1984,7 @@ export default class PracticeLabPlugin extends Plugin {
         },
       }),
       openBank: async (record) => {
-        await this.app.workspace.openLinkText(record.bankPath, "", true);
+        await this.openPracticeBank(record.bankPath);
       },
       openSource: async (record) => {
         await this.app.workspace.openLinkText(
@@ -1870,9 +2007,27 @@ export default class PracticeLabPlugin extends Plugin {
     };
   }
 
+  private async openPracticeBank(
+    bankPath: string,
+  ): Promise<void> {
+    const normalized = normalizePath(bankPath);
+    const file = this.app.vault.getAbstractFileByPath(normalized);
+    if (!(file instanceof TFile)) {
+      throw new Error(`The saved Practice note is not available on this device: ${normalized}`);
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(
+      file,
+      this.settings.savedBankOpenMode === "reading"
+        ? { active: true, state: { mode: "preview" } }
+        : { active: true },
+    );
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
   private async requestRemovePracticeSession(
     bankPath: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     sessionId: string,
   ): Promise<void> {
     const session = bank.sessions.find((candidate) => candidate.id === sessionId);
@@ -1905,7 +2060,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async requestClearPracticeBankHistory(
     bankPath: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
   ): Promise<void> {
     if (bank.sessions.length === 0) {
       new Notice("This practice bank has no session history to clear.");
@@ -1937,7 +2092,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async requestDeletePracticeBank(
     bankPath: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
   ): Promise<void> {
     const confirmed = await confirmDestructiveAction(this.app, {
       title: `Delete the practice bank for ${bank.source.title}?`,
@@ -2037,15 +2192,27 @@ export default class PracticeLabPlugin extends Plugin {
     }
     const source = this.resolveCollectedSource(presentation);
     const preparedVisuals = await prepareSelectedVisuals(this.app, presentation.visuals);
+    // A Quick set has one source and therefore cannot make a reliable
+    // notes-versus-school comparison. Persist an explicit unverified ledger so
+    // it can never be presented as course-aligned merely because its filename
+    // looks authoritative. Guided paths run the recoverable comparison pass.
+    const sourceAlignment = createUnverifiedSourceAlignmentLedger();
     const prompt = buildGenerationPrompt(
       source,
       configuration,
-      preparedVisuals.map((visual) => visual.source)
+      preparedVisuals.map((visual) => visual.source),
+      sourceAlignment,
     );
     const cli = await import("./cli");
     const filenames = preparedVisuals.map((visual, index) => neutralFilename(index, visual.source.mimeType));
     const exactPayload = cli.appendNeutralMediaManifest(prompt, filenames);
-    this.pendingGeneration = { source, configuration, prompt, preparedVisuals };
+    this.pendingGeneration = {
+      source,
+      configuration,
+      prompt,
+      preparedVisuals,
+      sourceAlignment,
+    };
     const provider = this.providers.find((candidate) => candidate.id === configuration.provider);
     return {
       providerLabel: provider?.label ?? configuration.provider,
@@ -2094,6 +2261,7 @@ export default class PracticeLabPlugin extends Plugin {
           configuration,
           prompt: pending.prompt,
           visuals: pending.preparedVisuals.map((visual) => visual.source),
+          sourceAlignment: pending.sourceAlignment,
         })
       : undefined;
     this.generationRecoveryContext = recoveryContext;
@@ -2110,7 +2278,8 @@ export default class PracticeLabPlugin extends Plugin {
         validate: (value) => validateGeneratedDraft(value, {
           source: pending.source,
           configuration,
-          visualIds: pending.preparedVisuals.map((visual) => visual.source.id)
+          visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+          sourceAlignment: pending.sourceAlignment,
         }),
         ...(configuration.model.length === 0 ? {} : { model: configuration.model }),
         reasoningEffort: configuration.reasoningEffort,
@@ -2141,6 +2310,8 @@ export default class PracticeLabPlugin extends Plugin {
         ?? this.generationRecoveryHandle;
       pending.jobId = generationJobId;
       pending.attempts = result.attempts;
+      if (result.telemetry === undefined) delete pending.telemetry;
+      else pending.telemetry = result.telemetry;
     } catch (error) {
       const code = cliErrorCode(error);
       if (code === "detached") throw error;
@@ -2164,7 +2335,8 @@ export default class PracticeLabPlugin extends Plugin {
     const draft = asGenerationDraft(generatedValue, {
       source: pending.source,
       configuration,
-      visualIds: pending.preparedVisuals.map((visual) => visual.source.id)
+      visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+      sourceAlignment: pending.sourceAlignment,
     });
     pending.draft = draft;
     if (this.generationRecoveryHandle !== undefined) {
@@ -2174,6 +2346,7 @@ export default class PracticeLabPlugin extends Plugin {
         JSON.stringify(createGenerationRecoveryDraft({
           jobId: generationJobId,
           attempts: pending.attempts ?? 1,
+          ...(pending.telemetry === undefined ? {} : { telemetry: pending.telemetry }),
           draft,
         })),
       );
@@ -2214,6 +2387,7 @@ export default class PracticeLabPlugin extends Plugin {
       source: pending.source,
       exercises,
       visuals: pending.preparedVisuals.map((visual) => visual.source),
+      sourceAlignment: pending.sourceAlignment,
       generation: {
         provider: pending.configuration.provider,
         generatedAt,
@@ -2244,6 +2418,10 @@ export default class PracticeLabPlugin extends Plugin {
         },
         selectedVisualCount: pending.preparedVisuals.length,
         attempts: pending.attempts,
+        ...(pending.telemetry === undefined ? {} : { telemetry: pending.telemetry }),
+        aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+          pending.configuration.aiContextCompletionPolicy,
+        ),
       },
     });
     this.activeBank = { path: saved.path, bank: saved.bank };
@@ -2258,7 +2436,7 @@ export default class PracticeLabPlugin extends Plugin {
       }
     }
     new Notice(`Saved ${exercises.length} practice ${exercises.length === 1 ? "problem" : "problems"}.`);
-    await this.app.workspace.openLinkText(saved.path, pending.source.path, true);
+    await this.openPracticeBank(saved.path);
   }
 
   private async startPracticeForCurrentNote(): Promise<void> {
@@ -2339,9 +2517,9 @@ export default class PracticeLabPlugin extends Plugin {
     bank: PracticeBankV2,
     selection: BankStudySelection,
   ): Promise<void> {
-    const currentBank = bank as PracticeBankV3;
+    const currentBank = bank as PracticeBankV4;
     if (
-      currentBank.schemaVersion !== 3
+      currentBank.schemaVersion !== CURRENT_PRACTICE_BANK_SCHEMA_VERSION
       || !Array.isArray(currentBank.practiceSets)
       || !Array.isArray(currentBank.aspects)
       || !Array.isArray(currentBank.tutorLessons)
@@ -2462,6 +2640,10 @@ export default class PracticeLabPlugin extends Plugin {
         selectedExercises,
         (visualId) => visualUrls.get(visualId),
         currentBank.segments,
+        createExerciseAlignmentSnapshots(
+          currentBank,
+          selectedExercises.map((exercise) => exercise.id),
+        ),
       ),
       {
         bankPath: path,
@@ -2475,7 +2657,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async chooseAndStartPracticeSet(
     path: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
   ): Promise<void> {
     const set = await choosePracticeSet(this.app, bank.practiceSets, "practice");
     if (set === null) return;
@@ -2484,7 +2666,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async openSavedLearningPathManager(
     path: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
   ): Promise<void> {
     const view = await this.openLearningPathView();
     view.manageSavedWorkspace(path, bank);
@@ -2534,7 +2716,7 @@ export default class PracticeLabPlugin extends Plugin {
 
   private async openSavedSetGenerator(
     bankPath: string,
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     targetSet: PracticeSetV1,
     options: {
       readonly addingSet?: boolean;
@@ -2565,6 +2747,9 @@ export default class PracticeLabPlugin extends Plugin {
       exerciseTypes: enabledExerciseTypes(basePercentages),
       exerciseTypePercentages: basePercentages,
       selectedVisualIds: bank.visuals.map((visual) => visual.id),
+      aiContextCompletionPolicy: effectiveAiContextCompletionPolicy(
+        bank.aiContextCompletionPolicy,
+      ),
     };
     const configuration = options.addingSet === true
       ? fallback
@@ -2608,14 +2793,14 @@ export default class PracticeLabPlugin extends Plugin {
   }
 
   private learningStudyLaunch(
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     sets: readonly PracticeSetV1[],
     exerciseIds: readonly string[],
     options: {
       readonly mode: "set" | "mixed" | "learning-path";
       readonly activeSetId: string | null;
       readonly pathStepIndex?: number;
-      readonly lesson?: PracticeBankV3["tutorLessons"][number];
+      readonly lesson?: PracticeBankV4["tutorLessons"][number];
     },
   ): LearningStudyLaunchV1 {
     const evidenceByExerciseId = this.learningEvidenceTemplates(
@@ -2703,8 +2888,42 @@ export default class PracticeLabPlugin extends Plugin {
     };
   }
 
+  private dashboardRecoveryPresentation(): DashboardRecoveryPresentation | null {
+    if (this.invalidStudyCheckpointRaw !== undefined) {
+      return {
+        state: "needs-resolution",
+        title: "Resolve the unreadable saved session",
+        description: this.studyCheckpointRecoveryIssue
+          ?? "The device-local practice checkpoint is malformed. Review the warning before explicitly discarding it.",
+        actionLabel: "Resolve saved session…",
+      };
+    }
+    const checkpoint = this.studyCheckpoint;
+    if (checkpoint === undefined) return null;
+    const bank = checkpointBankSnapshot(checkpoint);
+    if (this.studyCheckpointRecoveryIssue !== undefined) {
+      return {
+        state: "needs-resolution",
+        bankId: checkpoint.bankId,
+        title: `Resolve the saved session for ${bank.source.title}`,
+        description: this.studyCheckpointRecoveryIssue,
+        actionLabel: "Resolve saved session…",
+      };
+    }
+    const current = Math.min(
+      checkpoint.currentQuestionIndex + 1,
+      checkpoint.exercises.length,
+    );
+    return {
+      state: "resumable",
+      bankId: checkpoint.bankId,
+      title: `Resume ${bank.source.title}`,
+      description: `Continue at question ${current} of ${checkpoint.exercises.length}. Your exact answer input, skips, and revealed tutor help are preserved on this device.`,
+    };
+  }
+
   private learningEvidenceTemplates(
-    bank: PracticeBankV3,
+    bank: PracticeBankV4,
     sets: readonly PracticeSetV1[],
     exerciseIds: readonly string[],
   ): ReturnType<typeof createSessionExerciseEvidence>[] {
@@ -2805,12 +3024,14 @@ export default class PracticeLabPlugin extends Plugin {
         currentBank,
         extraction,
         savedImport,
+        this.settings.sourceClassificationRules,
       );
     } else {
       restored = await collectRegenerationSource(
         this.app,
         sourceFile,
         currentBank,
+        this.settings.sourceClassificationRules,
       );
     }
     this.lastSource = restored.source;
@@ -2905,6 +3126,7 @@ export default class PracticeLabPlugin extends Plugin {
       quantity: this.settings.quantity,
       difficulty: generationDifficultyFromSetting(this.settings.difficulty),
       exerciseTypePercentages: { ...this.settings.exerciseTypePercentages },
+      aiContextCompletionPolicy: DEFAULT_AI_CONTEXT_COMPLETION_POLICY,
       answerReviewMode: this.settings.answerReviewDefault,
       answerReviewProvider: this.settings.answerReviewProvider,
       answerReviewReasoningEffort: this.settings.answerReviewReasoningEffort,
@@ -3206,7 +3428,16 @@ export default class PracticeLabPlugin extends Plugin {
     if (!source || source.path !== presentation.path || source.mode !== presentation.mode) {
       throw new Error("The active source changed. Load the note or selection again.");
     }
-    return { ...source, visuals: presentation.visuals };
+    return {
+      ...source,
+      visuals: presentation.visuals,
+      ...(presentation.classification === undefined
+        ? {}
+        : { classification: presentation.classification }),
+      ...(presentation.classificationState === undefined
+        ? {}
+        : { classificationState: presentation.classificationState }),
+    };
   }
 
   private async initializeDesktopWork(): Promise<void> {
@@ -3270,7 +3501,12 @@ export default class PracticeLabPlugin extends Plugin {
         await this.resumeLearningPathBatch();
         return;
       }
-      const source = await collectSource(this.app, mode, selection);
+      const source = await collectSource(
+        this.app,
+        mode,
+        selection,
+        this.settings.sourceClassificationRules,
+      );
       const prepared = await this.prepareGuidedSourceVisuals(source);
       this.lastSource = prepared;
       const presentation = this.learningPathController.registerSource(prepared);
@@ -3346,10 +3582,13 @@ export default class PracticeLabPlugin extends Plugin {
         source: pending.source,
         configuration: pending.configuration,
         visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+        sourceAlignment: pending.sourceAlignment,
       });
       pending.draft = draft;
       pending.jobId = context.jobId;
       pending.attempts = checkpoint.attempts;
+      if (checkpoint.telemetry === undefined) delete pending.telemetry;
+      else pending.telemetry = checkpoint.telemetry;
       this.generationRecoveryState = "ready";
       this.generationRecoveryMessage = "Recovered draft ready for review and saving.";
       this.updateInterruptedGenerationViews();
@@ -3372,6 +3611,7 @@ export default class PracticeLabPlugin extends Plugin {
           source: pending.source,
           configuration: pending.configuration,
           visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+          sourceAlignment: pending.sourceAlignment,
         }),
         ...(context.configuration.model.length === 0
           ? {}
@@ -3390,10 +3630,13 @@ export default class PracticeLabPlugin extends Plugin {
         source: pending.source,
         configuration: pending.configuration,
         visualIds: pending.preparedVisuals.map((visual) => visual.source.id),
+        sourceAlignment: pending.sourceAlignment,
       });
       pending.draft = draft;
       pending.jobId = context.jobId;
       pending.attempts = result.attempts;
+      if (result.telemetry === undefined) delete pending.telemetry;
+      else pending.telemetry = result.telemetry;
       this.generationRecoveryHandle = result.recoveryHandle ?? handle;
       await cli.writeDurableRecoveryText(
         this.generationRecoveryHandle,
@@ -3401,6 +3644,7 @@ export default class PracticeLabPlugin extends Plugin {
         JSON.stringify(createGenerationRecoveryDraft({
           jobId: context.jobId,
           attempts: result.attempts,
+          ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
           draft,
         })),
       );
@@ -3484,12 +3728,20 @@ export default class PracticeLabPlugin extends Plugin {
         : { sourceImport: context.source.sourceImport }),
       hash: context.source.hash,
       segments: [...context.source.segments],
+      ...(context.source.classification === undefined
+        ? {}
+        : { classification: context.source.classification }),
+      ...(context.source.classificationState === undefined
+        ? {}
+        : { classificationState: context.source.classificationState }),
     };
     return {
       source,
       configuration: context.configuration,
       prompt: context.prompt,
       preparedVisuals,
+      sourceAlignment: context.sourceAlignment
+        ?? createUnverifiedSourceAlignmentLedger(),
     };
   }
 
@@ -3646,6 +3898,7 @@ export default class PracticeLabPlugin extends Plugin {
       configuration: pending.configuration,
       prompt: pending.prompt,
       preparedVisuals: pending.preparedVisuals,
+      sourceAlignment: pending.sourceAlignment,
     };
 
     this.discardingGenerationRecovery = true;
@@ -4136,7 +4389,7 @@ export default class PracticeLabPlugin extends Plugin {
     return [...paths][0];
   }
 
-  private async loadPracticeBank(bankPath: string): Promise<PracticeBankV3> {
+  private async loadPracticeBank(bankPath: string): Promise<PracticeBankV4> {
     const file = this.app.vault.getAbstractFileByPath(bankPath);
     if (!(file instanceof TFile)) {
       throw new Error("The Practice Problem Generator bank no longer exists.");
@@ -4462,282 +4715,410 @@ export default class PracticeLabPlugin extends Plugin {
     }
   }
 
-  private async renderPracticeBlock(
+  private savedBankLeafHost(element: HTMLElement): Element {
+    return element.closest(".workspace-leaf") ?? element;
+  }
+
+  private savedBankPage(element: HTMLElement, bankId: string): SavedBankPage {
+    return this.savedBankPagesByLeaf
+      .get(this.savedBankLeafHost(element))
+      ?.get(bankId) ?? "practice";
+  }
+
+  private setSavedBankPage(
+    element: HTMLElement,
+    bankId: string,
+    page: SavedBankPage,
+  ): void {
+    const host = this.savedBankLeafHost(element);
+    let pages = this.savedBankPagesByLeaf.get(host);
+    if (pages === undefined) {
+      pages = new Map<string, SavedBankPage>();
+      this.savedBankPagesByLeaf.set(host, pages);
+    }
+    pages.set(bankId, page);
+  }
+
+  private rerenderSavedBankPage(
     source: string,
     element: HTMLElement,
-    context: MarkdownPostProcessorContext
-  ): Promise<void> {
-    element.addClass("practice-lab-bank-card");
-    const parsed = parsePracticeBankMarkdown(`\`\`\`practice-lab\n${source}\n\`\`\`\n`);
-    if (parsed.status !== "ok") {
-      this.renderReadOnlyBlock(element, parseFailure(parsed).message, source);
-      return;
-    }
-    const bank = parsed.bank;
-    const heading = element.createDiv({ cls: "practice-lab-bank-heading" });
-    heading.createEl("strong", { text: `${bank.exercises.length} practice problems` });
-    heading.createSpan({ text: `${bank.sessions.length} completed ${bank.sessions.length === 1 ? "session" : "sessions"}` });
-    element.createEl("p", { text: `Source: ${bank.source.title}` });
-    if (parsed.storedSchemaVersion === 1) {
-      element.createEl("p", {
-        cls: "practice-lab-bank-migration-note",
-        text: "Legacy bank loaded safely. It will migrate to the current format on the next Practice Problem Generator save.",
+    context: MarkdownPostProcessorContext,
+    bankId: string,
+    page: SavedBankPage,
+  ): void {
+    this.setSavedBankPage(element, bankId, page);
+    element.empty();
+    void this.renderPracticeBlock(source, element, context)
+      .then(() => {
+        element.querySelector<HTMLButtonElement>(
+          `[data-practice-lab-tab-id="${page}"]`,
+        )?.focus();
+      })
+      .catch((error: unknown) => {
+        console.error("Practice Problem Generator could not rerender a saved bank.", error);
+        element.empty();
+        this.renderReadOnlyBlock(
+          element,
+          `The interactive bank renderer failed safely: ${error instanceof Error ? error.message : String(error)}. The Markdown file remains available.`,
+          source,
+        );
       });
-    }
+  }
+
+  private async loadSavedBankRenderMetadata(
+    context: MarkdownPostProcessorContext,
+    bank: PracticeBankV4,
+  ): Promise<SavedBankRenderMetadata> {
     let generationHistory: GenerationHistoryV1 | undefined;
     let generationHistoryWarning: string | undefined;
     let pdfSourceDetail: string | undefined;
     let pdfSourceWarning: string | undefined;
     let pdfSourceHistory: readonly string[] = [];
     const bankFile = this.app.vault.getAbstractFileByPath(context.sourcePath);
-    if (bankFile instanceof TFile) {
-      try {
-        const bankMarkdown = await this.app.vault.cachedRead(bankFile);
-        const historyResult = parseGenerationHistoryMarkdown(bankMarkdown);
-        if (historyResult.status === "ok") {
-          generationHistory = historyResult.history;
-        } else if (historyResult.status === "invalid") {
-          generationHistoryWarning = historyResult.message;
-        }
-        if (/\.pdf$/iu.test(bank.source.vaultPath)) {
-          const sourceImport = parseSourceImportMarkdown(bankMarkdown);
-          if (sourceImport.status === "ok") {
-            const value = sourceImport.sourceImport;
-            const range = value.firstPage === value.lastPage
-              ? `page ${value.firstPage}`
-              : `pages ${value.firstPage}–${value.lastPage}`;
-            pdfSourceDetail = `PDF ${range} of ${value.pageCount} · extracted locally ${new Date(value.extractedAt).toLocaleString()}`;
-            pdfSourceHistory = value.revisions.map((revision) => {
-              const revisionRange = revision.firstPage === revision.lastPage
-                ? `page ${revision.firstPage}`
-                : `pages ${revision.firstPage}–${revision.lastPage}`;
-              return `Revision ${revision.bankRevision} · ${revisionRange} of ${revision.pageCount} · ${new Date(revision.extractedAt).toLocaleString()} · ${revision.generationId}`;
-            });
-          } else {
-            pdfSourceWarning = sourceImport.status === "missing"
-              ? "PDF page-range provenance is missing; regeneration is unavailable."
-              : sourceImport.message;
-          }
-        }
-      } catch (error) {
-        generationHistoryWarning = error instanceof Error
-          ? `Practice Problem Generator could not read the generation ledger: ${error.message}`
-          : "Practice Problem Generator could not read the generation ledger.";
+    if (!(bankFile instanceof TFile)) return { pdfSourceHistory };
+    try {
+      const bankMarkdown = await this.app.vault.cachedRead(bankFile);
+      const historyResult = parseGenerationHistoryMarkdown(bankMarkdown);
+      if (historyResult.status === "ok") {
+        generationHistory = historyResult.history;
+      } else if (historyResult.status === "invalid") {
+        generationHistoryWarning = historyResult.message;
       }
+      if (/\.pdf$/iu.test(bank.source.vaultPath)) {
+        const sourceImport = parseSourceImportMarkdown(bankMarkdown);
+        if (sourceImport.status === "ok") {
+          const value = sourceImport.sourceImport;
+          const range = value.firstPage === value.lastPage
+            ? `page ${value.firstPage}`
+            : `pages ${value.firstPage}–${value.lastPage}`;
+          pdfSourceDetail = `PDF ${range} of ${value.pageCount} · extracted locally ${new Date(value.extractedAt).toLocaleString()}`;
+          pdfSourceHistory = value.revisions.map((revision) => {
+            const revisionRange = revision.firstPage === revision.lastPage
+              ? `page ${revision.firstPage}`
+              : `pages ${revision.firstPage}–${revision.lastPage}`;
+            return `Revision ${revision.bankRevision} · ${revisionRange} of ${revision.pageCount} · ${new Date(revision.extractedAt).toLocaleString()} · ${revision.generationId}`;
+          });
+        } else {
+          pdfSourceWarning = sourceImport.status === "missing"
+            ? "PDF page-range provenance is missing; regeneration is unavailable."
+            : sourceImport.message;
+        }
+      }
+    } catch (error) {
+      generationHistoryWarning = error instanceof Error
+        ? `Practice Problem Generator could not read the generation ledger: ${error.message}`
+        : "Practice Problem Generator could not read the generation ledger.";
     }
-    if (pdfSourceDetail !== undefined) {
-      element.createEl("p", {
-        cls: "practice-lab-bank-source-detail",
-        text: pdfSourceDetail,
-      });
-    }
-    if (pdfSourceWarning !== undefined) {
-      element.createEl("p", {
-        cls: "practice-lab-bank-warning",
-        text: pdfSourceWarning,
-      });
-    }
-    if (
-      this.settings.display.bank.showGenerationHistory
-      && pdfSourceHistory.length > 0
-    ) {
-      const details = element.createEl("details", {
-        cls: "practice-lab-pdf-source-history",
-      });
-      details.createEl("summary", {
-        text: `PDF source history (${pdfSourceHistory.length})`,
-      });
-      const list = details.createEl("ol");
-      for (const entry of pdfSourceHistory) list.createEl("li", { text: entry });
-    }
-    const generationHistoryOptions = {
+    return {
       ...(generationHistory === undefined ? {} : { generationHistory }),
-      ...(generationHistoryWarning === undefined
-        ? {}
-        : { generationHistoryWarning }),
+      ...(generationHistoryWarning === undefined ? {} : { generationHistoryWarning }),
+      ...(pdfSourceDetail === undefined ? {} : { pdfSourceDetail }),
+      ...(pdfSourceWarning === undefined ? {} : { pdfSourceWarning }),
+      pdfSourceHistory,
     };
+  }
+
+  private async renderPracticeBlock(
+    source: string,
+    element: HTMLElement,
+    context: MarkdownPostProcessorContext,
+  ): Promise<void> {
+    element.addClass("practice-lab-bank-card", "practice-lab-saved-bank-shell");
+    applyMarkdownHeadingTheme(element);
+    const parsed = parsePracticeBankMarkdown(`\`\`\`practice-lab\n${source}\n\`\`\`\n`);
+    if (parsed.status !== "ok") {
+      this.renderReadOnlyBlock(element, parseFailure(parsed).message, source);
+      return;
+    }
+    const bank = parsed.bank;
+    const page = this.savedBankPage(element, bank.bankId);
+    const metadata = page === "practice"
+      ? { pdfSourceHistory: [] } satisfies SavedBankRenderMetadata
+      : await this.loadSavedBankRenderMetadata(context, bank);
+    const header = element.createEl("header", {
+      cls: "practice-lab-saved-bank-header",
+    });
+    const title = header.createDiv({ cls: "practice-lab-saved-bank-title" });
+    title.createEl("strong", { text: bank.source.title });
+    title.createSpan({
+      cls: "practice-lab-saved-bank-kind",
+      text: bank.learningPath === null ? "Quick practice" : "Guided path",
+    });
+    const summary = header.createDiv({ cls: "practice-lab-saved-bank-summary" });
+    summary.createSpan({
+      text: `${bank.exercises.length} ${bank.exercises.length === 1 ? "question" : "questions"}`,
+    });
+    summary.createSpan({
+      text: `${bank.sessions.length} completed ${bank.sessions.length === 1 ? "session" : "sessions"}`,
+    });
+    summary.createSpan({
+      cls: `practice-lab-alignment-health ${alignmentHealthClass(bank)}`,
+      text: alignmentHealthLabel(bank),
+      attr: {
+        title: alignmentHealthSummary(bank),
+        "aria-label": alignmentHealthSummary(bank),
+      },
+    });
+    if (parsed.storedSchemaVersion === 1) {
+      header.createEl("p", {
+        cls: "practice-lab-bank-migration-note",
+        text: "Legacy bank loaded safely. It will migrate on the next authorized save.",
+      });
+    }
+    renderHorizontalTabs<SavedBankPage>(element, {
+      selected: page,
+      ariaLabel: "Saved practice workspace",
+      className: "practice-lab-saved-bank-tabs",
+      tabs: [
+        { id: "practice", label: "Practice" },
+        { id: "progress", label: "Progress" },
+        { id: "manage", label: "Manage" },
+      ],
+      onSelect: (selected) => {
+        this.rerenderSavedBankPage(
+          source,
+          element,
+          context,
+          bank.bankId,
+          selected,
+        );
+      },
+      renderPanel: (panel, selected) => {
+        if (selected === "practice") {
+          this.renderSavedBankPracticePage(panel, context.sourcePath, bank);
+        } else if (selected === "progress") {
+          this.renderSavedBankProgressPage(panel, context.sourcePath, bank, metadata);
+        } else {
+          this.renderSavedBankManagePage(
+            panel,
+            source,
+            context.sourcePath,
+            bank,
+            metadata,
+          );
+        }
+      },
+    });
+  }
+
+  private renderSavedBankPracticePage(
+    panel: HTMLElement,
+    bankPath: string,
+    bank: PracticeBankV4,
+  ): void {
+    panel.addClass("practice-lab-saved-bank-practice");
     const savedSession = this.studyCheckpoint;
     const hasUnreadableSession = this.invalidStudyCheckpointRaw !== undefined;
     const savedSessionMatchesBank = savedSession?.bankId === bank.bankId;
-    if (savedSession !== undefined || hasUnreadableSession) {
-      element.createEl("p", {
-        cls: "practice-lab-bank-warning practice-lab-study-recovery-status",
-        text: savedSessionMatchesBank && savedSession !== undefined
-          ? `Saved practice ready at question ${Math.min(savedSession.currentQuestionIndex + 1, savedSession.exercises.length)} of ${savedSession.exercises.length}. Selecting a practice action resumes it.`
-          : "Another saved session must be resolved before this practice can start. Selecting a practice action opens one safe resolution step.",
-        attr: { role: "status" },
-      });
-    }
-    const recoveryActionLabel = savedSessionMatchesBank
-      ? "Resume saved practice"
-      : savedSession !== undefined || hasUnreadableSession
-        ? "Resolve saved session…"
-        : undefined;
-    const launcher = element.createEl("section", {
-      cls: "practice-lab-bank-launcher",
-      attr: { "aria-label": "Start studying" },
-    });
-    const launcherHeading = launcher.createDiv({ cls: "practice-lab-bank-launcher-heading" });
-    launcherHeading.createEl("h3", { text: "Start studying" });
-    launcherHeading.createEl("p", {
-      text: bank.learningPath === null
-        ? `This bank contains ${bank.exercises.length} ${bank.exercises.length === 1 ? "question" : "questions"}. Choose a session below; the saved bank is never reordered.`
-        : "Follow the guided route one clear step at a time, or deliberately choose a different practice scope.",
-    });
-
     let recommendation: ReturnType<typeof recommendNextLearningStep> = null;
     if (bank.learningPath !== null) {
-      recommendation = recommendNextLearningStep(
-        bank,
-        deriveLearningAnalytics(bank),
-      );
-      const overview = launcher.createDiv({ cls: "practice-lab-bank-path-overview" });
-      overview.createSpan({
-        text: `${bank.learningPath.steps.length} path ${bank.learningPath.steps.length === 1 ? "step" : "steps"}`,
-      });
-      overview.createSpan({
-        text: `${bank.tutorLessons.length} tutor ${bank.tutorLessons.length === 1 ? "lesson" : "lessons"}`,
-      });
-      overview.createSpan({
-        text: `${bank.practiceSets.length} named ${bank.practiceSets.length === 1 ? "set" : "sets"}`,
-      });
-      overview.createSpan({
-        text: `${bank.exercises.length} total ${bank.exercises.length === 1 ? "question" : "questions"}`,
-      });
-      if (recommendation === null) {
-        launcher.createEl("p", {
-          cls: "practice-lab-bank-next-step is-complete",
-          text: "Guided objectives currently have consistent evidence. You can still choose a set or start mixed review whenever useful.",
-          attr: { role: "status" },
-        });
-      } else {
-        const nextRecommendation = recommendation;
-        const steps = [...bank.learningPath.steps]
-          .sort((left, right) => left.order - right.order);
-        const stepIndex = steps.findIndex((step) => (
-          nextRecommendation.kind === "lesson"
-            ? step.kind === "lesson" && step.lessonId === nextRecommendation.id
-            : step.kind === "practice-set" && step.setId === nextRecommendation.id
-        ));
-        const nextSet = nextRecommendation.kind === "practice-set"
-          ? bank.practiceSets.find((set) => set.id === nextRecommendation.id)
-          : undefined;
-        const nextCount = nextRecommendation.kind === "lesson"
-          ? 1
-          : nextSet?.assignments.length ?? 0;
-        launcher.createEl("p", {
-          cls: "practice-lab-bank-next-step",
-          text: `Recommended next · Step ${Math.max(0, stepIndex) + 1} of ${steps.length} · ${nextRecommendation.kind === "lesson" ? "Tutor lesson" : "Practice set"}: ${nextRecommendation.title} · ${nextCount} ${nextCount === 1 ? "question" : "questions"}. Finishing this step does not end the path; you can continue directly afterward.`,
-          attr: { role: "status" },
-        });
-      }
+      recommendation = recommendNextLearningStep(bank, deriveLearningAnalytics(bank));
     }
-
-    const actions = launcher.createDiv({ cls: "practice-lab-bank-actions" });
-    const addStudyAction = (
+    const next = panel.createEl("section", {
+      cls: "practice-lab-saved-bank-next-action",
+      attr: { "aria-label": "Next practice action" },
+    });
+    if (savedSessionMatchesBank && savedSession !== undefined) {
+      next.createEl("h3", { text: "Resume where you stopped" });
+      next.createEl("p", {
+        text: `Question ${Math.min(savedSession.currentQuestionIndex + 1, savedSession.exercises.length)} of ${savedSession.exercises.length}. Your exact input, revealed tutor help, skips, and answer state are saved on this device.`,
+      });
+    } else if (savedSession !== undefined || hasUnreadableSession) {
+      next.createEl("h3", { text: "Resolve the saved session" });
+      next.createEl("p", {
+        text: "Another saved session must be resolved before starting this bank. Nothing is discarded without explicit confirmation.",
+      });
+    } else if (bank.learningPath !== null && recommendation !== null) {
+      const steps = [...bank.learningPath.steps].sort((left, right) => left.order - right.order);
+      const stepIndex = steps.findIndex((step) => (
+        recommendation?.kind === "lesson"
+          ? step.kind === "lesson" && step.lessonId === recommendation.id
+          : step.kind === "practice-set" && step.setId === recommendation?.id
+      ));
+      next.createEl("h3", { text: recommendation.title });
+      next.createEl("p", {
+        text: `Recommended next · Step ${Math.max(0, stepIndex) + 1} of ${steps.length}. ${recommendation.reasons.join(" ")}`,
+      });
+    } else if (bank.learningPath !== null) {
+      next.createEl("h3", { text: "Keep the knowledge connected" });
+      next.createEl("p", {
+        text: "Your guided objectives currently have consistent evidence. A mixed review keeps every set freely accessible without adding a schedule.",
+      });
+    } else {
+      next.createEl("h3", { text: "Practice this source" });
+      next.createEl("p", {
+        text: `Work through ${bank.exercises.length} source-grounded ${bank.exercises.length === 1 ? "question" : "questions"}. You can choose the order before the run begins.`,
+      });
+    }
+    next.createEl("p", {
+      cls: `practice-lab-alignment-health ${alignmentHealthClass(bank)}`,
+      text: alignmentHealthSummary(bank),
+      attr: { role: "status" },
+    });
+    const primaryLabel = savedSessionMatchesBank
+      ? "Resume session"
+      : savedSession !== undefined || hasUnreadableSession
+        ? "Resolve saved session…"
+        : bank.learningPath !== null
+          ? recommendation === null ? "Start mixed review" : "Continue learning"
+          : "Start practice";
+    const primary = next.createEl("button", {
+      cls: "mod-cta practice-lab-saved-bank-primary-action",
+      text: primaryLabel,
+      attr: { type: "button" },
+    });
+    primary.addEventListener("click", () => {
+      const selection: BankStudySelection = bank.learningPath === null
+        ? { kind: "quick" }
+        : { kind: "recommended" };
+      void this.startBankStudy(bankPath, bank, selection);
+    });
+    if (savedSession !== undefined || hasUnreadableSession) return;
+    if (bank.learningPath === null) return;
+    const alternatives = panel.createEl("details", {
+      cls: "practice-lab-bank-secondary-actions",
+    });
+    alternatives.createEl("summary", { text: "Choose another session…" });
+    const alternateActions = alternatives.createDiv({
+      cls: "practice-lab-bank-tools-body",
+    });
+    const addAlternate = (
       label: string,
       description: string,
-      title: string,
-      primary: boolean,
-      onClick: () => void,
+      action: () => void,
     ): void => {
-      const card = actions.createEl("article", { cls: "practice-lab-bank-action" });
-      const button = card.createEl("button", {
+      const row = alternateActions.createDiv({ cls: "practice-lab-bank-alternate-action" });
+      const button = row.createEl("button", {
         text: label,
-        ...(primary ? { cls: "mod-cta" } : {}),
-        attr: { type: "button", title },
+        attr: { type: "button", title: description },
       });
-      button.addEventListener("click", onClick);
-      card.createEl("p", { text: description });
+      button.addEventListener("click", action);
+      row.createSpan({ text: description });
     };
+    addAlternate(
+      "Choose a set",
+      "Pick one named set and choose its question order.",
+      () => { void this.chooseAndStartPracticeSet(bankPath, bank); },
+    );
+    addAlternate(
+      "Mixed practice",
+      "Combine every named set while retaining set and aspect evidence.",
+      () => { void this.startBankStudy(bankPath, bank, { kind: "mixed" }); },
+    );
+    addAlternate(
+      "Free practice",
+      "Use every saved question without tutor sequencing.",
+      () => { void this.startBankStudy(bankPath, bank); },
+    );
+  }
 
-    if (recoveryActionLabel !== undefined) {
-      addStudyAction(
-        recoveryActionLabel,
-        savedSessionMatchesBank
-          ? "Resume the exact device-local question, typed input, tutor reveals, skips, and answer state. Finish or discard it before choosing another scope."
-          : "Review the unavailable saved session and explicitly keep or discard it before starting another bank.",
-        savedSessionMatchesBank
-          ? "Resume the exact device-local session and its current input."
-          : "Safely resolve the unavailable saved session before starting another.",
-        true,
-        () => {
-          void this.startBankStudy(
-            context.sourcePath,
-            bank,
-            bank.learningPath === null ? { kind: "quick" } : { kind: "recommended" },
-          );
-        },
-      );
-    } else if (bank.learningPath !== null) {
-      addStudyAction(
-        recommendation === null ? "Start mixed review" : "Continue guided path",
-        recommendation === null
-          ? `Practice all ${bank.exercises.length} questions from the named sets now that the guided objectives have consistent evidence.`
-          : "Start only the recommended step shown above. Tutor steps contain one guided problem; after saving, Continue path opens the next step.",
-        recommendation === null
-          ? "Start a mixed review across every named set."
-          : "Start the locally recommended tutor lesson or practice set, then continue step by step.",
-        true,
-        () => {
-          void this.startBankStudy(context.sourcePath, bank, { kind: "recommended" });
-        },
-      );
-      const setCounts = bank.practiceSets.map((set) => set.assignments.length);
-      const setRange = setCounts.length === 0
-        ? "no generated questions"
-        : Math.min(...setCounts) === Math.max(...setCounts)
-          ? `${setCounts[0] ?? 0} questions each`
-          : `${Math.min(...setCounts)}–${Math.max(...setCounts)} questions per set`;
-      addStudyAction(
-        "Choose a set",
-        `Pick one of ${bank.practiceSets.length} named ${bank.practiceSets.length === 1 ? "set" : "sets"} (${setRange}) without progression locks.`,
-        "Choose one named practice set and configure its question order.",
-        false,
-        () => { void this.chooseAndStartPracticeSet(context.sourcePath, bank); },
-      );
-      addStudyAction(
-        "Mixed practice",
-        `Combine all ${bank.exercises.length} questions from every named set while preserving set and aspect evidence. Tutor lessons are not replayed.`,
-        "Practice every named set together with your chosen study-order option.",
-        false,
-        () => { void this.startBankStudy(context.sourcePath, bank, { kind: "mixed" }); },
-      );
-      addStudyAction(
-        "Free practice",
-        `Run all ${bank.exercises.length} saved questions without tutor sequencing or learning-path guidance.`,
-        "Start a freely accessible run across all saved exercises without path guidance.",
-        false,
-        () => { void this.startBankStudy(context.sourcePath, bank); },
-      );
-    } else {
-      addStudyAction(
-        "Start practice",
-        `Practice all ${bank.exercises.length} saved ${bank.exercises.length === 1 ? "question" : "questions"} using the session order you choose next.`,
-        "Start a practice run across all saved exercises.",
-        true,
-        () => { void this.startBankStudy(context.sourcePath, bank); },
-      );
-    }
+  private renderSavedBankProgressPage(
+    panel: HTMLElement,
+    bankPath: string,
+    bank: PracticeBankV4,
+    metadata: SavedBankRenderMetadata,
+  ): void {
+    panel.addClass("practice-lab-saved-bank-progress");
+    const heading = panel.createDiv({ cls: "practice-lab-saved-bank-panel-heading" });
+    heading.createEl("h3", { text: "Your progress" });
+    heading.createEl("p", {
+      text: bank.learningPath === null
+        ? "Completed independent practice is summarized first. Open only the detail you need."
+        : `${bank.learningPath.steps.length} guided steps · ${bank.practiceSets.length} sets · ${bank.tutorLessons.length} tutor lessons. Guided help remains separate from independent performance.`,
+    });
+    const dashboard = heading.createEl("button", {
+      text: "Open full dashboard",
+      attr: {
+        type: "button",
+        title: "Open cross-bank performance, learning evidence, and activity.",
+      },
+    });
+    dashboard.addEventListener("click", () => {
+      void this.openDashboard({ kind: "source", path: bank.source.vaultPath });
+    });
+    renderBankStatistics(panel, bank, Platform.isMobileApp ? {
+      visibility: this.settings.display.bank,
+      compactOverview: true,
+      sessionPageSize: 5,
+      ...(metadata.generationHistory === undefined
+        ? {}
+        : { generationHistory: metadata.generationHistory }),
+      ...(metadata.generationHistoryWarning === undefined
+        ? {}
+        : { generationHistoryWarning: metadata.generationHistoryWarning }),
+      removeSession: async (sessionId) => {
+        await this.requestRemovePracticeSession(bankPath, bank, sessionId);
+      },
+    } : {
+      visibility: this.settings.display.bank,
+      compactOverview: true,
+      sessionPageSize: 5,
+      ...(metadata.generationHistory === undefined
+        ? {}
+        : { generationHistory: metadata.generationHistory }),
+      ...(metadata.generationHistoryWarning === undefined
+        ? {}
+        : { generationHistoryWarning: metadata.generationHistoryWarning }),
+      retryAnswerReview: async (target) => {
+        await this.retryPersistedAnswerReview(bankPath, target);
+      },
+      pauseAnswerReview: (requestId) => {
+        this.pauseAnswerReview(requestId);
+      },
+      removeSession: async (sessionId) => {
+        await this.requestRemovePracticeSession(bankPath, bank, sessionId);
+      },
+    });
+  }
 
-    const tools = launcher.createDiv({ cls: "practice-lab-bank-tools" });
-    tools.createEl("h4", { text: "Manage and review" });
-    const toolActions = tools.createDiv();
-    if (!Platform.isMobileApp && bank.learningPath === null) {
-      const regenerate = toolActions.createEl("button", {
+  private renderSavedBankManagePage(
+    panel: HTMLElement,
+    rawBankJson: string,
+    bankPath: string,
+    bank: PracticeBankV4,
+    metadata: SavedBankRenderMetadata,
+  ): void {
+    panel.addClass("practice-lab-saved-bank-manage");
+    const heading = panel.createDiv({ cls: "practice-lab-saved-bank-panel-heading" });
+    heading.createEl("h3", { text: "Manage this practice" });
+    heading.createEl("p", {
+      text: "Source, generation, and data controls stay separate from everyday practice.",
+    });
+    const commonActions = panel.createDiv({ cls: "practice-lab-bank-tools-body" });
+    const openSource = commonActions.createEl("button", {
+      text: "Open source",
+      attr: { type: "button", title: "Open the primary note or PDF used by this bank." },
+    });
+    openSource.addEventListener("click", () => {
+      void this.app.workspace.openLinkText(bank.source.vaultPath, bankPath, true);
+    });
+    const dashboard = commonActions.createEl("button", {
+      text: "View dashboard",
+      attr: { type: "button", title: "Open this source in the full practice dashboard." },
+    });
+    dashboard.addEventListener("click", () => {
+      void this.openDashboard({ kind: "source", path: bank.source.vaultPath });
+    });
+    if (Platform.isMobileApp) {
+      panel.createEl("p", {
+        cls: "practice-lab-bank-migration-note",
+        text: "Generation and path editing require desktop. Studying, recovery, statistics, and saved data remain available on this device.",
+      });
+    } else if (bank.learningPath === null) {
+      const regenerate = commonActions.createEl("button", {
         text: "Regenerate / tweak",
         attr: {
           type: "button",
-          title: "Open configuration with this bank's previous generation settings loaded.",
+          title: "Open creation with this bank's previous generation settings loaded.",
         },
       });
       regenerate.addEventListener("click", () => {
-        void this.regenerateBank(context.sourcePath, bank).catch((error: unknown) => {
+        void this.regenerateBank(bankPath, bank).catch((error: unknown) => {
           this.showError(error);
         });
       });
-    } else if (!Platform.isMobileApp && bank.learningPath !== null) {
-      const manage = toolActions.createEl("button", {
+    } else {
+      const manage = commonActions.createEl("button", {
         text: "Manage path",
         attr: {
           type: "button",
@@ -4745,46 +5126,84 @@ export default class PracticeLabPlugin extends Plugin {
         },
       });
       manage.addEventListener("click", () => {
-        void this.openSavedLearningPathManager(context.sourcePath, bank);
+        void this.openSavedLearningPathManager(bankPath, bank);
       });
     }
-    const dashboard = toolActions.createEl("button", {
-      text: "View dashboard",
+    if (metadata.pdfSourceWarning !== undefined) {
+      panel.createEl("p", {
+        cls: "practice-lab-bank-warning",
+        text: metadata.pdfSourceWarning,
+        attr: { role: "alert" },
+      });
+    }
+    const sourceDetails = panel.createEl("details", {
+      cls: "practice-lab-saved-bank-source-details",
+    });
+    sourceDetails.createEl("summary", { text: "Source details" });
+    sourceDetails.createEl("p", {
+      text: `Primary source: ${bank.source.title} · ${bank.source.scope}`,
+    });
+    if (metadata.pdfSourceDetail !== undefined) {
+      sourceDetails.createEl("p", { text: metadata.pdfSourceDetail });
+    }
+    const sourceList = sourceDetails.createEl("ul");
+    for (const material of bank.sourceMaterials) {
+      sourceList.createEl("li", {
+        text: `${material.role === "primary" ? "Primary" : "Supporting"} · ${material.title} · ${sourceClassificationLabel(material.classification)} · ${sourceMaterialScopeLabel(material.scope)}`,
+      });
+    }
+    sourceDetails.createEl("p", {
+      cls: `practice-lab-alignment-health ${alignmentHealthClass(bank)}`,
+      text: alignmentHealthSummary(bank),
+    });
+    if (metadata.pdfSourceHistory.length > 0) {
+      const revisions = sourceDetails.createEl("details", {
+        cls: "practice-lab-pdf-source-history",
+      });
+      revisions.createEl("summary", {
+        text: `PDF source history (${metadata.pdfSourceHistory.length})`,
+      });
+      const list = revisions.createEl("ol");
+      for (const entry of metadata.pdfSourceHistory) list.createEl("li", { text: entry });
+    }
+    const technical = panel.createEl("details", {
+      cls: "practice-lab-saved-bank-technical-details",
+    });
+    technical.createEl("summary", { text: "Technical details" });
+    technical.createEl("p", {
+      text: `Bank ${bank.bankId} · Schema ${bank.schemaVersion} · Revision ${bank.revision} · Updated ${new Date(bank.updatedAt).toLocaleString()}`,
+    });
+    const showRaw = technical.createEl("button", {
+      text: "Show raw bank data",
       attr: {
         type: "button",
-        title: "Open this source's performance, activity, and learning-evidence dashboard.",
+        title: "Reveal the portable JSON stored in this bank's practice-lab fenced block.",
+        "aria-expanded": "false",
       },
     });
-    dashboard.addEventListener("click", () => {
-      void this.openDashboard({ kind: "source", path: bank.source.vaultPath });
+    showRaw.addEventListener("click", () => {
+      const existing = technical.querySelector<HTMLElement>(".practice-lab-raw-bank-data");
+      if (existing !== null) {
+        existing.remove();
+        showRaw.setText("Show raw bank data");
+        showRaw.setAttribute("aria-expanded", "false");
+        return;
+      }
+      technical.createEl("pre", {
+        cls: "practice-lab-raw-bank-data",
+        text: rawBankJson,
+      });
+      showRaw.setText("Hide raw bank data");
+      showRaw.setAttribute("aria-expanded", "true");
     });
-    renderBankStatistics(element, bank, Platform.isMobileApp ? {
-      visibility: this.settings.display.bank,
-      ...generationHistoryOptions,
-      removeSession: async (sessionId) => {
-        await this.requestRemovePracticeSession(context.sourcePath, bank, sessionId);
-      },
-    } : {
-      visibility: this.settings.display.bank,
-      ...generationHistoryOptions,
-      retryAnswerReview: async (target) => {
-        await this.retryPersistedAnswerReview(context.sourcePath, target);
-      },
-      pauseAnswerReview: (requestId) => {
-        this.pauseAnswerReview(requestId);
-      },
-      removeSession: async (sessionId) => {
-        await this.requestRemovePracticeSession(context.sourcePath, bank, sessionId);
-      },
+    const danger = panel.createEl("details", {
+      cls: "practice-lab-bank-data-actions practice-lab-danger-zone",
     });
-    const dataActions = element.createEl("details", {
-      cls: "practice-lab-bank-data-actions",
+    danger.createEl("summary", { text: "Danger zone" });
+    danger.createEl("p", {
+      text: "These actions always show a detailed warning and require a typed confirmation.",
     });
-    dataActions.createEl("summary", { text: "Manage bank data" });
-    dataActions.createEl("p", {
-      text: "These actions always open a detailed warning and require a typed confirmation.",
-    });
-    const dataButtons = dataActions.createDiv({ cls: "practice-lab-destructive-actions" });
+    const dataButtons = danger.createDiv({ cls: "practice-lab-destructive-actions" });
     const clearHistory = dataButtons.createEl("button", {
       text: "Clear bank history…",
       cls: "mod-warning",
@@ -4792,7 +5211,7 @@ export default class PracticeLabPlugin extends Plugin {
     });
     clearHistory.disabled = bank.sessions.length === 0;
     clearHistory.addEventListener("click", () => {
-      void this.requestClearPracticeBankHistory(context.sourcePath, bank).catch((error: unknown) => {
+      void this.requestClearPracticeBankHistory(bankPath, bank).catch((error: unknown) => {
         this.showError(error);
       });
     });
@@ -4802,17 +5221,10 @@ export default class PracticeLabPlugin extends Plugin {
       attr: { type: "button" },
     });
     deleteBank.addEventListener("click", () => {
-      void this.requestDeletePracticeBank(context.sourcePath, bank).catch((error: unknown) => {
+      void this.requestDeletePracticeBank(bankPath, bank).catch((error: unknown) => {
         this.showError(error);
       });
     });
-    if (this.settings.display.bank.showBankMetadata) {
-      const details = element.createEl("details");
-      details.createEl("summary", { text: "Bank details" });
-      details.createEl("p", {
-        text: `Revision ${bank.revision} · Updated ${new Date(bank.updatedAt).toLocaleString()} · ${/\.pdf$/iu.test(bank.source.vaultPath) ? "PDF page-range" : bank.source.scope} source`
-      });
-    }
   }
 
   private renderReadOnlyBlock(element: HTMLElement, message: string, source: string): void {
@@ -4965,6 +5377,108 @@ function recoveredDetectedVisual(
   };
 }
 
+function alignmentHealthSummary(bank: PracticeBankV4): string {
+  const records = bank.sourceAlignment.records.filter((record) => (
+    record.resolution !== "excluded"
+  ));
+  if (records.length === 0) {
+    return effectiveAiContextCompletionPolicy(bank.aiContextCompletionPolicy)
+      === "approved-general-context"
+      ? "AI-supported context approved · not course-checked. No confirmed school comparison is available for this workspace."
+      : "Selected material · not course-checked. Add and confirm school material in a guided path when you want a course comparison.";
+  }
+  const schoolDisagreements = sourceAlignmentBlockers(bank.sourceAlignment).length;
+  if (schoolDisagreements > 0) {
+    return `School sources disagree in ${schoolDisagreements} ${schoolDisagreements === 1 ? "claim" : "claims"}. Those disputed topics cannot ground practice until you resolve or exclude them; other evidence areas remain available.`;
+  }
+  const manualOverrides = records.filter((record) => record.resolution === "manual-override").length;
+  if (manualOverrides > 0) {
+    return `${manualOverrides} manual alignment ${manualOverrides === 1 ? "override" : "overrides"}. This workspace is source-grounded but is not labelled course-aligned.`;
+  }
+  const differences = records.filter((record) => record.status === "conflict").length;
+  const incomplete = records.filter((record) => record.status === "notes-incomplete").length;
+  const supplemental = records.filter((record) => (
+    record.status === "notes-only-unverified"
+    || record.status === "insufficient-evidence"
+  )).length;
+  if (differences > 0 || incomplete > 0 || supplemental > 0) {
+    const parts = [
+      differences === 0 ? null : `${differences} note-school ${differences === 1 ? "difference" : "differences"}`,
+      incomplete === 0 ? null : `${incomplete} school-backed context ${incomplete === 1 ? "addition" : "additions"}`,
+      supplemental === 0 ? null : effectiveAiContextCompletionPolicy(
+        bank.aiContextCompletionPolicy,
+      ) === "approved-general-context"
+        ? `${supplemental} AI-supported ${supplemental === 1 ? "area" : "areas"} not course-checked`
+        : `${supplemental} ${supplemental === 1 ? "area uses" : "areas use"} selected material only`,
+    ].filter((entry): entry is string => entry !== null);
+    return `Source-led course check · ${parts.join(" · ")}. School-supported interpretations take priority; any approved AI-supported context is disclosed after each answer and never changes scores.`;
+  }
+  return "Course alignment checked. Comparisons stay hidden until after each answer and never affect scores.";
+}
+
+function alignmentHealthLabel(bank: PracticeBankV4): string {
+  const records = bank.sourceAlignment.records.filter((record) => (
+    record.resolution !== "excluded"
+  ));
+  if (records.length === 0) return "Not course-checked";
+  if (sourceAlignmentBlockers(bank.sourceAlignment).length > 0) return "Alignment needs attention";
+  if (records.some((record) => record.resolution === "manual-override")) {
+    return "Source-grounded override";
+  }
+  if (records.some((record) => (
+    record.status === "notes-only-unverified"
+    || record.status === "insufficient-evidence"
+  ))) {
+    return effectiveAiContextCompletionPolicy(bank.aiContextCompletionPolicy)
+      === "approved-general-context"
+      ? "Source-led · AI-supported context"
+      : "Selected material only";
+  }
+  if (records.some((record) => record.status === "conflict")) {
+    return "Course-checked · notes differ";
+  }
+  if (records.some((record) => record.status === "notes-incomplete")) {
+    return "School material adds context";
+  }
+  return "Course-aligned";
+}
+
+function sourceClassificationLabel(
+  classification: PracticeBankV4["sourceMaterials"][number]["classification"],
+): string {
+  if (classification === "personal-note") return "Personal note";
+  if (classification === "official-correction") return "Official correction";
+  if (classification === "instructor-material") return "Instructor material";
+  if (classification === "assigned-reference") return "Assigned reference";
+  return "Unclassified";
+}
+
+function sourceMaterialScopeLabel(
+  scope: PracticeBankV4["sourceMaterials"][number]["scope"],
+): string {
+  if (scope.kind === "note") return "Complete note";
+  if (scope.kind === "selection") return "Note selection";
+  return scope.firstPage === scope.lastPage
+    ? `PDF page ${scope.firstPage}`
+    : `PDF pages ${scope.firstPage}–${scope.lastPage}`;
+}
+
+function alignmentHealthClass(bank: PracticeBankV4): string {
+  const records = bank.sourceAlignment.records.filter((record) => record.resolution !== "excluded");
+  if (records.length === 0) return "is-unverified";
+  if (sourceAlignmentBlockers(bank.sourceAlignment).length > 0) return "is-blocked";
+  if (records.some((record) => (
+    record.status === "notes-only-unverified"
+    || record.status === "insufficient-evidence"
+  ))) return "is-unverified";
+  if (records.some((record) => (
+    record.status === "conflict"
+    || record.status === "notes-incomplete"
+    || record.resolution === "manual-override"
+  ))) return "is-attention";
+  return "is-aligned";
+}
+
 function configurationDefaults(
   configuration: GenerationConfiguration,
 ): Parameters<PracticeLabView["setConfigurationDefaults"]>[0] {
@@ -4977,6 +5491,9 @@ function configurationDefaults(
     difficulty: configuration.difficulty,
     exerciseTypes: configuration.exerciseTypes,
     exerciseTypePercentages: { ...configuration.exerciseTypePercentages },
+    ...(configuration.aiContextCompletionPolicy === undefined
+      ? {}
+      : { aiContextCompletionPolicy: configuration.aiContextCompletionPolicy }),
   };
 }
 
@@ -5032,7 +5549,7 @@ function sourcePresentationFromBank(bank: PracticeBankV2): SourcePresentation {
 }
 
 function learningPathReference(
-  bank: PracticeBankV3,
+  bank: PracticeBankV4,
 ): { readonly id: string; readonly title: string } {
   if (bank.learningPath === null) {
     throw new Error("The selected tutor step is not attached to a learning path.");
@@ -5065,6 +5582,9 @@ function studyProgressFromCheckpoint(
     answers: structuredClone(checkpoint.answers),
     skippedExerciseIds: [...(checkpoint.skippedExerciseIds ?? [])],
     currentInput: structuredClone(checkpoint.currentInput),
+    alignmentSnapshots: checkpoint.alignmentSnapshots?.map((entry) =>
+      structuredClone(entry)
+    ) ?? [],
     answerReviewMode: checkpoint.answerReviewMode,
     answerReviewProvider: checkpoint.answerReviewProvider,
     answerReviewReasoningEffort: checkpoint.answerReviewReasoningEffort,

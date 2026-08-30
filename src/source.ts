@@ -1,6 +1,16 @@
 import { App, TFile, normalizePath } from "obsidian";
 import { prepareSource, type SegmentedSourceV1 } from "./segmenter";
-import type { PracticeBankV2, VisualSourceV1 } from "./model";
+import type {
+  PracticeBankV2,
+  SourceMaterialClassificationStateV1,
+  SourceMaterialClassificationV1,
+  VisualSourceV1,
+} from "./model";
+import {
+  suggestSourceClassification,
+  type SourceClassificationSelectionV1,
+  type SourceClassificationRulesV1,
+} from "./source-classification";
 import type { PdfExtractionResult } from "./pdf-tools";
 import {
   createPdfSourceImport,
@@ -21,18 +31,26 @@ export interface CollectedSource extends SourcePresentation, SegmentedSourceV1 {
   readonly file: TFile;
   readonly submittedText: string;
   readonly sourceImport?: PdfSourceImportV1;
+  /**
+   * Source kind is independent from primary/supporting ownership. Suggested
+   * labels are presentation help only; only a confirmed label may establish
+   * course authority in the alignment pipeline.
+   */
+  readonly classification?: SourceMaterialClassificationV1;
+  readonly classificationState?: SourceMaterialClassificationStateV1;
 }
 
 export async function collectSource(
   app: App,
   mode: MarkdownSourceMode,
-  selection?: string
+  selection?: string,
+  classificationRules?: SourceClassificationRulesV1,
 ): Promise<CollectedSource> {
   const file = app.workspace.getActiveFile();
   if (!(file instanceof TFile) || file.extension.toLowerCase() !== "md") {
     throw new Error("Open a Markdown source note before using Practice Problem Generator.");
   }
-  return collectSourceFromFile(app, file, mode, selection);
+  return collectSourceFromFile(app, file, mode, selection, classificationRules);
 }
 
 export async function collectSourceFromFile(
@@ -40,6 +58,7 @@ export async function collectSourceFromFile(
   file: TFile,
   mode: MarkdownSourceMode,
   selection?: string,
+  classificationRules?: SourceClassificationRulesV1,
 ): Promise<CollectedSource> {
   if (/(?:^|\/)Practice(?:\/|$)/iu.test(file.path)) {
     throw new Error("A Practice Problem Generator bank cannot be used as its own source note.");
@@ -62,6 +81,12 @@ export async function collectSourceFromFile(
     throw new Error("Practice Problem Generator could not find any headings or paragraphs in this source.");
   }
 
+  const classification = suggestedSourceClassification(
+    app,
+    file,
+    mode,
+    classificationRules,
+  );
   return {
     mode,
     title: file.basename,
@@ -71,6 +96,7 @@ export async function collectSourceFromFile(
     visuals,
     file,
     submittedText,
+    ...classification,
     ...prepared
   };
 }
@@ -78,6 +104,7 @@ export async function collectSourceFromFile(
 export function collectPdfSource(
   file: TFile,
   extraction: PdfExtractionResult,
+  classificationRules?: SourceClassificationRulesV1,
 ): CollectedSource {
   if (file.extension.toLowerCase() !== "pdf") {
     throw new Error("Choose a PDF file before extracting a PDF source.");
@@ -93,6 +120,12 @@ export function collectPdfSource(
     lastPage: extraction.lastPage,
     pageCount: extraction.pageCount,
     extractedAt: new Date().toISOString(),
+  });
+  const classification = suggestSourceClassification({
+    mode: "pdf",
+    path: file.path,
+    title: file.basename,
+    ...(classificationRules === undefined ? {} : { rules: classificationRules }),
   });
   return {
     mode: "pdf",
@@ -110,9 +143,56 @@ export function collectPdfSource(
     file,
     submittedText: extraction.text,
     sourceImport,
+    ...classification,
     ...prepared,
   };
 }
+
+/** Return an immutable source copy after the user explicitly confirms a label. */
+export function confirmSourceClassification(
+  source: CollectedSource,
+  classification: SourceMaterialClassificationV1,
+): CollectedSource {
+  return {
+    ...source,
+    classification,
+    classificationState: "confirmed",
+  };
+}
+
+/**
+ * Resolve a complete selection for persistence. Legacy/test sources without
+ * the additive fields receive a conservative suggestion and never become
+ * authority merely because their filename looks official.
+ */
+function suggestedSourceClassification(
+  app: App,
+  file: TFile,
+  mode: MarkdownSourceMode,
+  classificationRules?: SourceClassificationRulesV1,
+): SourceClassificationSelectionV1 {
+  const cache = app.metadataCache.getFileCache(file);
+  const tags = [
+    ...(cache?.tags?.map((entry) => entry.tag) ?? []),
+    ...frontmatterTags(cache?.frontmatter?.tags),
+  ];
+  return suggestSourceClassification({
+    mode,
+    path: file.path,
+    title: file.basename,
+    tags,
+    ...(classificationRules === undefined ? {} : { rules: classificationRules }),
+  });
+}
+
+function frontmatterTags(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value.split(/[\s,]+/u).filter((entry) => entry.length > 0);
+  }
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
 
 export interface RegenerationSourceResult {
   readonly source: CollectedSource;
@@ -124,6 +204,7 @@ export async function collectRegenerationSource(
   app: App,
   file: TFile,
   bank: PracticeBankV2,
+  classificationRules?: SourceClassificationRulesV1,
 ): Promise<RegenerationSourceResult> {
   if (file.path !== bank.source.vaultPath) {
     throw new Error("The saved practice bank no longer points to this source note.");
@@ -156,7 +237,13 @@ export async function collectRegenerationSource(
     };
   }
 
-  const current = await collectSourceFromFile(app, file, "note");
+  const current = await collectSourceFromFile(
+    app,
+    file,
+    "note",
+    undefined,
+    classificationRules,
+  );
   const visuals = await restoreSavedVisuals(
     app,
     file,
@@ -176,6 +263,7 @@ export async function collectRegenerationPdfSource(
   bank: PracticeBankV2,
   extraction: PdfExtractionResult,
   savedImport: PdfSourceImportV1,
+  classificationRules?: SourceClassificationRulesV1,
 ): Promise<RegenerationSourceResult> {
   if (file.path !== bank.source.vaultPath || file.extension.toLowerCase() !== "pdf") {
     throw new Error("The saved practice bank no longer points to this PDF source.");
@@ -183,7 +271,7 @@ export async function collectRegenerationPdfSource(
   if (savedImport.sourceHash !== bank.source.hash) {
     throw new Error("The saved PDF source metadata does not match this practice bank.");
   }
-  const current = collectPdfSource(file, extraction);
+  const current = collectPdfSource(file, extraction, classificationRules);
   const visuals = await restoreSavedVisuals(app, file, [], bank.visuals);
   return {
     currentNoteChanged:

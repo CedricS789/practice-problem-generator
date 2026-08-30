@@ -1446,7 +1446,7 @@ export class DesktopJobFileSystem implements CliJobFileSystem {
 }
 
 function desktopWorkspaceAt(absolutePath: string): CliJobWorkspace {
-  const { writeFile, copyFile, rm, stat } = loadDesktopCommonJsModule<
+  const { writeFile, readFile, copyFile, rm, stat } = loadDesktopCommonJsModule<
     typeof import("node:fs/promises")
   >("node:fs/promises");
   const path = loadDesktopCommonJsModule<typeof import("node:path")>(
@@ -1469,6 +1469,25 @@ function desktopWorkspaceAt(absolutePath: string): CliJobWorkspace {
       const destination = path.join(absolutePath, filename);
       await writeFile(destination, content, "utf8");
       return destination;
+    },
+    async readText(filename) {
+      assertFilename(filename);
+      const destination = path.join(absolutePath, filename);
+      try {
+        return await readFile(destination, "utf8");
+      } catch (error) {
+        if (
+          typeof error === "object"
+          && error !== null
+          && "code" in error
+          && error.code === "ENOENT"
+        ) return undefined;
+        throw new CliProviderError(
+          "workspace-error",
+          "A recoverable AI telemetry sidecar could not be read.",
+          { cause: error },
+        );
+      }
     },
     async writeBinary(filename, content) {
       assertFilename(filename);

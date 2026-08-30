@@ -11,8 +11,9 @@ const occlusionSource = await readFile(
   "utf8",
 );
 
-test("guided review bulk approval is batch-wide and exposes exact progress", () => {
-  assert.match(viewSource, /Approve all ready exercises/u);
+test("guided review foregrounds the active set and keeps batch approval optional", () => {
+  assert.match(viewSource, /Approve ready exercises in this set/u);
+  assert.match(viewSource, /Approve ready exercises in all generated sets/u);
   assert.match(viewSource, /approveReadyLearningPathExercises\(this\.reviewSetInputs\(blueprint\)\)/u);
   assert.match(viewSource, /approved.*kept exercises approved in this set/iu);
   assert.match(viewSource, /Review still required/u);

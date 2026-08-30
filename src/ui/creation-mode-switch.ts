@@ -57,12 +57,17 @@ function createModeButton(
     attr: {
       type: "button",
       "aria-pressed": String(options.selected),
+      "aria-current": options.selected ? "true" : "false",
+      "aria-disabled": String(options.disabled && !options.selected),
       title: options.description,
       "data-practice-lab-description": options.description,
+      "data-mode-state": options.selected ? "current" : "available",
     },
   });
-  button.disabled = options.disabled;
+  // The selected mode remains a focusable, clearly active control. Disabling it
+  // makes native themes fade the active pill and can look like the other mode won.
+  button.disabled = options.disabled && !options.selected;
   button.addEventListener("click", () => {
-    if (!button.disabled) options.onClick();
+    if (!button.disabled && !options.selected) options.onClick();
   });
 }

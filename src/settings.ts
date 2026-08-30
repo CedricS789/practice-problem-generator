@@ -21,6 +21,7 @@ import {
   normalizeStudyTypeSequence,
   type DisplayPreset,
   type PracticeLabDisplayPreferences,
+  type SavedBankOpenMode,
   type StudyExerciseType,
   type StudyOrderDefault,
   type VisualSelectionDefault,
@@ -32,6 +33,10 @@ import {
   reasoningEffortsForProvider,
 } from "./reasoning";
 import { installHoverDescriptions } from "./ui/hover-descriptions";
+import {
+  renderHorizontalTabs,
+  type HorizontalTabDefinition,
+} from "./ui/horizontal-tabs";
 import {
   DEFAULT_AI_TIMEOUT_MS,
   MAX_AI_TIMEOUT_MS,
@@ -76,6 +81,12 @@ import {
   type StoredDifficulty,
 } from "./difficulty";
 import { renderDifficultySelector } from "./ui/difficulty-selector";
+import {
+  copySourceClassificationRules,
+  DEFAULT_SOURCE_CLASSIFICATION_RULES,
+  normalizeSourceClassificationRules,
+  type SourceClassificationRulesV1,
+} from "./source-classification";
 
 export type ProviderId = "codex" | "claude" | "agy";
 export type AnswerReviewDefault = "self" | "ai";
@@ -96,7 +107,7 @@ const EXERCISE_TYPE_LABELS: Readonly<Record<ExerciseTypeId, string>> = {
   "image-occlusion": "Image occlusion",
 };
 
-export const SETTINGS_SCHEMA_VERSION = 7;
+export const SETTINGS_SCHEMA_VERSION = 9;
 const LEGACY_GENERATION_TIMEOUT_MS = 300_000;
 const LEGACY_ANSWER_REVIEW_TIMEOUT_MS = 120_000;
 
@@ -134,10 +145,12 @@ export interface PracticeLabSettings {
   pdfMaxPageCount: number;
   pdfMaxExtractedCharacters: number;
   pdfExtractionTimeoutMs: number;
+  sourceClassificationRules: SourceClassificationRulesV1;
   practiceBankStorageMode: PracticeBankStorageMode;
   practiceBankCustomFolder: string;
   practiceBankPathTemplate: string;
   practiceViewLocation: PracticeViewLocation;
+  savedBankOpenMode: SavedBankOpenMode;
   dashboardActivityRangeWeeks: ActivityRangeWeeks;
   dashboardActivityMetric: ActivityMetric;
   dashboardWeekStart: WeekStart;
@@ -180,10 +193,14 @@ export const DEFAULT_SETTINGS: PracticeLabSettings = {
   pdfMaxPageCount: 40,
   pdfMaxExtractedCharacters: 120_000,
   pdfExtractionTimeoutMs: 120_000,
+  sourceClassificationRules: copySourceClassificationRules(
+    DEFAULT_SOURCE_CLASSIFICATION_RULES,
+  ),
   practiceBankStorageMode: "course",
   practiceBankCustomFolder: DEFAULT_PRACTICE_BANK_CUSTOM_FOLDER,
   practiceBankPathTemplate: DEFAULT_PRACTICE_BANK_PATH_TEMPLATE,
   practiceViewLocation: "main-tab",
+  savedBankOpenMode: "reading",
   dashboardActivityRangeWeeks: 52,
   dashboardActivityMetric: "answers",
   dashboardWeekStart: "monday",
@@ -323,12 +340,18 @@ export function normalizeSettings(value: unknown): PracticeLabSettings {
     pdfMaxPageCount,
     pdfMaxExtractedCharacters,
     pdfExtractionTimeoutMs,
+    sourceClassificationRules: normalizeSourceClassificationRules(
+      partial.sourceClassificationRules,
+    ),
     practiceBankStorageMode: storagePolicy.mode,
     practiceBankCustomFolder: storagePolicy.customBaseFolder,
     practiceBankPathTemplate: storagePolicy.customPathTemplate,
     practiceViewLocation: partial.practiceViewLocation === "right-sidebar"
       ? "right-sidebar"
       : "main-tab",
+    savedBankOpenMode: partial.savedBankOpenMode === "preserve"
+      ? "preserve"
+      : "reading",
     dashboardActivityRangeWeeks:
       partial.dashboardActivityRangeWeeks === 13
       || partial.dashboardActivityRangeWeeks === 26
@@ -357,6 +380,16 @@ function boundedInteger(
     : fallback;
 }
 
+function sourceRuleMatchers(value: string): string[] {
+  return value
+    .split(/\r?\n/u)
+    .map((entry) => entry.trim())
+    .filter((entry, index, entries) => (
+      entry.length > 0 && entries.indexOf(entry) === index
+    ))
+    .slice(0, 100);
+}
+
 function cleanExecutable(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
@@ -368,8 +401,35 @@ function modelKeyForProvider(
   return provider === "agy" ? "agyModel" : "codexModel";
 }
 
+type SettingsPage =
+  | "ai-sets"
+  | "sources"
+  | "study"
+  | "workspace"
+  | "saved-notes"
+  | "dashboard"
+  | "advanced"
+  | "data";
+
+const SETTINGS_TABS: readonly HorizontalTabDefinition<SettingsPage>[] = [
+  { id: "ai-sets", label: "AI & sets" },
+  { id: "sources", label: "Sources" },
+  { id: "study", label: "Study" },
+  { id: "workspace", label: "Workspace" },
+  { id: "saved-notes", label: "Saved notes" },
+  { id: "dashboard", label: "Dashboard" },
+  { id: "advanced", label: "Advanced" },
+  { id: "data", label: "Data" },
+];
+
+const MOBILE_SETTINGS_TABS = SETTINGS_TABS.filter((tab) => (
+  tab.id !== "ai-sets" && tab.id !== "sources" && tab.id !== "advanced"
+));
+
 export class PracticeLabSettingTab extends PluginSettingTab {
   private modelSettingsSaveChain: Promise<void> = Promise.resolve();
+  private activePage: SettingsPage | null = null;
+  private activeSettingsHost: HTMLElement | null = null;
 
   constructor(app: App, private readonly owner: PracticeLabPlugin) {
     super(app, owner);
@@ -384,15 +444,41 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       .setHeading();
     this.containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Choose the defaults for new work and decide how much information each Practice Problem Generator surface shows. Safety, consent, validation, and repair controls always remain visible.",
+      text: "Choose one area at a time. Safety, consent, validation, and repair controls always remain visible.",
     });
 
-    if (!Platform.isMobileApp) {
+    const tabs = Platform.isMobileApp ? MOBILE_SETTINGS_TABS : SETTINGS_TABS;
+    const fallbackPage: SettingsPage = Platform.isMobileApp ? "study" : "ai-sets";
+    if (
+      this.activePage === null
+      || !tabs.some((tab) => tab.id === this.activePage)
+    ) {
+      this.activePage = fallbackPage;
+    }
+    const selectedPage = this.activePage;
+    this.activeSettingsHost = null;
+    renderHorizontalTabs(this.containerEl, {
+      tabs,
+      selected: selectedPage,
+      ariaLabel: "Practice Problem Generator settings",
+      className: "practice-lab-settings-tabs practice-lab-horizontal-tabs--sticky",
+      onSelect: (page) => {
+        this.activePage = page;
+        this.update();
+      },
+      renderPanel: (panel) => {
+        this.activeSettingsHost = panel;
+      },
+    });
+    const host = this.settingsHost();
+
+    if (!Platform.isMobileApp && selectedPage === "ai-sets") {
       this.addHeading(
         "Generation defaults",
         "Applied when a new source is loaded. You can still override every value in Configure.",
+        host,
       );
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default AI provider")
       .setDesc("Practice Problem Generator never switches providers automatically.")
       .addDropdown((dropdown) => dropdown
@@ -420,13 +506,14 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       modelKey,
       provider,
       "Automatic follows the selected CLI's default. Each provider remembers its own selection, and Custom accepts a safe exact model ID.",
+      host,
       () => {
         this.normalizeDefaultModelReasoning();
         refreshReasoningControl();
       },
     );
 
-    const reasoningSetting = new Setting(this.containerEl)
+    const reasoningSetting = new Setting(host)
       .setName("Default reasoning effort")
       .setDesc(`${reasoningEffortDescription(provider)} Only levels supported by the selected model are shown.`)
       .addDropdown((dropdown) => {
@@ -459,7 +546,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         : "Changing provider reveals that provider's remembered model and compatible reasoning levels.",
     });
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default exercise count")
       .setDesc("One to thirty draft exercises per generation.")
       .addSlider((slider) => slider
@@ -470,7 +557,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
 
-    const difficultySetting = new Setting(this.containerEl)
+    const difficultySetting = new Setting(host)
       .setName("Default difficulty")
       .setDesc("Default reasoning demand for new quick sets and guided-path sets. You can still change each set before generation.");
     difficultySetting.settingEl.addClass("practice-lab-difficulty-setting");
@@ -484,7 +571,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       },
     });
 
-    const focus = new Setting(this.containerEl)
+    const focus = new Setting(host)
       .setName("Default focus instructions")
       .setDesc("Optional reusable guidance for new generations. Per-set edits remain possible in configure.");
     const focusCount = focus.descEl.createSpan({
@@ -504,7 +591,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         });
     });
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default visual selection")
       .setDesc("Manual is privacy-first. The automatic option selects ready local images and prepares GIF default frames; videos and remote images still require review.")
       .addDropdown((dropdown) => dropdown
@@ -516,7 +603,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default GIF frame")
       .setDesc("Used automatically when selecting a GIF. You can still choose a different frame for any individual GIF.")
       .addDropdown((dropdown) => dropdown
@@ -529,11 +616,22 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
 
+    this.addExerciseMixEditor(host);
+    new Setting(host)
+      .setName("Restore generation defaults")
+      .setDesc("Restore provider, models, reasoning, count, difficulty, focus, visual selection, GIF frame, source safeguards, and exercise mix. Executable paths are unchanged.")
+      .addButton((button) => button
+        .setButtonText("Restore")
+        .onClick(() => void this.restoreGenerationDefaults()));
+    }
+
+    if (!Platform.isMobileApp && selectedPage === "sources") {
     this.addHeading(
       "PDF source defaults",
       "PDF text is extracted locally from explicit page ranges. Primary and supporting PDFs share these totals so one provider payload stays reviewable; every range can still be changed in the PDF dialog.",
+      host,
     );
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default PDF page window")
       .setDesc("Number of pages selected initially when the PDF dialog opens.")
       .addText((text) => {
@@ -553,7 +651,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             await this.owner.saveSettings();
           });
       });
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Total PDF page budget per generation")
       .setDesc("One to one hundred pages across all primary and supporting PDFs. Narrower source bundles usually produce better grounded practice.")
       .addText((text) => {
@@ -574,7 +672,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             await this.owner.saveSettings();
           });
       });
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Total extracted PDF character budget")
       .setDesc("Twenty thousand to two hundred fifty thousand characters across all selected PDFs. Practice Problem Generator fails closed instead of truncating source evidence silently.")
       .addText((text) => {
@@ -595,21 +693,17 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           });
       });
 
-    this.addPracticeBankStorageSettings();
-    this.addExerciseMixEditor();
-    new Setting(this.containerEl)
-      .setName("Restore generation defaults")
-      .setDesc("Restore provider, models, reasoning, count, difficulty, focus, visual selection, GIF frame, and exercise mix. Executable paths are unchanged.")
-      .addButton((button) => button
-        .setButtonText("Restore")
-        .onClick(() => void this.restoreGenerationDefaults()));
+    this.addPracticeBankStorageSettings(host);
+    this.addSourceClassificationSettings(host);
     }
 
+    if (selectedPage === "study") {
     this.addHeading(
       "Study defaults",
       "Controls the initial session behavior. The review choice and provider can still be changed during a session.",
+      host,
     );
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Exercise order")
       .setDesc("Choose the initial ordering strategy shown in the session setup dialog. It can be changed before every practice run.")
       .addDropdown((dropdown) => dropdown
@@ -622,7 +716,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           this.owner.settings.studyOrderDefault = value as StudyOrderDefault;
           await this.owner.saveSettings();
         }));
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Shuffle within type blocks")
       .setDesc("For shuffled or custom type blocks, also randomize the questions inside each type. The saved bank order is never modified.")
       .addToggle((toggle) => toggle
@@ -631,9 +725,9 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           this.owner.settings.studyShuffleWithinTypesDefault = value;
           await this.owner.saveSettings();
         }));
-    this.addStudyTypeSequenceEditor();
+    this.addStudyTypeSequenceEditor(host);
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Default free-response review")
       .setDesc("Self-assessment stays local. Background AI review is optional and never blocks the next question.")
       .addDropdown((dropdown) => dropdown
@@ -645,7 +739,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           await this.owner.saveSettings();
         }));
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Answer-review provider")
       .setDesc("Used only when AI review is selected. Practice Problem Generator never switches providers automatically.")
       .addDropdown((dropdown) => dropdown
@@ -663,7 +757,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           this.update();
         }));
 
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Answer-review reasoning effort")
       .setDesc(`${reasoningEffortDescription(this.owner.settings.answerReviewProvider)} The chosen level is locked into each queued review.`)
       .addDropdown((dropdown) => {
@@ -677,18 +771,21 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             await this.owner.saveSettings();
           });
       });
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Restore study defaults")
       .setDesc("Restore bank order, the recommended type sequence, within-type ordering, and local self-assessment defaults. Saved sessions are unchanged.")
       .addButton((button) => button
         .setButtonText("Restore")
         .onClick(() => void this.restoreStudyDefaults()));
+    }
 
+    if (selectedPage === "workspace") {
     this.addHeading(
       "Interface presets",
       "Start from a coherent visibility preset, then customize individual items below. Presets change presentation only, never saved scores or history.",
+      host,
     );
-    new Setting(this.containerEl)
+    new Setting(host)
       .setName("Visibility preset")
       .setDesc("Detailed shows everything, focused removes secondary metadata, and minimal keeps only core controls and outcomes.")
       .addButton((button) => button
@@ -701,15 +798,39 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         .setButtonText("Minimal")
         .onClick(() => void this.applyDisplayPreset("minimal")));
 
-    this.addPracticeViewSettings();
-    this.addBankStatisticsSettings();
-    this.addDashboardSettings();
-    this.addDataManagementSettings();
+    this.addPracticeViewSettings(host);
+    }
 
-    if (!Platform.isMobileApp) {
+    if (selectedPage === "saved-notes") {
+      this.addHeading(
+        "Saved practice notes",
+        "Choose how saved practice notes open and which optional progress details they show.",
+        host,
+      );
+      new Setting(host)
+        .setName("Open saved practice notes in")
+        .setDesc("Reading view shows the interactive practice workspace immediately. Preserve current mode leaves Obsidian's current editor mode unchanged.")
+        .addDropdown((dropdown) => dropdown
+          .addOption("reading", "Reading view (recommended)")
+          .addOption("preserve", "Preserve current mode")
+          .setValue(this.owner.settings.savedBankOpenMode)
+          .onChange(async (value) => {
+            this.owner.settings.savedBankOpenMode = value === "preserve"
+              ? "preserve"
+              : "reading";
+            await this.owner.saveSettings();
+          }));
+      this.addBankStatisticsSettings(host);
+    }
+
+    if (selectedPage === "dashboard") this.addDashboardSettings(host);
+    if (selectedPage === "data") this.addDataManagementSettings(host);
+
+    if (!Platform.isMobileApp && selectedPage === "advanced") {
       const advanced = this.addSettingsGroup(
         "Advanced runtime",
         "Process limits and executable locations. Changing an executable refreshes provider detection after the active job finishes.",
+        host,
       );
     new Setting(advanced)
       .setName("Recover interrupted generations")
@@ -820,6 +941,13 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     }
   }
 
+  private settingsHost(): HTMLElement {
+    if (this.activeSettingsHost === null) {
+      throw new Error("The active settings panel has not been created.");
+    }
+    return this.activeSettingsHost;
+  }
+
   private addExecutableSetting(
     name: string,
     key:
@@ -830,7 +958,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       | "ffprobeExecutable"
       | "pdfinfoExecutable"
       | "pdftotextExecutable",
-    container: HTMLElement = this.containerEl,
+    container: HTMLElement,
   ): void {
     new Setting(container)
       .setName(name)
@@ -853,12 +981,13 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
   }
 
-  private addPracticeBankStorageSettings(): void {
+  private addPracticeBankStorageSettings(container: HTMLElement): void {
     this.addHeading(
       "Practice-bank storage",
       "Choose where newly created practice Markdown workspaces are saved. Existing banks stay at their current paths and remain discoverable; changing this default never moves them.",
+      container,
     );
-    new Setting(this.containerEl)
+    new Setting(container)
       .setName("Save-location strategy")
       .setDesc("Per-course preserves Notes/<term>/<course>/Practice/. Custom uses a vault-relative base folder and the path template below.")
       .addDropdown((dropdown) => dropdown
@@ -874,7 +1003,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
 
     if (this.owner.settings.practiceBankStorageMode === "course") {
-      this.containerEl.createEl("p", {
+      container.createEl("p", {
         cls: "setting-item-description practice-lab-storage-preview",
         text: "Example: Notes/2025-26 - Q2/ELEC-Y418/Practice/Chapter 8 - Image Sensors - Practice.md",
       });
@@ -914,7 +1043,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
           .replace(/\\/gu, "/");
         await this.owner.saveSettings();
       };
-      new Setting(this.containerEl)
+      new Setting(container)
         .setName("Custom base folder")
         .setDesc("Vault-relative folder only. Obsidian configuration, trash, temporary folders, absolute paths, and parent traversal are blocked.")
         .addText((text) => text
@@ -925,7 +1054,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
             renderPreview();
             await saveCandidate();
           }));
-      new Setting(this.containerEl)
+      new Setting(container)
         .setName("Path inside the custom folder")
         .setDesc(`Available tokens: ${PRACTICE_BANK_PATH_TEMPLATE_TOKENS.join(", ")}. The result must end in .md and include {source} or {sourceHash}.`)
         .addText((text) => {
@@ -939,13 +1068,13 @@ export class PracticeLabSettingTab extends PluginSettingTab {
               await saveCandidate();
             });
         });
-      preview = this.containerEl.createEl("p", {
+      preview = container.createEl("p", {
         cls: "setting-item-description practice-lab-storage-preview",
       });
       renderPreview();
     }
 
-    new Setting(this.containerEl)
+    new Setting(container)
       .setName("Restore storage defaults")
       .setDesc("Return new banks to the established per-course practice folder. Existing bank files are not moved.")
       .addButton((button) => button
@@ -959,12 +1088,82 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
   }
 
-  private addHeading(name: string, description: string): void {
-    new Setting(this.containerEl).setName(name).setDesc(description).setHeading();
+  private addSourceClassificationSettings(container: HTMLElement): void {
+    this.addHeading(
+      "Source label suggestions",
+      "Practice Problem Generator can suggest course-authority labels from a source's folder path, title, tags, and file type. Suggestions never become authoritative until you confirm them in creation.",
+      container,
+    );
+    const details = container.createEl("details", {
+      cls: "practice-lab-settings-disclosure",
+    });
+    details.createEl("summary", { text: "Customize source-label matching" });
+    details.createEl("p", {
+      text: "Enter one case-insensitive folder, filename, or tag phrase per line. Higher-authority labels are checked first. Leave a list empty to disable suggestions for that label.",
+    });
+    const rules = [
+      {
+        key: "officialCorrection" as const,
+        name: "Official correction matches",
+        description: "Examples: correction folders, answer-key tags, or mark-scheme filenames.",
+      },
+      {
+        key: "instructorMaterial" as const,
+        name: "Instructor material matches",
+        description: "Examples: lecture, slides, handout, professor, or course-material folders.",
+      },
+      {
+        key: "assignedReference" as const,
+        name: "Assigned reference matches",
+        description: "Examples: textbook, manual, reading-list, or assigned-reference folders.",
+      },
+      {
+        key: "personalNote" as const,
+        name: "Personal note matches",
+        description: "Examples: notes folders or personal-note tags. Markdown notes also fall back to this suggested label.",
+      },
+    ];
+    for (const rule of rules) {
+      new Setting(details)
+        .setName(rule.name)
+        .setDesc(rule.description)
+        .addTextArea((text) => {
+          text.inputEl.rows = 3;
+          text
+            .setValue(this.owner.settings.sourceClassificationRules[rule.key].join("\n"))
+            .onChange(async (value) => {
+              this.owner.settings.sourceClassificationRules = {
+                ...this.owner.settings.sourceClassificationRules,
+                [rule.key]: sourceRuleMatchers(value),
+              };
+              await this.owner.saveSettings();
+            });
+        });
+    }
+    new Setting(details)
+      .setName("Restore suggestion rules")
+      .setDesc("Restore the built-in conservative folder, filename, and tag phrases.")
+      .addButton((button) => button
+        .setButtonText("Restore")
+        .onClick(async () => {
+          this.owner.settings.sourceClassificationRules = copySourceClassificationRules(
+            DEFAULT_SOURCE_CLASSIFICATION_RULES,
+          );
+          await this.owner.saveSettings();
+          this.update();
+        }));
   }
 
-  private addExerciseMixEditor(): void {
-    const details = this.containerEl.createEl("details", {
+  private addHeading(
+    name: string,
+    description: string,
+    container: HTMLElement,
+  ): void {
+    new Setting(container).setName(name).setDesc(description).setHeading();
+  }
+
+  private addExerciseMixEditor(container: HTMLElement): void {
+    const details = container.createEl("details", {
       cls: "practice-lab-settings-details",
     });
     const summary = details.createEl("summary");
@@ -1049,8 +1248,8 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     refresh();
   }
 
-  private addStudyTypeSequenceEditor(): void {
-    const details = this.containerEl.createEl("details", {
+  private addStudyTypeSequenceEditor(container: HTMLElement): void {
+    const details = container.createEl("details", {
       cls: "practice-lab-settings-details practice-lab-study-sequence-settings",
     });
     const summary = details.createEl("summary");
@@ -1108,10 +1307,11 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     void this.owner.saveSettings();
   }
 
-  private addPracticeViewSettings(): void {
+  private addPracticeViewSettings(container: HTMLElement): void {
     const group = this.addSettingsGroup(
       "Practice Problem Generator view",
       "Choose information density for source, review, study, and completion. Grounded answers and required AI-review notices cannot be hidden.",
+      container,
     );
     new Setting(group)
       .setName("Open workspace in")
@@ -1140,7 +1340,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addDisplayToggle("Show view introduction", "Show the short description below the Practice Problem Generator title.", "practice", "showHeaderDescription", group);
     if (!Platform.isMobileApp) {
       this.addDisplayToggle("Show generation stepper", "Show Source, Configure, and Review navigation steps.", "practice", "showGenerationStepper", group);
-      this.addDisplayToggle("Live agent activity", "Show safe provider events, elapsed time, and emitted reasoning status while AI work runs. Private chain-of-thought is never exposed or saved.", "practice", "showAgentActivity", group);
+      this.addDisplayToggle("Live agent activity", "Show safe provider events, elapsed time, token usage, provider-reported monetary cost, and emitted reasoning status while AI work runs. Private chain-of-thought is never exposed or saved.", "practice", "showAgentActivity", group);
       this.addDisplayToggle("Show source path", "Show the vault-relative source path.", "practice", "showSourcePath", group);
       this.addDisplayToggle("Show source excerpt", "Show the source preview in the Source stage.", "practice", "showSourceExcerpt", group);
       this.addDisplayToggle("Expand payload preview", "Open the exact provider payload by default. It always remains available.", "practice", "expandPayloadPreview", group);
@@ -1162,10 +1362,18 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addDisplayToggle("Completion celebration", "Use the celebratory completion icon.", "practice", "celebrateCompletion", group);
   }
 
-  private addBankStatisticsSettings(): void {
+  private addBankStatisticsSettings(container: HTMLElement): void {
     const group = this.addSettingsGroup(
       "Practice bank statistics",
       "Choose what is rendered inside each saved practice note. Pending and failed review actions remain available even when history is hidden.",
+      container,
+    );
+    this.addDisplayToggle(
+      "Open statistics and history by default",
+      "Pin the Statistics and history panel open in saved practice notes. Leave this off for the calmer default workspace.",
+      "bank",
+      "expandStatisticsPanel",
+      group,
     );
     this.addDisplayToggle("Bank metadata", "Show the collapsed revision, update time, and source-scope details.", "bank", "showBankMetadata", group);
     this.addDisplayToggle("Generation history", "Show provider, model, reasoning, prompt, source, mix, and save details for every generated bank revision.", "bank", "showGenerationHistory", group);
@@ -1180,10 +1388,11 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addDisplayToggle("Session history", "Detailed historical sessions and settled AI feedback.", "bank", "showSessionHistory", group);
   }
 
-  private addDashboardSettings(): void {
+  private addDashboardSettings(container: HTMLElement): void {
     const group = this.addSettingsGroup(
       "Dashboard",
       "Keep the dashboard as quiet or detailed as you want. These settings control its layout; data-integrity diagnostics remain visible when they need attention.",
+      container,
     );
     new Setting(group)
       .setName("Quick layout")
@@ -1203,6 +1412,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
       group,
       "Layout and scope",
       "Choose the dashboard framing and optional workflow panels.",
+      true,
     );
     this.addDisplayToggle("Scope controls", "Show folder, source, tag, and search controls.", "dashboard", "showScopeControls", layout);
     this.addDisplayToggle("Scope breadcrumbs", "Show the active folder, source, and tag trail.", "dashboard", "showBreadcrumbs", layout);
@@ -1296,10 +1506,12 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.addDisplayToggle("Bank activity details", "Show per-bank counts, AI status, streak, and last-practiced date.", "dashboard", "showBankActivity", banks);
   }
 
-  private addDataManagementSettings(): void {
+  private addDataManagementSettings(container: HTMLElement): void {
     const group = this.addSettingsGroup(
       "Data management",
       "Destructive controls stay collapsed here. Every action shows its exact scope and requires a typed confirmation; Practice Problem Generator never clears data automatically.",
+      container,
+      false,
     );
     new Setting(group)
       .setName("Reset all settings")
@@ -1360,7 +1572,7 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     description: string,
     section: Section,
     key: Key,
-    container: HTMLElement = this.containerEl,
+    container: HTMLElement,
   ): void {
     const values = this.owner.settings.display[section] as unknown as Record<Key, boolean>;
     new Setting(container)
@@ -1374,10 +1586,16 @@ export class PracticeLabSettingTab extends PluginSettingTab {
         }));
   }
 
-  private addSettingsGroup(name: string, description: string): HTMLElement {
-    const details = this.containerEl.createEl("details", {
+  private addSettingsGroup(
+    name: string,
+    description: string,
+    container: HTMLElement,
+    open = true,
+  ): HTMLElement {
+    const details = container.createEl("details", {
       cls: "practice-lab-settings-details practice-lab-settings-visibility",
     });
+    details.open = open;
     const summary = details.createEl("summary");
     summary.createEl("strong", { text: name });
     details.createEl("p", {
@@ -1391,10 +1609,12 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     container: HTMLElement,
     name: string,
     description: string,
+    open = false,
   ): HTMLElement {
     const details = container.createEl("details", {
       cls: "practice-lab-settings-subgroup",
     });
+    details.open = open;
     const summary = details.createEl("summary");
     summary.createEl("strong", { text: name });
     details.createEl("p", {
@@ -1409,10 +1629,11 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     key: "codexModel" | "claudeModel" | "agyModel",
     provider: ProviderId,
     description: string,
+    container: HTMLElement,
     onChanged: () => void,
   ): void {
     const catalog = this.modelCatalog(provider);
-    const setting = new Setting(this.containerEl)
+    const setting = new Setting(container)
       .setName(name)
       .setDesc(description);
     const controls = setting.controlEl.createDiv({
@@ -1640,6 +1861,9 @@ export class PracticeLabSettingTab extends PluginSettingTab {
     this.owner.settings.pdfMaxPageCount = DEFAULT_SETTINGS.pdfMaxPageCount;
     this.owner.settings.pdfMaxExtractedCharacters =
       DEFAULT_SETTINGS.pdfMaxExtractedCharacters;
+    this.owner.settings.sourceClassificationRules = copySourceClassificationRules(
+      DEFAULT_SETTINGS.sourceClassificationRules,
+    );
     this.owner.settings.recoverInterruptedGenerations =
       DEFAULT_SETTINGS.recoverInterruptedGenerations;
     this.owner.settings.generationRecoveryRetentionHours =

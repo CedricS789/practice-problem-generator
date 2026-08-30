@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createSessionSummary } from "../src/bank-repository";
-import type { PracticeBankV2, PracticeBankV3 } from "../src/model";
+import type { PracticeBankV2, PracticeBankV4 } from "../src/model";
 import { migratePracticeBankV2ToV3 } from "../src/learning-path";
 import { mergeSessionSummary } from "../src/persistence";
 import { createSourceHash, segmentSource } from "../src/segmenter";
@@ -154,7 +154,7 @@ function tutorLesson(bank: PracticeBankV2): TutorLessonV1 {
   };
 }
 
-function guidedCheckpointBank(): PracticeBankV3 {
+function guidedCheckpointBank(): PracticeBankV4 {
   const migrated = migratePracticeBankV2ToV3(checkpointBank());
   const lesson = tutorLesson(migrated);
   const segmentId = lesson.teachingBlocks[0]?.sourceSegmentIds[0];
@@ -434,6 +434,14 @@ test("guided checkpoint locks the complete approved learning context for offline
   assert.deepEqual(context.practiceSets, bank.practiceSets);
   assert.deepEqual(context.tutorLessons, bank.tutorLessons);
   assert.deepEqual(context.learningPath, bank.learningPath);
+  assert.deepEqual(context.sourceMaterials, bank.sourceMaterials);
+  assert.deepEqual(context.sourceAlignment, bank.sourceAlignment);
+  assert.deepEqual(checkpoint.alignmentSnapshots, [{
+    exerciseId: "exercise-checkpoint-1",
+    state: "notes-grounded-unverified",
+    records: [],
+    aiContextCompletionPolicy: "approved-general-context",
+  }]);
 
   bank.aspects = [];
   bank.practiceSets = [];
@@ -442,11 +450,14 @@ test("guided checkpoint locks the complete approved learning context for offline
   bank.exercises[0] = { ...bank.exercises[0]!, prompt: "Regenerated prompt" };
 
   const restored = checkpointBankSnapshot(checkpoint);
-  assert.equal(restored.schemaVersion, 3);
-  const restoredV3 = restored as PracticeBankV3;
-  assert.equal(restoredV3.learningPath?.id, "path-checkpoint");
-  assert.equal(restoredV3.tutorLessons[0]?.id, lesson.id);
-  assert.equal(restoredV3.exercises[0]?.prompt, "What does alpha cause?");
+  assert.equal(restored.schemaVersion, 4);
+  const restoredV4 = restored as PracticeBankV4;
+  assert.equal(restoredV4.learningPath?.id, "path-checkpoint");
+  assert.equal(restoredV4.tutorLessons[0]?.id, lesson.id);
+  assert.equal(restoredV4.exercises[0]?.prompt, "What does alpha cause?");
+  assert.equal(restoredV4.sourceMaterials[0]?.classification, "unclassified");
+  assert.equal(restoredV4.sourceMaterials[0]?.classificationState, "migration-default");
+  assert.deepEqual(restoredV4.sourceAlignment, bank.sourceAlignment);
 
   const legacyCompatible = structuredClone(checkpoint) as {
     learningProgress?: { context?: unknown };

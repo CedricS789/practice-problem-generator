@@ -35,6 +35,11 @@ export interface StudyCheckpointProgressSummary {
   readonly hasMeaningfulProgress: boolean;
 }
 
+export interface StudyCheckpointWorkspaceActionState {
+  readonly state: "ready" | "resume" | "blocked";
+  readonly description: string;
+}
+
 export type LatestStudyCheckpointRebaseResult =
   | {
       readonly status: "current" | "rebased";
@@ -219,6 +224,48 @@ export function summarizeStudyCheckpointProgress(
     guidedIndependentAttemptCount,
     guidedAnswerRevealCount,
     hasMeaningfulProgress,
+  };
+}
+
+/**
+ * Describes the only safe primary action for a saved workspace while a
+ * device-local study checkpoint exists. Identity remains bank-ID based; a
+ * matching title, source, or Markdown path is deliberately insufficient.
+ */
+export function studyCheckpointWorkspaceActionState(
+  checkpoint: StudySessionCheckpointV1 | undefined,
+  invalidStoredCheckpoint: boolean,
+  workspace: { readonly bankId: string; readonly revision: number },
+): StudyCheckpointWorkspaceActionState {
+  if (invalidStoredCheckpoint) {
+    return {
+      state: "blocked",
+      description: "A device-local saved session is unreadable. Open the Practice note to review the recovery warning; nothing will be discarded automatically.",
+    };
+  }
+  if (checkpoint === undefined) {
+    return {
+      state: "ready",
+      description: "The saved guided path is ready to continue.",
+    };
+  }
+  const progress = summarizeStudyCheckpointProgress(checkpoint);
+  const progressLabel = `${progress.answeredCount} ${progress.answeredCount === 1 ? "answer" : "answers"} and ${progress.skippedCount} ${progress.skippedCount === 1 ? "skip" : "skips"}`;
+  if (checkpoint.bankId !== workspace.bankId) {
+    return {
+      state: "blocked",
+      description: `A different saved practice session still contains ${progressLabel}. Open the Practice note to review it before starting this newly saved path.`,
+    };
+  }
+  if (workspace.revision < checkpoint.bankRevisionAtStart) {
+    return {
+      state: "blocked",
+      description: `This device has an older copy of the saved practice bank. Synchronize revision ${checkpoint.bankRevisionAtStart} or newer before resuming; ${progressLabel} remain preserved locally.`,
+    };
+  }
+  return {
+    state: "resume",
+    description: `Resume question ${Math.min(checkpoint.currentQuestionIndex + 1, checkpoint.exercises.length)} of ${checkpoint.exercises.length}; ${progressLabel} are preserved on this device.`,
   };
 }
 

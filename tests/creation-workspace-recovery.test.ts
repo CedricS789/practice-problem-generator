@@ -189,35 +189,26 @@ test("guided batch progress streams without rebuilding the complete workspace", 
   assert.match(guidedViewSource, /private batchActivityHost: HTMLElement \| null/u);
 });
 
-test("guided progress navigation supports keyboard activation and honest disabled sets", () => {
-  assert.match(guidedViewSource, /item\.setAttribute\("role", "button"\)/u);
-  assert.match(guidedViewSource, /event\.key !== "Enter" && event\.key !== " "/u);
+test("guided progress navigation uses native keyboard buttons and honest disabled sets", () => {
+  assert.match(guidedViewSource, /const button = container\.createEl\("button"/u);
+  assert.match(guidedViewSource, /button\.addEventListener\("click"/u);
   assert.match(guidedViewSource, /button\.disabled = !available/u);
   assert.match(guidedViewSource, /Review opens after generation completes/u);
-  assert.match(stylesSource, /\[role="button"\]/u);
+  assert.match(stylesSource, /\.practice-lab-view button:focus-visible/u);
 });
 
-test("guided creation steps navigate backward and forward once their work exists", () => {
+test("guided creation pages navigate backward and forward once their work exists", () => {
   const navigationStart = guidedViewSource.indexOf("private renderStageNavigation(");
-  const navigationEnd = guidedViewSource.indexOf("private renderSource(", navigationStart);
+  const navigationEnd = guidedViewSource.indexOf("private creationPages(", navigationStart);
   assert.ok(navigationStart >= 0 && navigationEnd > navigationStart);
   const navigation = guidedViewSource.slice(navigationStart, navigationEnd);
-  assert.match(navigation, /const available = this\.stageAvailable\(stage\)/u);
-  assert.match(navigation, /else if \(available && this\.busy === null\)/u);
-  assert.match(navigation, /this\.navigateToStage\(stage\)/u);
-  assert.match(navigation, /item\.addEventListener\("click", navigate\)/u);
-  assert.match(navigation, /event\.key !== "Enter" && event\.key !== " "/u);
-  assert.match(navigation, /const recoveryCanRestore = this\.recoveryAvailable/u);
-  assert.match(navigation, /stage === "map"\) return this\.blueprint !== null \|\| recoveryCanRestore/u);
-  assert.match(
-    navigation,
-    /return this\.statuses\.size > 0 \|\| this\.generatedSets\.length > 0 \|\| recoveryCanRestore/u,
-  );
-  assert.match(navigation, /return this\.savedWorkspace !== null/u);
-  assert.match(navigation, /private async restoreRecoverableWorkspace\(stage: "map" \| "review"\)/u);
-  assert.match(navigation, /this\.applyRecoveredBatch\(await inspect\(\)\)/u);
-  assert.doesNotMatch(navigation, /stage === "source" && this\.stage !== "source"/u);
-  assert.match(stylesSource, /\.practice-learning-path-steps li\.is-clickable:focus-visible/u);
+  assert.match(navigation, /Step \$\{currentIndex \+ 1\} of \$\{pages\.length\}/u);
+  assert.match(navigation, /setButtonText\("Back"\)/u);
+  assert.match(navigation, /const available = this\.pageAvailable\(definition\.id\) && this\.busy === null/u);
+  assert.match(navigation, /button\.addEventListener\("click", \(\) => this\.navigateToPage\(definition\.id\)\)/u);
+  assert.match(navigation, /this\.pageUnavailableReason\(definition\.id, definition\.label\)/u);
+  assert.match(stylesSource, /\.practice-learning-path-page-locator \{/u);
+  assert.match(stylesSource, /\.practice-learning-path-page-details button:focus-visible|\.practice-lab-view button:focus-visible/u);
 });
 
 test("restoring guided tabs reads the durable workspace without starting generation", () => {
