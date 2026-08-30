@@ -1920,10 +1920,11 @@
   border: 1px solid var(--practice-lab-border);
   border-left: 4px solid var(--interactive-accent);
   border-radius: var(--radius-m);
-  background: linear-gradient(
+  background-color: var(--background-primary);
+  background-image: linear-gradient(
     135deg,
     var(--practice-lab-accent-soft),
-    var(--background-primary) 72%
+    transparent 72%
   );
 }
 

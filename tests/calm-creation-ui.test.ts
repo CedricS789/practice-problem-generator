@@ -136,3 +136,14 @@ test("shared study additions have calm focus-visible and narrow-pane styles", ()
   assert.match(styles, /@container practice-lab \(max-width: 520px\)/u);
   assert.match(styles, /\.practice-lab-path-position\.is-compact \{[\s\S]*position: sticky/u);
 });
+
+test("the sticky Guided path navigator paints an opaque surface beneath its accent", () => {
+  const surface = styles.match(/\.practice-lab-path-position \{(?<body>[\s\S]*?)\n\}/u)?.groups?.body;
+  assert.ok(surface, "Missing Guided path navigator surface styles");
+  assert.match(surface, /background-color:\s*var\(--background-primary\)/u);
+  assert.match(
+    surface,
+    /background-image:\s*linear-gradient\([\s\S]*var\(--practice-lab-accent-soft\)[\s\S]*transparent 72%/u,
+  );
+  assert.doesNotMatch(surface, /background:\s*linear-gradient/u);
+});

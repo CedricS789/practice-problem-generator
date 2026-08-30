@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Fixed the sticky Guided path navigator on iPhone and iPad by painting its translucent accent over an opaque Obsidian theme surface, preventing question text from bleeding through the panel while scrolling or viewing expanded path details.
+
 ## 1.4.0
 
 - Redesigned creation, review, saved workspaces, and Guided study around progressive disclosure so the current task and next action stay visually dominant while engine settings, percentages, source galleries, payloads, activity, analytics, provenance, and data controls remain available on demand.
